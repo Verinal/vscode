@@ -45,6 +45,50 @@ body {
 	-webkit-user-select: none;
 }
 
+/* ==================== Global scrollbar styling (editor parity) ==================== */
+
+/* Cursor parity: every scrollable area in the workbench must render the
+   editor-style scrollbar — 14px vertical / 12px horizontal lane (same
+   defaults as the editor's verticalScrollbarSize/horizontalScrollbarSize),
+   transparent track, square semi-transparent themed slider, no arrow
+   buttons, no corner square. Without these rules any DOM pane that scrolls
+   natively (e.g. the vibeAI settings editor's sidebar and content) falls
+   back to the OS classic scrollbar with arrow buttons. Styling any
+   ::-webkit-scrollbar pseudo-element also makes Chromium drop the native
+   arrow buttons. Monaco scrollable elements draw their own slider divs and
+   are unaffected by these rules. */
+
+::-webkit-scrollbar {
+	width: 14px;
+	height: 12px;
+}
+
+::-webkit-scrollbar-track {
+	background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+	background: var(--vscode-scrollbarSlider-background, rgba(121, 121, 121, 0.4));
+}
+
+::-webkit-scrollbar-thumb:hover {
+	background: var(--vscode-scrollbarSlider-hoverBackground, rgba(100, 100, 100, 0.7));
+}
+
+::-webkit-scrollbar-thumb:active {
+	background: var(--vscode-scrollbarSlider-activeBackground, rgba(191, 191, 191, 0.4));
+}
+
+::-webkit-scrollbar-button {
+	display: none;
+	width: 0;
+	height: 0;
+}
+
+::-webkit-scrollbar-corner {
+	background: transparent;
+}
+
 .monaco-workbench {
 	font-size: 13px;
 	line-height: 1.4em;

@@ -2386,10 +2386,16 @@ configurationRegistry.registerConfiguration({
 			default: true,
 			markdownDescription: nls.localize('chat.tools.autoExpandFailures', "When enabled, terminal tool failures are automatically expanded in the chat UI to show error details."),
 		},
+		// Fork (VibeAI parity): shipped as `true` — the built-in GitHub
+		// Copilot UI (chat view, commands, title bar entries) is hidden out
+		// of the box and the VibeAI chat view (contrib/vibeAI) replaces it
+		// as the default container of the auxiliary bar. When `true`, the
+		// chat entitlement service forces the `chatSetupHidden` context key
+		// (see withConfiguration), which hides the chat view.
 		[ChatAIDisabledSettingId]: {
 			type: 'boolean',
 			description: nls.localize('chat.disableAIFeatures', "Disable and hide built-in AI features provided by GitHub Copilot, including chat and inline suggestions."),
-			default: false,
+			default: true,
 			scope: ConfigurationScope.WINDOW,
 		},
 		[ChatConfiguration.TitleBarSignInEnabled]: {

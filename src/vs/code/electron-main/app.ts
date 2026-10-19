@@ -115,6 +115,8 @@ import { INativeManagedSettingsService, IFileManagedSettingsService } from '../.
 import { NativeManagedSettingsChannel } from '../../platform/policy/common/nativeManagedSettingsIpc.js';
 import { FileManagedSettingsChannel } from '../../platform/policy/common/fileManagedSettingsIpc.js';
 import { PolicyChannel } from '../../platform/policy/common/policyIpc.js';
+import { IVibeAIService } from '../../platform/vibeAI/common/vibeAI.js';
+import { VibeAIChannel } from '../../platform/vibeAI/common/vibeAIChannel.js';
 import { IUserDataProfilesMainService } from '../../platform/userDataProfile/electron-main/userDataProfile.js';
 import { IExtensionsProfileScannerService } from '../../platform/extensionManagement/common/extensionsProfileScannerService.js';
 import { IExtensionsScannerService } from '../../platform/extensionManagement/common/extensionsScannerService.js';
@@ -1391,6 +1393,10 @@ export class CodeApplication extends Disposable {
 		const policyChannel = disposables.add(new PolicyChannel(accessor.get(IPolicyService)));
 		mainProcessElectronServer.registerChannel('policy', policyChannel);
 		sharedProcessClient.then(client => client.registerChannel('policy', policyChannel));
+
+		// VibeCoding AI backend (main process)
+		const vibeAIChannel = disposables.add(new VibeAIChannel(accessor.get(IVibeAIService)));
+		mainProcessElectronServer.registerChannel('vibeAI', vibeAIChannel);
 
 		const nativeManagedSettingsChannel = disposables.add(new NativeManagedSettingsChannel(accessor.get(INativeManagedSettingsService)));
 		mainProcessElectronServer.registerChannel('nativeManagedSettings', nativeManagedSettingsChannel);

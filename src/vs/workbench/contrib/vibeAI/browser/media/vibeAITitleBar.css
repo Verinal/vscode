@@ -1,0 +1,42 @@
+/*---------------------------------------------------------------------------------------------
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *--------------------------------------------------------------------------------------------*/
+
+/* ==================== VibeAI — Cursor-style title bar pill ==================== */
+
+.vibe-ai-titlebar-pill {
+	display: flex;
+	align-items: center;
+	gap: 4px;
+	padding: 0 12px;
+	margin: 0 6px;
+	border-radius: 6px;
+	background: #1589ff;
+	color: #ffffff;
+	font-size: 12px;
+	font-weight: 500;
+	cursor: pointer;
+	white-space: nowrap;
+	overflow: hidden;
+	height: 24px;
+	box-sizing: border-box;
+	user-select: none;
+}
+
+.vibe-ai-titlebar-pill:hover {
+	background: #3d9dff;
+	outline: 1px solid var(--vscode-contrastBorder, transparent);
+	outline-offset: -1px;
+}
+
+.vibe-ai-titlebar-pill-label {
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+.vibe-ai-titlebar-pill-arrow {
+	font-size: 11px;
+	flex-shrink: 0;
+	opacity: 0.9;
+}

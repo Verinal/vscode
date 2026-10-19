@@ -201,23 +201,26 @@ suite('Workbench parts', () => {
 		layoutService.modernUICompact = true;
 		const compactModernUILayout = part.testLayoutContents(100, 200);
 
+		// A header area (e.g. the composite bar moved to the top of the part)
+		// takes over the title role: the title strip is collapsed and its
+		// height is freed for the content.
 		assert.deepStrictEqual({ classicLayout, modernUILayout, compactModernUILayout }, {
 			classicLayout: {
 				headerSize: new Dimension(100, 35),
-				titleSize: new Dimension(100, 35),
-				contentSize: new Dimension(100, 95),
+				titleSize: Dimension.None,
+				contentSize: new Dimension(100, 130),
 				footerSize: new Dimension(100, 35),
 			},
 			modernUILayout: {
 				headerSize: new Dimension(100, 32),
-				titleSize: new Dimension(100, 32),
-				contentSize: new Dimension(100, 104),
+				titleSize: Dimension.None,
+				contentSize: new Dimension(100, 136),
 				footerSize: new Dimension(100, 32),
 			},
 			compactModernUILayout: {
 				headerSize: new Dimension(100, 32),
-				titleSize: new Dimension(100, 32),
-				contentSize: new Dimension(100, 104),
+				titleSize: Dimension.None,
+				contentSize: new Dimension(100, 136),
 				footerSize: new Dimension(100, 32),
 			},
 		});

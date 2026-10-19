@@ -31,7 +31,7 @@ export type MarkdownActionHandler = (linkContent: string, mdStr: IMarkdownString
  * Options for the rendering of markdown with {@link renderMarkdown}.
  */
 export interface MarkdownRenderOptions {
-	readonly codeBlockRenderer?: (languageId: string, value: string) => Promise<HTMLElement>;
+	readonly codeBlockRenderer?: (languageId: string, value: string, rawInfo?: string) => Promise<HTMLElement>;
 	readonly codeBlockRendererSync?: (languageId: string, value: string, raw?: string) => HTMLElement;
 	readonly asyncRenderCallback?: () => void;
 
@@ -511,7 +511,9 @@ function createMarkdownRenderer(marked: marked.Marked, options: MarkdownRenderOp
 	} else if (options.codeBlockRenderer) {
 		renderer.code = ({ text, lang }: marked.Tokens.Code) => {
 			const id = defaultGenerator.nextId();
-			const value = options.codeBlockRenderer!(postProcessCodeBlockLanguageId(lang), text);
+			// The raw fence info string (e.g. "tsx src/app.tsx") rides along so
+			// code block renderers can show a file name as the title.
+			const value = options.codeBlockRenderer!(postProcessCodeBlockLanguageId(lang), text, lang);
 			codeBlocks.push(value.then(element => [id, element]));
 			return `<div class="code" data-code="${id}">${escape(text)}</div>`;
 		};

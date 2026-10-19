@@ -81,3 +81,29 @@ export class AgentHostClientProxyChannel implements IServerChannel {
 		throw new Error(`Unknown command '${command}' on AgentHostClientProxyChannel`);
 	}
 }
+
+/**
+ * Null server-side channel for the reverse proxy-resolution bridge on
+ * connections that cannot serve it (e.g. the main process's management
+ * connection to the agent host, which has no renderer `IRequestService`).
+ * Answers with the most benign result — `DIRECT` for proxy resolution,
+ * no credentials for auth lookups — so the agent host's per-connection
+ * reverse-bridge setup never leaves requests pending until the IPC timeout.
+ */
+export class NullAgentHostClientProxyChannel implements IServerChannel {
+
+	listen<T>(_ctx: unknown, _event: string): Event<T> {
+		return Event.None;
+	}
+
+	async call<T>(_ctx: unknown, command: string, _arg?: unknown): Promise<T> {
+		switch (command) {
+			case 'resolveProxy':
+				return 'DIRECT' as T;
+			case 'lookupAuthorization':
+			case 'lookupKerberosAuthorization':
+				return undefined as T;
+		}
+		throw new Error(`Unknown command '${command}' on NullAgentHostClientProxyChannel`);
+	}
+}

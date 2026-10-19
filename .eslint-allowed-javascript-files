@@ -91,6 +91,7 @@ extensions/vscode-api-tests/testWorkspace/far.js
 extensions/vscode-api-tests/testWorkspace/worker.js
 extensions/vscode-colorize-tests/test/colorize-fixtures/test.js
 extensions/vscode-colorize-tests/test/colorize-fixtures/test6916.js
+extensions/vibe-byok/extension.js
 extensions/yaml/build/update-grammar.js
 gulpfile.mjs
 scripts/chat-simulation/common/perf-scenarios.js

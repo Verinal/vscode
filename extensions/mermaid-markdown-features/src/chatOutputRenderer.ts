@@ -45,6 +45,11 @@ class MermaidChatOutputRenderer implements vscode.ChatOutputRenderer {
 		disposables.push(webview.onDidReceiveMessage(message => {
 			if (message.type === 'openInEditor') {
 				void vscode.commands.executeCommand('_mermaid-markdown.openInEditor', { mermaidWebviewId: webviewId });
+			} else if (message.type === 'webviewError') {
+				// The page's failsafe bootstrap / renderer module surfaced a
+				// load or runtime failure — log it where the Extension Host
+				// output channel shows it.
+				console.error(`[mermaid-markdown-features] chat diagram webview failed: ${message.message}`);
 			}
 		}));
 
@@ -87,6 +92,15 @@ class MermaidChatOutputRenderer implements vscode.ChatOutputRenderer {
 					.mermaid.rendered {
 						visibility: visible;
 					}
+					.mermaid-failsafe-error {
+						margin: 0 0 6px;
+						padding: 6px 10px;
+						font-family: var(--vscode-editor-font-family, monospace);
+						font-size: 12px;
+						color: var(--vscode-errorForeground, #f66);
+						white-space: pre-wrap;
+						word-break: break-all;
+					}
 					.open-in-editor-btn {
 						position: absolute;
 						top: 8px;
@@ -114,6 +128,42 @@ class MermaidChatOutputRenderer implements vscode.ChatOutputRenderer {
 						background: var(--vscode-toolbar-hoverBackground);
 					}
 				</style>
+
+				<script nonce="${nonce}">
+					// Failsafe: the renderer module only reveals the diagram once mermaid
+					// has rendered it — any load/runtime failure below that point used to
+					// leave an invisible, empty-looking diagram with no error at all.
+					// Surface every failure instead. The capture phase also catches
+					// module/resource load failures, whose error events do not bubble.
+					(function () {
+						var shown = false;
+						var reveal = function (kind, message) {
+							if (shown) { return; }
+							shown = true;
+							try {
+								var pre = document.querySelector('.mermaid');
+								if (pre) { pre.style.visibility = 'visible'; }
+								var note = document.createElement('div');
+								note.className = 'mermaid-failsafe-error';
+								note.textContent = 'Mermaid webview ' + kind + ': ' + message;
+								if (pre && pre.parentNode) { pre.parentNode.insertBefore(note, pre); }
+								else if (document.body) { document.body.appendChild(note); }
+							} catch (e) { /* nothing more we can do */ }
+						};
+						window.__showMermaidError = reveal;
+						window.addEventListener('error', function (event) {
+							var target = event && event.target;
+							if (target && (target.tagName === 'SCRIPT' || target.tagName === 'LINK')) {
+								reveal('resource load failed', target.getAttribute('src') || target.getAttribute('href') || 'unknown resource');
+								return;
+							}
+							reveal('script error', (event && event.message) || 'unknown error');
+						}, true);
+						window.addEventListener('unhandledrejection', function (event) {
+							reveal('unhandled rejection', String((event && event.reason) || 'unknown rejection'));
+						});
+					})();
+				</script>
 			</head>
 
 			<body data-vscode-context='${JSON.stringify({ preventDefaultContextMenuItems: true, mermaidWebviewId: webviewId })}' data-vscode-mermaid-webview-id="${webviewId}">

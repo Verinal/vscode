@@ -26,10 +26,15 @@ export interface IMarkdownRendererExtraOptions {
 	 * The context in which the markdown is being rendered.
 	 */
 	readonly context?: unknown;
+	/**
+	 * Render a header above each code block showing the file name or language
+	 * together with a hover-revealed copy button.
+	 */
+	readonly codeBlockHeader?: boolean;
 }
 
 export interface IMarkdownCodeBlockRenderer {
-	renderCodeBlock(languageAlias: string | undefined, value: string, options: IMarkdownRendererExtraOptions): Promise<HTMLElement>;
+	renderCodeBlock(languageAlias: string | undefined, value: string, options: IMarkdownRendererExtraOptions, rawInfo?: string): Promise<HTMLElement>;
 }
 
 
@@ -71,8 +76,8 @@ export class MarkdownRendererService implements IMarkdownRendererService {
 		}
 
 		if (!resolvedOptions.codeBlockRenderer) {
-			resolvedOptions.codeBlockRenderer = (alias, value) => {
-				return this._defaultCodeBlockRenderer?.renderCodeBlock(alias, value, resolvedOptions ?? {}) ?? Promise.resolve(document.createElement('span'));
+			resolvedOptions.codeBlockRenderer = (alias, value, info) => {
+				return this._defaultCodeBlockRenderer?.renderCodeBlock(alias, value, resolvedOptions ?? {}, info) ?? Promise.resolve(document.createElement('span'));
 			};
 		}
 

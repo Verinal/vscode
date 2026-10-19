@@ -33,6 +33,28 @@ perf.mark('code/didLoadMainBundle');
 // Enable portable support
 const portable = configurePortable(product);
 
+// Dev-build identity (Cursor-style single entry point): launching the repo
+// checkout directly - double-clicking the Electron binary or a shortcut to
+// it - must behave exactly like `scripts/code.bat`: same environment, same
+// profile. Packaged builds are unaffected.
+// NOTE: `app.isPackaged` cannot gate this: the Electron binary is renamed
+// (`Cursor Fork.exe`), which Electron itself treats as a packaged app, so the
+// old check never fired on direct launches. Without `VSCODE_DEV` the main
+// process reports `isBuilt: true`, which disables `cssDevService` so the
+// renderer receives no CSS import map and the workbench ESM graph fails on
+// its CSS imports - leaving the window stuck on the splash forever. Detect
+// the dev checkout via the launched app path instead: a packaged app never
+// ships `src/vs` next to `out/vs`.
+if (!process.env['VSCODE_DEV']) {
+	const appPath = app.getAppPath();
+	const isDevCheckout = fs.existsSync(path.join(appPath, 'src', 'vs'))
+		&& fs.existsSync(path.join(appPath, 'out', 'vs'));
+	if (isDevCheckout) {
+		process.env['VSCODE_DEV'] = '1';
+		process.env['NODE_ENV'] = process.env['NODE_ENV'] ?? 'development';
+	}
+}
+
 const args = parseCLIArgs();
 // Configure static command line arguments
 perf.mark('code/willConfigureCommandlineSwitches');

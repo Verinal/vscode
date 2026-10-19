@@ -1,6 +1,7 @@
 .DS_Store
 .cache
 npm-debug.log
+*.log
 Thumbs.db
 # No trailing slash, so a symlinked node_modules is ignored too
 node_modules

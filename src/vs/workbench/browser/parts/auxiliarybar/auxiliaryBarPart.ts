@@ -50,8 +50,11 @@ export class AuxiliaryBarPart extends AbstractPaneCompositePart {
 	static readonly placeholdeViewContainersKey = 'workbench.auxiliarybar.placeholderPanels';
 	static readonly viewContainersWorkspaceStateKey = 'workbench.auxiliarybar.viewContainersWorkspaceState';
 
-	// Use the side bar dimensions
-	override readonly minimumWidth: number = 170;
+	// Phase 72: raised from 170 (then 250) — the VibeAI chat's input box
+	// floors at 220px (min-width) + 24px margins, and the model name needs
+	// ~180px of toolbar room to show in full; 320 keeps the model name
+	// untruncated at the narrowest pane instead of squeezing it to "z…".
+	override readonly minimumWidth: number = 320;
 	override readonly maximumWidth: number = Number.POSITIVE_INFINITY;
 	override readonly minimumHeight: number = 0;
 	override readonly maximumHeight: number = Number.POSITIVE_INFINITY;
@@ -101,7 +104,12 @@ export class AuxiliaryBarPart extends AbstractPaneCompositePart {
 		super(
 			Parts.AUXILIARYBAR_PART,
 			{
-				hasTitle: true,
+				// Cursor parity: the VibeAI chat owns the auxiliary bar and renders
+				// its own in-pane tab bar ("New Agent"). Do not create the part title
+				// strip (`.composite.title`): with `hasTitle: false` the PartLayout
+				// hands the reclaimed 35px to the content instead of leaving an
+				// empty strip (with the container icon) above the chat.
+				hasTitle: false,
 				trailingSeparator: true,
 				borderWidth: () => (this.getColor(SIDE_BAR_BORDER) || this.getColor(contrastBorder)) ? 1 : 0,
 			},
@@ -273,26 +281,11 @@ export class AuxiliaryBarPart extends AbstractPaneCompositePart {
 	}
 
 	protected shouldShowCompositeBar(): boolean {
-		if (this.configuration.position === ActivityBarPosition.HIDDEN) {
-			return false;
-		}
-
-		// Check if auto-hide is enabled and there's only one visible view container
-		// while the activity bar is configured to be top or bottom.
-		if (this.configuration.position === ActivityBarPosition.TOP || this.configuration.position === ActivityBarPosition.BOTTOM) {
-			const autoHide = this.configurationService.getValue<boolean>(LayoutSettings.ACTIVITY_BAR_AUTO_HIDE);
-			if (autoHide) {
-				// Use visible composite count from the composite bar if available (considers pinned state),
-				// otherwise fall back to the tracker's count (based on active view descriptors).
-				// Note: We access paneCompositeBar directly to avoid circular calls with getVisiblePaneCompositeIds()
-				const visibleCount = this.visibleViewContainersTracker.visibleCount;
-				if (visibleCount <= 1) {
-					return false;
-				}
-			}
-		}
-
-		return true;
+		// Cursor parity: the auxiliary bar is dedicated to the VibeAI chat, whose
+		// in-pane tab bar replaces the container icon strip. Never render the
+		// strip: with `hasTitle: false` there is no title area to host it, and
+		// creating the composite bar in the missing title container would throw.
+		return false;
 	}
 
 	protected getCompositeBarPosition(): CompositeBarPosition {

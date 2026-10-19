@@ -248,7 +248,7 @@ abstract class AbstractGlobalActivityActionViewItem extends CompositeBarActionVi
 		return this.contextMenuActionsProvider();
 	}
 
-	private async run(): Promise<void> {
+	protected async run(): Promise<void> {
 		const disposables = new DisposableStore();
 		const menu = disposables.add(this.menuService.createMenu(this.menuId, this.contextKeyService));
 		const actions = await this.resolveMainMenuActions(menu, disposables);
@@ -829,7 +829,8 @@ export class SimpleGlobalActivityActionViewItem extends GlobalActivityActionView
 		@IKeybindingService keybindingService: IKeybindingService,
 		@IInstantiationService instantiationService: IInstantiationService,
 		@IActivityService activityService: IActivityService,
-		@IStorageService storageService: IStorageService
+		@IStorageService storageService: IStorageService,
+		@ICommandService private readonly commandService: ICommandService
 	) {
 		super(() => simpleActivityContextMenuActions(storageService, false),
 			{
@@ -841,6 +842,14 @@ export class SimpleGlobalActivityActionViewItem extends GlobalActivityActionView
 				hoverOptions,
 				compact: true,
 			}, () => undefined, userDataProfileService, themeService, hoverService, menuService, contextMenuService, contextKeyService, configurationService, environmentService, keybindingService, instantiationService, activityService);
+	}
+
+	/**
+	 * Cursor parity: the title-bar gear opens the VibeAI settings editor
+	 * directly in the editor area — no dropdown menu.
+	 */
+	protected override async run(): Promise<void> {
+		await this.commandService.executeCommand('vibeAI.settings.open');
 	}
 }
 

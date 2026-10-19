@@ -21,6 +21,8 @@ import { ITelemetryService } from '../../telemetry/common/telemetry.js';
 import { NullTelemetryService } from '../../telemetry/common/telemetryUtils.js';
 import { UtilityProcess } from '../../utilityProcess/electron-main/utilityProcess.js';
 import { AgentHostStartError, IAgentHostConnection, IAgentHostShutdownRequest, IAgentHostStarter, IAgentHostStartRequest, isFatalAgentHostStartError, toFatalAgentHostStartError } from '../common/agent.js';
+import { AGENT_HOST_CLIENT_BYOK_LM_CHANNEL, NullAgentHostClientByokLmChannel } from '../common/agentHostClientByokLmChannel.js';
+import { AGENT_HOST_CLIENT_PROXY_CHANNEL, NullAgentHostClientProxyChannel } from '../common/agentHostClientProxyChannel.js';
 import { buildAgentHostTelemetryIdEnv, IAgentHostForwardedTelemetryIds } from '../common/agentHostTelemetryEnv.js';
 import { AgentHostLaunchKind, AgentHostLaunchKindEnvVar, telemetryLevelToAgentHostValue } from '../common/agentHostTelemetry.js';
 import { AgentHostClaudeAgentEnabledSettingId, AgentHostCodexAgentBinaryArgsSettingId, AgentHostCodexAgentEnabledSettingId, AgentHostCodexAgentSdkRootSettingId, AgentHostCodexAgentCodexHomeSettingId, AgentHostIpcChannels, AgentHostOTelCaptureContentSettingId, AgentHostOTelCaptureIdentitySettingId, AgentHostOTelDbSpanExporterEnabledSettingId, AgentHostOTelEnabledSettingId, AgentHostOTelExporterTypeSettingId, AgentHostOTelOtlpEndpointSettingId, AgentHostOTelOutfileSettingId, AgentHostOTelPolicyIpcChannel, AgentHostOTelPolicyState, AgentHostRestartIpcChannel, AgentHostWillRestartIpcChannel, buildAgentHostOTelEnv, buildAgentSdkEnv, IAgentHostManagementService, IAgentHostOTelSettings, readAgentHostOTelPolicySettings } from '../common/agentService.js';
@@ -193,6 +195,15 @@ export class ElectronAgentHostStarter extends Disposable implements IAgentHostSt
 
 			const port = utilityProcess.connect();
 			const client = new MessagePortClient(port, 'agentHost');
+			// The main process only consumes the management channel on this
+			// connection. Register null server channels for the reverse bridge
+			// names so the agent host's per-connection reverse-bridge setup
+			// (see agentHostMain's `registerConnection`) has something to talk
+			// to — without this, its requests to the reverse channels pend for
+			// the IPC timeout and then surface as "Unknown channel: …" errors
+			// in the main process log.
+			client.registerChannel(AGENT_HOST_CLIENT_PROXY_CHANNEL, new NullAgentHostClientProxyChannel());
+			client.registerChannel(AGENT_HOST_CLIENT_BYOK_LM_CHANNEL, new NullAgentHostClientByokLmChannel());
 			const managementService = ProxyChannel.toService<IAgentHostManagementService>(client.getChannel(AgentHostIpcChannels.Management));
 
 			const store = new DisposableStore();

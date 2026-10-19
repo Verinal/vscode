@@ -21,4 +21,21 @@ async function main() {
 		});
 	}
 }
-main();
+
+// Any module-level failure (mermaid init, theme resolution, diagram render)
+// used to leave the diagram invisible with no error — the failsafe bootstrap
+// in the page head reveals it and shows the message instead.
+main().catch(err => {
+	const message = err instanceof Error ? err.message : String(err);
+	const show = (window as { __showMermaidError?: (kind: string, message: string) => void }).__showMermaidError;
+	if (show) {
+		show('script error', message);
+	} else {
+		// Bootstrap missing — reveal the source directly so it is at least copyable.
+		const pre = document.querySelector<HTMLElement>('.mermaid');
+		if (pre) {
+			pre.style.visibility = 'visible';
+		}
+	}
+	vscode.postMessage({ type: 'webviewError', message });
+});

@@ -16,7 +16,6 @@ import { Position, Parts, PartOpensMaximizedOptions, IWorkbenchLayoutService, po
 import { isTemporaryWorkspace, IWorkspaceContextService, WorkbenchState } from '../../platform/workspace/common/workspace.js';
 import { IStorageService, StorageScope, StorageTarget } from '../../platform/storage/common/storage.js';
 import { IConfigurationChangeEvent, IConfigurationService, isConfigured } from '../../platform/configuration/common/configuration.js';
-import { ChatAIDisabledSettingId } from '../../platform/chat/common/chatSettings.js';
 import { ITitleService } from '../services/title/browser/titleService.js';
 import { ServicesAccessor } from '../../platform/instantiation/common/instantiation.js';
 import { StartupKind, ILifecycleService } from '../services/lifecycle/common/lifecycle.js';
@@ -3042,12 +3041,15 @@ class LayoutStateModel extends Disposable {
 				return true;
 			}
 
-			// New users: Show auxiliary bar even in empty workspaces,
-			// but not if the user explicitly hides it or AI features are disabled.
+			// New users: Show auxiliary bar even in empty workspaces.
+			// Fork (VibeAI parity): the upstream exception that skipped
+			// auto-opening when AI features are disabled was removed — in
+			// this fork the auxiliary bar hosts the VibeAI chat view (its
+			// default container), which should still open by default even
+			// though `chat.disableAIFeatures` ships as `true`.
 			if (
 				this.isNew[StorageScope.APPLICATION] &&
-				configuration.value !== 'hidden' &&
-				!this.configurationService.getValue<boolean>(ChatAIDisabledSettingId)
+				configuration.value !== 'hidden'
 			) {
 				return false;
 			}

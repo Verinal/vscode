@@ -43,10 +43,9 @@ export function getUserDataPath(cliArgs: NativeParsedArgs, productName: string):
 
 function doGetUserDataPath(cliArgs: NativeParsedArgs, productName: string): string {
 
-	// 0. Running out of sources has a fixed productName
-	if (process.env['VSCODE_DEV']) {
-		productName = 'code-oss-dev';
-	}
+	// Note: unlike upstream, dev builds (VSCODE_DEV) keep the product's real
+	// name for the default user-data dir - Cursor-style: exactly one profile
+	// identity, no matter how the editor was launched.
 
 	// 1. Support portable mode
 	const portablePath = process.env['VSCODE_PORTABLE'];

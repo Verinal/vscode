@@ -432,6 +432,9 @@ import './contrib/editSessions/browser/editSessions.contribution.js';
 // Remote Coding Agents
 import './contrib/remoteCodingAgents/browser/remoteCodingAgents.contribution.js';
 
+// VibeAI Chat (local VibeCoding backend)
+import './contrib/vibeAI/browser/vibeAI.contribution.js';
+
 // Code Actions
 import './contrib/codeActions/browser/codeActions.contribution.js';
 

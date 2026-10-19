@@ -46,4 +46,12 @@ initializeMermaidWebview(vscode, { defaultView: 'fit' }).then(panZoomHandler => 
 	for (const btn of [panModeBtn, zoomInBtn, zoomOutBtn, zoomResetBtn]) {
 		btn?.addEventListener('dblclick', stopClickForEditMode);
 	}
+}).catch(err => {
+	// 編輯器預覽頁同樣以 visibility: hidden 起始；初始化失敗（找不到 .mermaid、
+	// mermaid.initialize 拋錯等）不能無聲空白——直接顯示原始碼，至少可讀可複製。
+	console.error('[mermaid-markdown-features] diagram preview failed:', err);
+	const pre = document.querySelector<HTMLElement>('.mermaid');
+	if (pre) {
+		pre.style.visibility = 'visible';
+	}
 });

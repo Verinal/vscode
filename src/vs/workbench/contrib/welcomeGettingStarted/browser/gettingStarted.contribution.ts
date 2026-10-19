@@ -4,9 +4,9 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { localize, localize2 } from '../../../../nls.js';
-import { GettingStartedInputSerializer, GettingStartedPage, inWelcomeContext } from './gettingStarted.js';
+import { GettingStartedPage, inWelcomeContext } from './gettingStarted.js';
 import { Registry } from '../../../../platform/registry/common/platform.js';
-import { EditorExtensions, IEditorFactoryRegistry } from '../../../common/editor.js';
+import { EditorExtensions } from '../../../common/editor.js';
 import { MenuId, registerAction2, Action2 } from '../../../../platform/actions/common/actions.js';
 import { ServicesAccessor } from '../../../../platform/instantiation/common/instantiation.js';
 import { ContextKeyExpr, IContextKeyService, RawContextKey } from '../../../../platform/contextkey/common/contextkey.js';
@@ -113,7 +113,17 @@ registerAction2(class extends Action2 {
 	}
 });
 
-Registry.as<IEditorFactoryRegistry>(EditorExtensions.EditorFactory).registerEditorSerializer(GettingStartedInput.ID, GettingStartedInputSerializer);
+// Phase 84.5 (fork): the Welcome tab serializer is deliberately NOT
+// registered. The startup editor default is 'none' (Phase 84.1), but
+// windows that had the Welcome tab open under the old default saved it
+// into the workspace editor state, and every later launch restored it
+// from there (user report: the Welcome page kept coming back). The
+// editor-group restore deserializes stored editors through this
+// registry and silently DROPS entries without a serializer
+// (editorGroupModel), so unregistering makes the Welcome tab impossible
+// to save AND impossible to restore — stale state from old sessions is
+// dropped on the next launch. Opening it manually (Help > Welcome)
+// still works (the command + editor pane registration below).
 Registry.as<IEditorPaneRegistry>(EditorExtensions.EditorPane).registerEditorPane(
 	EditorPaneDescriptor.create(
 		GettingStartedPage,

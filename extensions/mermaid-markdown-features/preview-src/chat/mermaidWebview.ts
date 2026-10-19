@@ -338,7 +338,6 @@ export class PanZoomHandler {
 	public reset(): void {
 		this.scale = 1;
 		this.translateX = 0;
-		this.translateY = 0;
 		this.hasInteracted = false;
 		this.applyTransform(); // Apply scale first so content size is correct
 
@@ -394,6 +393,38 @@ interface PersistedState {
 }
 
 /**
+ * mermaid.run() 在渲染卡死時 promise 可能永不 settle——圖會永遠停在
+ * visibility: hidden（空白卡且無任何錯誤）。逾時收斂成 rejection，讓呼叫端
+ * 走與渲染失敗相同的錯誤呈現。泛型參數是為了接受 mermaid.run 的
+ * Promise<RenderResult[]> 回傳值，結果本身不需要。
+ */
+function withRenderTimeout<T>(render: Promise<T>, timeoutMs = 15000): Promise<void> {
+	return new Promise<void>((resolve, reject) => {
+		const timer = setTimeout(
+			() => reject(new Error(`Mermaid rendering timed out after ${timeoutMs}ms`)),
+			timeoutMs
+		);
+		render.then(
+			() => { clearTimeout(timer); resolve(); },
+			err => { clearTimeout(timer); reject(err); }
+		);
+	});
+}
+
+/**
+ * 渲染失敗的統一呈現：顯示錯誤訊息、標記 vscode context、隱藏縮放控制，
+ * 並 reveal 圖卡——任何失敗都不該停在 visibility: hidden 的空白卡。
+ */
+function showRenderError(diagram: HTMLElement, err: unknown): void {
+	diagram.replaceChildren(createMermaidErrorElement(err));
+	markVsCodeContextAsError(document.body);
+	for (const el of document.querySelectorAll<HTMLElement>('.zoom-controls')) {
+		el.style.display = 'none';
+	}
+	diagram.classList.add('rendered');
+}
+
+/**
  * Re-renders the mermaid diagram when theme changes
  */
 async function rerenderMermaidDiagram(
@@ -405,19 +436,28 @@ async function rerenderMermaidDiagram(
 	delete diagramElement.dataset.processed;
 
 	mermaid.initialize(buildMermaidConfig(loadExtensionConfig(), themeTracker));
-	await mermaid.run({
+	await withRenderTimeout(mermaid.run({
 		nodes: [diagramElement]
-	});
+	}));
 }
 
 export async function initializeMermaidWebview(vscode: VsCodeApi, options?: PanZoomOptions): Promise<PanZoomHandler | undefined> {
 	const diagram = document.querySelector<HTMLElement>('.mermaid');
 	if (!diagram) {
-		return;
+		// 沒有 .mermaid 代表頁面結構與預期不符。舊行為是直接 return，圖卡會
+		// 永遠停在 visibility: hidden——空白卡且無任何錯誤。必須拋出，讓進入點
+		// 的 catch 顯示錯誤並回報 webviewError。
+		throw new Error('Mermaid webview initialized without a .mermaid element');
 	}
 
 	// Capture diagram state
 	const diagramText = diagram.textContent ?? '';
+	if (!diagramText.trim()) {
+		// 空來源：mermaid.run 對空節點既不輸出也不報錯，圖會永遠隱形。
+		// 以錯誤呈現收斂，至少讓使用者看到原因而不是空白卡。
+		showRenderError(diagram, new Error('Mermaid diagram source is empty'));
+		return;
+	}
 	const themeTracker = new VsCodeMermaidThemeTracker();
 	const state: LocalState = {
 		mermaidSource: diagramText,
@@ -447,14 +487,11 @@ export async function initializeMermaidWebview(vscode: VsCodeApi, options?: PanZ
 	const config: MermaidConfig = buildMermaidConfig(loadExtensionConfig(), themeTracker);
 	mermaid.initialize(config);
 	try {
-		await mermaid.run({ nodes: [diagram] });
+		// mermaid.run 卡死時 promise 永不 settle，圖會永遠停在 visibility: hidden；
+		// 逾時收斂成錯誤呈現，不再無聲空白。
+		await withRenderTimeout(mermaid.run({ nodes: [diagram] }));
 	} catch (err) {
-		diagram.replaceChildren(createMermaidErrorElement(err));
-		markVsCodeContextAsError(document.body);
-		for (const el of document.querySelectorAll<HTMLElement>('.zoom-controls')) {
-			el.style.display = 'none';
-		}
-		diagram.classList.add('rendered');
+		showRenderError(diagram, err);
 		return;
 	}
 
@@ -481,7 +518,10 @@ export async function initializeMermaidWebview(vscode: VsCodeApi, options?: PanZ
 		if (!(diagramNode instanceof HTMLElement)) {
 			return;
 		}
-		rerenderMermaidDiagram(diagramNode, state.mermaidSource, themeTracker);
+		// 主題切換的重繪失敗不能變成未處理的 rejection——沿用渲染失敗的錯誤呈現。
+		rerenderMermaidDiagram(diagramNode, state.mermaidSource, themeTracker).catch(err => {
+			showRenderError(diagramNode, err);
+		});
 	});
 	themeTracker.observeDomChanges();
 

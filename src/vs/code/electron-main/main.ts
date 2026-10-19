@@ -64,6 +64,8 @@ import { IUserDataProfilesMainService, UserDataProfilesMainService } from '../..
 import { isInnoSetupInstall } from '../../platform/update/electron-main/win32UpdateType.js';
 import { IPolicyService, NullPolicyService } from '../../platform/policy/common/policy.js';
 import { NativePolicyService } from '../../platform/policy/node/nativePolicyService.js';
+import { IVibeAIService } from '../../platform/vibeAI/common/vibeAI.js';
+import { VibeAIService } from '../../platform/vibeAI/node/vibeAIService.js';
 import { FilePolicyService } from '../../platform/policy/common/filePolicyService.js';
 import { MultiplexPolicyService } from '../../platform/policy/common/multiplexPolicyService.js';
 import { GITHUB_COPILOT_MACOS_BUNDLE_ID, GITHUB_COPILOT_WIN32_POLICY_NAME, GITHUB_COPILOT_WIN32_REGISTRY_PATH, INativeManagedSettingsService, IFileManagedSettingsService, MANAGED_SETTINGS_FILE_NAME, MANAGED_SETTINGS_LINUX_FILE_PATH, MANAGED_SETTINGS_MACOS_FILE_PATH, MANAGED_SETTINGS_WINDOWS_DIR, NullNativeManagedSettingsService, NullFileManagedSettingsService } from '../../platform/policy/common/copilotManagedSettings.js';
@@ -270,6 +272,9 @@ class CodeMain {
 			policyService = new NullPolicyService();
 		}
 		services.set(IPolicyService, policyService);
+
+		// VibeCoding AI backend service (Phase 1)
+		services.set(IVibeAIService, disposables.add(new VibeAIService(productService, logService)));
 
 		// Configuration
 		const configurationService = new ConfigurationService(userDataProfilesMainService.defaultProfile.settingsResource, fileService, policyService, logService);

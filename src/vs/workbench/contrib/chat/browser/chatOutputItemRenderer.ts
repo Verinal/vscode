@@ -50,6 +50,18 @@ export interface IChatOutputRendererService {
 
 	hasCodeBlockRenderer(languageIdentifier: string): boolean;
 
+	/**
+	 * Resolves whether a code block renderer for the language identifier is
+	 * available, waiting for extension registration and activation first.
+	 * Mirrors `renderCodeBlock`'s renderer lookup (the two must stay in
+	 * sync) but only reports availability — callers use it to keep fenced
+	 * languages from silently degrading to a plain code block when a render
+	 * (e.g. a history restore) races extension activation. Resolves `false`
+	 * when no contributing extension is present at all, so the caller's
+	 * fallback still applies.
+	 */
+	whenCodeBlockRendererReady(languageIdentifier: string): Promise<boolean>;
+
 	renderOutputPart(mime: string, data: Uint8Array, parent: HTMLElement, webviewOptions: RenderOutputPartWebviewOptions, token: CancellationToken): Promise<RenderedOutputPart>;
 
 	renderCodeBlock(languageIdentifier: string, data: Uint8Array, parent: HTMLElement, webviewOptions: RenderCodeBlockWebviewOptions, token: CancellationToken): Promise<RenderedOutputPart>;
@@ -118,6 +130,31 @@ export class ChatOutputRendererService extends Disposable implements IChatOutput
 
 	hasCodeBlockRenderer(languageIdentifier: string): boolean {
 		return Array.from(this._contributions.values()).some(value => value.codeBlockLanguageIdentifiers.some(identifier => equalsIgnoreCase(identifier, languageIdentifier)));
+	}
+
+	/**
+	 * Mirrors `getRenderer`'s availability flow (await extension
+	 * registration, activate the contributing extension, check the
+	 * registry) but only reports whether a renderer ended up registered.
+	 * The synchronous `hasCodeBlockRenderer` reads the contributions map
+	 * only — a render that runs before the extension point handler
+	 * processed the contributions (history restore racing activation) saw
+	 * `false` there and degraded the fence to a plain code block. Both
+	 * awaits always settle (registration completes at startup; activation
+	 * resolves once the attempt finished, even on error), so this never
+	 * hangs.
+	 */
+	async whenCodeBlockRendererReady(languageIdentifier: string): Promise<boolean> {
+		await this._extensionService.whenInstalledExtensionsRegistered();
+		for (const [id, value] of this._contributions) {
+			if (value.codeBlockLanguageIdentifiers.some(identifier => equalsIgnoreCase(identifier, languageIdentifier))) {
+				await this._extensionService.activateByEvent(`onChatOutputRenderer:${id}`);
+				if (this._renderers.has(id)) {
+					return true;
+				}
+			}
+		}
+		return false;
 	}
 
 	async renderOutputPart(mime: string, data: Uint8Array, parent: HTMLElement, webviewOptions: RenderOutputPartWebviewOptions, token: CancellationToken): Promise<RenderedOutputPart> {

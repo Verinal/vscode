@@ -7,7 +7,7 @@ import './media/part.css';
 import './media/floatingPanels.css';
 import { Component } from '../common/component.js';
 import { IThemeService, IColorTheme } from '../../platform/theme/common/themeService.js';
-import { Dimension, size, IDimension, getActiveDocument, prepend, IDomPosition } from '../../base/browser/dom.js';
+import { Dimension, size, IDimension, getActiveDocument, prepend, IDomPosition, hide, show } from '../../base/browser/dom.js';
 import { IStorageService } from '../../platform/storage/common/storage.js';
 import { ISerializableView, IViewSize } from '../../base/browser/ui/grid/grid.js';
 import { Event, Emitter } from '../../base/common/event.js';
@@ -121,6 +121,9 @@ export abstract class Part<MementoType extends object = object> extends Componen
 
 		this.headerArea = headerContainer;
 		this.partLayout?.setHeaderVisibility(true);
+		// A header area takes over the title role (e.g. the composite bar moved
+		// to the top of the part): hide the title strip from the DOM.
+		hide(this.titleArea);
 		this.relayout();
 	}
 
@@ -147,6 +150,9 @@ export abstract class Part<MementoType extends object = object> extends Componen
 			this.headerArea.remove();
 			this.headerArea = undefined;
 			this.partLayout?.setHeaderVisibility(false);
+			if (this.titleArea) {
+				show(this.titleArea);
+			}
 			this.relayout();
 		}
 	}
@@ -232,8 +238,11 @@ class PartLayout {
 
 	layout(width: number, height: number): ILayoutContentResult {
 		// Title Size: Width (Fill), Height (Variable).
+		// A header area takes over the title role (e.g. the composite bar moved
+		// to the top of the part), so the title strip is collapsed to free its
+		// height for the content.
 		let titleSize: Dimension;
-		if (this.options.hasTitle) {
+		if (this.options.hasTitle && !this.headerVisible) {
 			const titleHeight = this.layoutService.isFloatingPanelsEnabled() ? PartLayout.AREA_HEIGHT_MODERN_UI : PartLayout.TITLE_HEIGHT;
 			titleSize = new Dimension(width, Math.min(height, titleHeight));
 		} else {

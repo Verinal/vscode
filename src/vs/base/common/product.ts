@@ -144,6 +144,11 @@ export interface IProductConfiguration {
 		assignmentContextTelemetryPropertyName: string;
 	};
 
+	readonly vibeAI?: {
+		readonly backendUrl?: string;
+		readonly backendRoot?: string;
+	};
+
 	readonly extensionsGallery?: {
 		readonly serviceUrl: string;
 		readonly controlUrl: string;

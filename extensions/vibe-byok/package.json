@@ -1,0 +1,30 @@
+{
+	"name": "vibe-byok",
+	"displayName": "Vibe BYOK",
+	"description": "Registers the VibeCoding backend's LLM models as BYOK language models for the agent host and chat.",
+	"version": "1.0.0",
+	"publisher": "vibe",
+	"license": "MIT",
+	"engines": {
+		"vscode": "^1.142.0"
+	},
+	"categories": [
+		"Other"
+	],
+	"enabledApiProposals": [
+		"chatProvider",
+		"languageModelThinkingPart"
+	],
+	"activationEvents": [
+		"onStartupFinished"
+	],
+	"main": "./extension.js",
+	"contributes": {
+		"languageModelChatProviders": [
+			{
+				"vendor": "vibe",
+				"displayName": "VibeCoding (BYOK)"
+			}
+		]
+	}
+}

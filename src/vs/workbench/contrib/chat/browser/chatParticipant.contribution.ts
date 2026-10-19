@@ -47,7 +47,12 @@ const chatViewContainer: ViewContainer = Registry.as<IViewContainersRegistry>(Vi
 	storageId: ChatViewContainerId,
 	hideIfEmpty: true,
 	order: 1,
-}, ViewContainerLocation.AuxiliaryBar, { isDefault: true, doNotRegisterOpenCommand: true });
+	// Fork (VibeAI parity): `isDefault` is intentionally omitted — the VibeAI
+	// chat container (contrib/vibeAI) becomes the default container of the
+	// auxiliary bar, replacing the built-in chat view's slot. The built-in
+	// chat view is hidden via `chat.disableAIFeatures` (defaults to `true`
+	// in this fork) together with this container's `hideIfEmpty`.
+}, ViewContainerLocation.AuxiliaryBar, { doNotRegisterOpenCommand: true });
 
 const chatViewDescriptor: IViewDescriptor = {
 	id: ChatViewId,
@@ -70,17 +75,26 @@ const chatViewDescriptor: IViewDescriptor = {
 		order: 1
 	},
 	ctorDescriptor: new SyncDescriptor(ChatViewPane),
-	when: ContextKeyExpr.and(
-		ChatContextKeys.accountPolicyGateActive.negate(),
-		ContextKeyExpr.or(
-			ContextKeyExpr.and(
-				ChatContextKeys.Setup.hidden.negate(),
-				ChatContextKeys.Setup.disabledInWorkspace.negate(),
-			),
-			ChatContextKeys.panelParticipantRegistered,
-			ChatContextKeys.extensionInvalid
-		)
-	)
+	// Fork (VibeAI): the built-in Chat view is fully removed from the UI —
+	// the VibeAI chat (contrib/vibeAI) is the only chat in the auxiliary bar.
+	// Upstream's `when` let the view show even without a working Copilot
+	// extension through the `ChatContextKeys.extensionInvalid` /
+	// `panelParticipantRegistered` OR-branches, which leaked a "Chat" tab
+	// next to the VibeAI tab. Forcing the `when` to false keeps the view
+	// (and its hideIfEmpty container) hidden for good, regardless of
+	// extension state or `chat.disableAIFeatures`.
+	// when: ContextKeyExpr.and(
+	// 	ChatContextKeys.accountPolicyGateActive.negate(),
+	// 	ContextKeyExpr.or(
+	// 		ContextKeyExpr.and(
+	// 			ChatContextKeys.Setup.hidden.negate(),
+	// 			ChatContextKeys.Setup.disabledInWorkspace.negate(),
+	// 		),
+	// 		ChatContextKeys.panelParticipantRegistered,
+	// 		ChatContextKeys.extensionInvalid
+	// 	)
+	// )
+	when: ContextKeyExpr.false(),
 };
 Registry.as<IViewsRegistry>(ViewExtensions.ViewsRegistry).registerViews([chatViewDescriptor], chatViewContainer);
 

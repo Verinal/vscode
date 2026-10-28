@@ -22,6 +22,7 @@ const $ = DOM.$;
 const TOOL_LABELS: Record<string, string> = {
 	read_file: localize('vibeAIChat.tool.read_file', "Read file"),
 	write_file: localize('vibeAIChat.tool.write_file', "Write file"),
+	edit_file: localize('vibeAIChat.tool.edit_file', "Edit file"),
 	delete_file: localize('vibeAIChat.tool.delete_file', "Delete file"),
 	list_files: localize('vibeAIChat.tool.list_files', "List directory"),
 	run_terminal: localize('vibeAIChat.tool.run_terminal', "Run command"),
@@ -32,6 +33,7 @@ const TOOL_LABELS: Record<string, string> = {
 const TOOL_ICONS: Record<string, string> = {
 	read_file: 'codicon-file',
 	write_file: 'codicon-new-file',
+	edit_file: 'codicon-edit',
 	delete_file: 'codicon-trash',
 	list_files: 'codicon-folder',
 	run_terminal: 'codicon-terminal',
@@ -95,7 +97,7 @@ function describeReadArgs(record: Record<string, unknown>): string {
 function argPath(name: string, args: unknown): string | undefined {
 	if (args && typeof args === 'object') {
 		const record = args as Record<string, unknown>;
-		if (name === 'read_file' || name === 'write_file' || name === 'list_files' || name === 'delete_file') {
+		if (name === 'read_file' || name === 'write_file' || name === 'edit_file' || name === 'list_files' || name === 'delete_file') {
 			const path = String(record['path'] ?? '');
 			return path.length > 0 ? path : undefined;
 		}
@@ -121,7 +123,7 @@ function baseName(path: string): string {
  * imports this module (importing back would be a cycle).
  */
 function isMutatingTool(name: string): boolean {
-	return name === 'write_file' || name === 'delete_file' || name === 'run_terminal';
+	return name === 'write_file' || name === 'edit_file' || name === 'delete_file' || name === 'run_terminal';
 }
 
 function summarizeArgs(name: string, args: unknown): string {
@@ -132,7 +134,7 @@ function summarizeArgs(name: string, args: unknown): string {
 			// full there) — the header line no longer repeats it.
 			return '';
 		}
-		if (name === 'read_file' || name === 'write_file' || name === 'list_files' || name === 'delete_file') {
+		if (name === 'read_file' || name === 'write_file' || name === 'edit_file' || name === 'list_files' || name === 'delete_file') {
 			const path = String(record['path'] ?? '.');
 			if (name === 'read_file') {
 				// Phase 63/135: bare file name + "L10–L20" / symbol — the full
@@ -140,7 +142,7 @@ function summarizeArgs(name: string, args: unknown): string {
 				const range = describeReadArgs(record);
 				return range.length > 0 ? `${baseName(path)} ${range}` : baseName(path);
 			}
-			if (name === 'write_file') {
+			if (name === 'write_file' || name === 'edit_file') {
 				// Phase 135: bare file name — the diff header path line is gone.
 				return baseName(path);
 			}
@@ -294,10 +296,10 @@ export class VibeAIToolCard {
 		this.argsSummary.title = summarizeArgs(name, args);
 
 		// Phase 65/135: clicking the header (the bare file name) opens the
-		// file — read cards jump to the read range, write cards to the first
-		// changed line (Cursor parity). The hover open-file button is gone —
-		// this click is the open affordance now.
-		if (onOpenFile && (name === 'read_file' || name === 'write_file') && argPath(name, args)) {
+		// file — read cards jump to the read range, write/edit cards to the
+		// first changed line (Cursor parity). The hover open-file button is
+		// gone — this click is the open affordance now.
+		if (onOpenFile && (name === 'read_file' || name === 'write_file' || name === 'edit_file') && argPath(name, args)) {
 			header.classList.add('vibe-ai-clickable');
 			header.title = localize('vibeAIChat.tool.openHeader', "Open in editor");
 			this.disposables.add(DOM.addDisposableListener(header, DOM.EventType.CLICK, e => {

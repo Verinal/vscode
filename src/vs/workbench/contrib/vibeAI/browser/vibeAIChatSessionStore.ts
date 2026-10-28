@@ -227,6 +227,14 @@ export interface IVibeAIChatSession {
 	 * done state). Optional — sessions saved before Phase 120 predate it.
 	 */
 	readonly goalComplete?: boolean;
+	/**
+	 * Phase 157: the session's agreed plan file (Cursor plan-as-file
+	 * parity) — the `.vibe/plans/*.md` relative path captured from the
+	 * plan execute phase. Restored tabs keep carrying it as `planFile`
+	 * on agent turns so the backend injects the <agreed plan> block.
+	 * Optional — sessions saved before Phase 157 predate the field.
+	 */
+	readonly planPath?: string;
 }
 
 /**
@@ -475,6 +483,12 @@ export class VibeAIChatSessionStore {
 				(session as { goalComplete?: boolean }).goalComplete = true;
 			}
 		}
+		// Phase 157: the agreed plan file sticks across saves (like goal) —
+		// turn-finish saves never drop it; the authoritative writer is
+		// setPlanPath() (captured at plan_start / plan_done).
+		if (previous?.planPath) {
+			(session as { planPath?: string }).planPath = previous.planPath;
+		}
 		sessions.unshift(session);
 		this.write(sessions.slice(0, MAX_SESSIONS));
 	}
@@ -540,6 +554,29 @@ export class VibeAIChatSessionStore {
 			} else {
 				delete target.goalComplete;
 			}
+		}
+		this.write(sessions);
+	}
+
+	/**
+	 * Phase 157: records the given conversation's agreed plan file
+	 * (like setGoal — a targeted mutation). A non-empty path sets it;
+	 * an empty path clears it (a plan file never sticks back). A session
+	 * not in the store no-ops — the capture rides the next turn-finish
+	 * save's stick instead.
+	 */
+	setPlanPath(sessionId: string, planPath: string | undefined): void {
+		const sessions = this.list();
+		const session = sessions.find(s => s.id === sessionId);
+		if (!session) {
+			return;
+		}
+		const target = session as { planPath?: string };
+		const path = (planPath ?? '').trim();
+		if (path.length === 0) {
+			delete target.planPath;
+		} else {
+			target.planPath = path;
 		}
 		this.write(sessions);
 	}

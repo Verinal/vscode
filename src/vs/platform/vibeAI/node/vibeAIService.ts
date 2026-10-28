@@ -818,6 +818,11 @@ export class VibeAIService extends Disposable implements IVibeAIService {
 					// assembled by the same function as the injection
 					// (estimate = sent).
 					goal: request.goal,
+					// Phase 157: the agreed plan file (the same plan the
+					// agent turns actually send) — the `plan` breakdown row
+					// is assembled by the same function as the injection
+					// (estimate = sent).
+					plan_file: request.planFile,
 					// Phase 107: the editor's opened folder (rules / skills /
 					// MCP are estimated against it).
 					project_root: request.workspaceRoot

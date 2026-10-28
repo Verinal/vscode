@@ -168,6 +168,16 @@ export interface IVibeAIChatRequest {
 	 * = the backend's default (high_risk).
 	 */
 	readonly permissionMode?: string;
+	/**
+	 * Phase 157: the conversation's agreed plan file (Cursor plan-as-file
+	 * parity) — the `.vibe/plans/*.md` relative path captured from the
+	 * plan execute phase's `planPath`. Agent turns of the conversation
+	 * that owns the plan carry it; the backend loads the plan file and
+	 * injects the hidden `<agreed plan>` system-prompt block so the turn
+	 * works off the settled plan instead of re-exploring. Absent = no
+	 * agreed plan (backward compatible).
+	 */
+	readonly planFile?: string;
 }
 
 /**
@@ -232,6 +242,14 @@ export interface IVibeAIExecutePlanRequest {
 	 * backend's default (high_risk).
 	 */
 	readonly permissionMode?: string;
+	/**
+	 * Phase 157: the persisted plan file (`.vibe/plans/*.md` relative
+	 * path) captured when this plan was last executed — rides along so a
+	 * re-execution (restored tab, Build again) keeps the backend's
+	 * plan-file persistence in sync. The inline `plan` object still wins
+	 * on the backend when both are present.
+	 */
+	readonly planFile?: string;
 }
 
 /**
@@ -271,6 +289,12 @@ export interface IVibeAIContextUsageRequest {
 	 * function as the actual injection (estimate = sent).
 	 */
 	readonly goal?: string;
+	/**
+	 * Phase 157: the agreed plan file (the same planFile the agent turns
+	 * actually send) — the `plan` breakdown row is assembled by the same
+	 * function as the actual injection (estimate = sent).
+	 */
+	readonly planFile?: string;
 }
 
 /**
@@ -588,6 +612,14 @@ export interface IVibeAIStreamData {
 		readonly stepsDone: number[];
 		readonly stepsFailed: number[];
 	};
+	/**
+	 * Phase 157 (`plan_start` / `plan_done`): the persisted plan file's
+	 * workspace-relative path (.vibe/plans/*.md) — the pane captures it
+	 * on the conversation so subsequent agent turns carry it as
+	 * `planFile` (the backend injects the <agreed plan> block). Absent
+	 * when persistence was skipped.
+	 */
+	readonly planPath?: string;
 	/**
 	 * Phase 92 (`approval_request` / `approval_resolved`): a terminal
 	 * command the backend intercepted (whitelist/hook) and parked at the

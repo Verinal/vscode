@@ -271,7 +271,7 @@ function parseContextTokens(raw: string): number | undefined {
  * activity.
  */
 function isMutatingTool(name: string): boolean {
-	return name === 'write_file' || name === 'delete_file' || name === 'run_terminal';
+	return name === 'write_file' || name === 'edit_file' || name === 'delete_file' || name === 'run_terminal';
 }
 
 /**
@@ -753,6 +753,15 @@ interface VibeAIConversation {
 	goal?: string;
 	/** Phase 120: the mark_goal_complete confirmation (the banner's done state). */
 	goalComplete?: boolean;
+	/**
+	 * Phase 157: the conversation's agreed plan file (Cursor plan-as-file
+	 * parity) — the `.vibe/plans/*.md` relative path captured from the
+	 * plan execute phase's plan_start / plan_done. Agent turns and plan
+	 * re-executions carry it as planFile so the backend injects the
+	 * <agreed plan> block (work off the settled plan, don't re-explore).
+	 * Absent = no agreed plan in this conversation.
+	 */
+	planPath?: string;
 }
 
 /**
@@ -2602,6 +2611,13 @@ export class VibeAIChatPane extends ViewPane {
 			// model confirms completion via mark_goal_complete. No goal =
 			// zero change (backward compatible).
 			...(conversation.goal ? { goal: conversation.goal } : {}),
+			// Phase 157: the conversation's agreed plan file rides AGENT
+			// turns only (Cursor plan-as-file parity) — the backend injects
+			// the hidden <agreed plan> block so the turn executes the
+			// settled plan instead of re-exploring. Plan-mode research
+			// (which creates a NEW plan) and Ask turns omit it. No plan =
+			// zero change (backward compatible).
+			...(this.mode === 'agent' && conversation.planPath ? { planFile: conversation.planPath } : {}),
 			// Phase 139: terminal permission mode (Cursor parity) — read
 			// live per turn so a Settings change applies without reload.
 			permissionMode: this.permissionMode,
@@ -3401,6 +3417,10 @@ export class VibeAIChatPane extends ViewPane {
 			// Phase 139: terminal permission mode (Cursor parity) — the
 			// Settings → General control, read live per execute phase.
 			permissionMode: this.permissionMode,
+			// Phase 157: the persisted plan file captured from this plan's
+			// execute phase (if any) — a re-execution keeps the backend's
+			// plan-file record in sync; the inline plan object still wins.
+			...(conversation.planPath ? { planFile: conversation.planPath } : {}),
 			// Phase 147: the editor's opened folder (same semantics as the
 			// chat request's workspaceRoot).
 			workspaceRoot: this.currentWorkspaceRoot(),
@@ -3441,6 +3461,14 @@ export class VibeAIChatPane extends ViewPane {
 			return;
 		}
 		state.planPhase = 'executing';
+		// Phase 157: capture the persisted plan file (Cursor plan-as-file
+		// parity) — the conversation keeps carrying it as planFile so
+		// later agent turns work off the settled plan (restore parity via
+		// the session store's setPlanPath).
+		if (data.planPath) {
+			conversation.planPath = data.planPath;
+			this.sessionStore.setPlanPath(conversation.sessionId, data.planPath);
+		}
 		const plan = data.plan ?? state.pendingPlan;
 		if (plan) {
 			state.pendingPlan = plan;
@@ -3505,6 +3533,12 @@ export class VibeAIChatPane extends ViewPane {
 		const summary = data.planSummary;
 		if (!state) {
 			return;
+		}
+		// Phase 157: defensive planPath capture — plan_start already set it;
+		// a pane reload mid-execution would re-enter here without it.
+		if (data.planPath && !conversation.planPath) {
+			conversation.planPath = data.planPath;
+			this.sessionStore.setPlanPath(conversation.sessionId, data.planPath);
 		}
 		state.planResults = summary
 			? { stepsDone: [...summary.stepsDone], stepsFailed: [...summary.stepsFailed] }
@@ -7057,6 +7091,10 @@ export class VibeAIChatPane extends ViewPane {
 				// Phase 120: the `goal` row counts the same objective the
 				// turns actually send (estimate = sent). No goal = omitted.
 				...(conversation.goal ? { goal: conversation.goal } : {}),
+				// Phase 157: the `plan` row counts the same agreed plan file
+				// the agent turns actually send (estimate = sent). Ask mode
+				// and plan-less conversations omit it.
+				...(this.mode === 'agent' && conversation.planPath ? { planFile: conversation.planPath } : {}),
 				// Phase 147: estimate against the opened folder (rules /
 				// skills / MCP are workspace-scoped) — estimate ≡ sent.
 				workspaceRoot: this.currentWorkspaceRoot(),
@@ -7958,6 +7996,10 @@ export class VibeAIChatPane extends ViewPane {
 		// on its turns.
 		conversation.goal = session.goal;
 		conversation.goalComplete = session.goalComplete === true;
+		// Phase 157: the agreed plan file rides along — the restored tab
+		// keeps carrying it as planFile on agent turns (Cursor plan-as-file
+		// parity survives restarts).
+		conversation.planPath = session.planPath;
 		// Phase 101: the tab's recorded scroll position rides along —
 		// scrollToLatestTurn lands the thread there (the very bottom when
 		// none / pinned at it) instead of always the latest turn.

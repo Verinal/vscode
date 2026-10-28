@@ -10,16 +10,11 @@ const vscode = acquireVsCodeApi();
 
 
 async function main() {
-	await initializeMermaidWebview(vscode);
-
-	// Set up the "Open in Editor" button
-	const openBtn = document.querySelector('.open-in-editor-btn');
-	if (openBtn) {
-		openBtn.addEventListener('click', e => {
-			e.stopPropagation();
-			vscode.postMessage({ type: 'openInEditor' });
-		});
-	}
+	// Full-size popups mark the body with `data-interactive-canvas`: the
+	// diagram renders as an interactive canvas (fitted view, plain drag pans,
+	// ctrl+wheel zooms). Inline cards keep the content-sized behavior.
+	const interactiveCanvas = document.body.dataset.interactiveCanvas === 'true';
+	await initializeMermaidWebview(vscode, interactiveCanvas ? { defaultView: 'fit', plainDragPan: true } : undefined);
 }
 
 // Any module-level failure (mermaid init, theme resolution, diagram render)

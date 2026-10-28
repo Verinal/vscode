@@ -14,22 +14,67 @@
  * arrives right after, but an already-open editor's model reloads
  * asynchronously (file watcher) and a not-yet-open editor appears later.
  * Both are handled by re-probing `listCodeEditors` until the model content
- * matches the write's new content — a dirty user buffer never matches, so
- * it is never decorated. A highlight persists until the same file is
- * written again or the pane closes; opening the file from the chat (tool
- * card, Review, files list) re-applies the stored highlight.
+ * matches the write's new content (EOL-insensitive — the backend writes
+ * `\r\n` on Windows while the new content is `\n`; see `normalizeEol`) —
+ * a dirty user buffer never matches, so it is never decorated. Any editor
+ * that appears later (Explorer open included) re-probes pending writes via
+ * `onCodeEditorAdd`. A highlight persists until the same file is written
+ * again or the pane closes; opening the file from the chat (tool card,
+ * Review, files list) re-applies the stored highlight.
+ *
+ * Phase 95: while a file's overlay is up, an always-visible keep-bar
+ * overlay widget is pinned to the top of the editor viewport ("Keep
+ * changes to x.py?" + Keep / Discard — a view zone above line 1 scrolled
+ * away with the content, so pointing at a change left no choice on
+ * screen). Keep resolves the overlay — the green additions ARE the kept
+ * on-disk content and the red deleted rows disappear — and the pane
+ * marks the file resolved in its turn record; Discard reverts the file
+ * on disk first (and re-arms the bar when the revert fails). Resolved
+ * overlays never resurrect: the pane skips resolved changes when
+ * re-arming from a restored session.
+ *
+ * Phase 95 follow-up (user feedback): a resolved bar STAYS up — only its
+ * Keep / Discard buttons go (a status chip shows the outcome, Kept /
+ * Discarded) while the red/green marks clear; the chip lives until the
+ * file is written again, the model navigates away or the pane closes.
+ *
+ * Phase 95 follow-up ② (user feedback): the bar moves INTO the file path
+ * row — the breadcrumbs row under the editor tabs, pinned to the row's
+ * right edge (path label left, Keep / Discard right, layout unchanged;
+ * it used to float over the first content lines). The editor's overlay
+ * layer is clipped to the content area (overflow-guard), so no overlay
+ * position can ever reach the path row: the bar attaches to the workbench
+ * breadcrumb row instead and is cleared together with its highlight.
+ * Breadcrumbs hidden or disabled → top-right overlay widget fallback.
+ *
+ * Phase 95 follow-up ③ (user feedback): a freshly created file opened
+ * from the Explorer stayed unhighlighted (no green, no keep-bar). VS Code
+ * reuses ONE code editor widget per text-editor pane — opening another
+ * file swaps the model without a new editor, so `onCodeEditorAdd` never
+ * fires again and the write's poll (~10s) is long dead by the time the
+ * user opens the file. Every wired editor now re-probes pending writes
+ * on model switches (Explorer opens included) and content reloads (a
+ * file-watcher load lagging past the poll).
+ *
+ * Phase 110 (user feedback): the highlight ACCUMULATES a turn's writes —
+ * the registered change is the turn's consolidated entry (the pre-turn
+ * baseline vs the current content), so a file written several times in
+ * one turn keeps every earlier write's lines green (a file created this
+ * turn is all green) and additions cancel out against later deletes;
+ * the per-step diff stays in the step's own chat card.
  */
 
-import { $ } from '../../../../base/browser/dom.js';
+import { $, append } from '../../../../base/browser/dom.js';
 import { URI } from '../../../../base/common/uri.js';
 import { Disposable, IDisposable } from '../../../../base/common/lifecycle.js';
-import { ICodeEditor } from '../../../../editor/browser/editorBrowser.js';
+import { localize } from '../../../../nls.js';
+import { ICodeEditor, IOverlayWidget, OverlayWidgetPositionPreference } from '../../../../editor/browser/editorBrowser.js';
 import { ICodeEditorService } from '../../../../editor/browser/services/codeEditorService.js';
 import { EditorOption } from '../../../../editor/common/config/editorOptions.js';
 import { IEditorDecorationsCollection } from '../../../../editor/common/editorCommon.js';
 import { IModelDeltaDecoration } from '../../../../editor/common/model.js';
 import { IVibeAICodeChange } from '../../../../platform/vibeAI/common/vibeAI.js';
-import { computeDiffLines } from './vibeAIDiff.js';
+import { computeDiffLines, normalizeEol } from './vibeAIDiff.js';
 import './media/vibeAIChat.css';
 
 const RETRY_INTERVAL_MS = 250;
@@ -46,7 +91,38 @@ interface IVibeAIEditorHighlight {
 	readonly change: IVibeAICodeChange;
 	readonly collection: IEditorDecorationsCollection;
 	readonly zoneIds: string[];
+	/**
+	 * Phase 95: the keep-bar overlay widget (the breadcrumbs-hidden
+	 * fallback) — removed together with the overlay when the change
+	 * resolves.
+	 */
+	readonly barWidgets: IOverlayWidget[];
+	/**
+	 * Phase 95 (user feedback ②): keep-bars attached to the file path row
+	 * are plain DOM (the overlay layer can't reach the path row) — they
+	 * are cleared with the highlight too.
+	 */
+	readonly barDomNodes: HTMLElement[];
+	/**
+	 * Phase 95 follow-up (user feedback): per-bar resolve — the bar STAYS
+	 * up after a keep/discard (only the buttons go, a status chip shows
+	 * the outcome), so its resolve hook is kept alongside the widget.
+	 */
+	readonly barResolvers: ((state: 'kept' | 'discarded') => void)[];
+	/** Phase 95 follow-up: the bar's resolved state (idempotency guard). */
+	barState?: 'kept' | 'discarded';
 	readonly modelListener: IDisposable | undefined;
+}
+
+/**
+ * Phase 95: per-file review handlers wired by the chat pane — the
+ * keep-bar's Keep / Discard land there (keep marks the file resolved in
+ * its turn record; discard reverts the file on disk first and returns
+ * false when the revert failed so the bar stays up for a retry).
+ */
+export interface IVibeAIFileReviewHandlers {
+	keepFile: (change: IVibeAICodeChange) => void;
+	discardFile: (change: IVibeAICodeChange) => Promise<boolean> | boolean;
 }
 
 export class VibeAIEditorHighlighter extends Disposable {
@@ -57,9 +133,69 @@ export class VibeAIEditorHighlighter extends Disposable {
 	private readonly applied = new Map<string, IVibeAIEditorHighlight>();
 	private readonly polling = new Set<string>();
 	private readonly timers = new Set<number>();
+	/** Editors already wired for re-probing (one code editor per text-editor pane). */
+	private readonly wiredEditors = new WeakSet<ICodeEditor>();
+	/** Phase 95: the pane's per-file review handlers (keep-bar actions). */
+	private fileActions: IVibeAIFileReviewHandlers | undefined;
 
 	constructor(private readonly codeEditorService: ICodeEditorService) {
 		super();
+		// A file opened from the Explorer (not the chat) creates its editor
+		// after the write landed — re-probe pending writes whenever any code
+		// editor appears so the red/green overlay is not limited to
+		// chat-driven opens. `schedule` re-runs the content-match probe and
+		// no-ops when a poll is already chasing the file.
+		this._register(this.codeEditorService.onCodeEditorAdd(editor => {
+			this.wireEditor(editor);
+			if (this.disposed || this.pending.size === 0) {
+				return;
+			}
+			for (const key of Array.from(this.pending.keys())) {
+				this.schedule(key);
+			}
+		}));
+		// Editors that exist already (restored tabs) never fire the add
+		// event again — wire them too.
+		for (const editor of this.codeEditorService.listCodeEditors()) {
+			this.wireEditor(editor);
+		}
+	}
+
+	/**
+	 * Phase 95 (user feedback ③): a freshly created file opened from the
+	 * Explorer stayed unhighlighted (no green, no keep-bar). VS Code reuses
+	 * ONE code editor widget per text-editor pane — opening another file
+	 * swaps the model without a new editor, so `onCodeEditorAdd` never fires
+	 * again and the write's poll (~10s) is long dead by the time the user
+	 * opens the file. Re-probe pending writes on model switches (Explorer
+	 * opens included) and on content changes (a file-watcher load lagging
+	 * past the poll) so the overlay can never be missed.
+	 */
+	private wireEditor(editor: ICodeEditor): void {
+		if (this.wiredEditors.has(editor)) {
+			return;
+		}
+		this.wiredEditors.add(editor);
+		this._register(editor.onDidChangeModel(() => this.reprobePending()));
+		this._register(editor.onDidChangeModelContent(() => this.reprobePending()));
+	}
+
+	private reprobePending(): void {
+		if (this.disposed || this.pending.size === 0) {
+			return;
+		}
+		for (const key of Array.from(this.pending.keys())) {
+			this.schedule(key);
+		}
+	}
+
+	/**
+	 * Phase 95: wires the keep-bar's per-file actions to the chat pane —
+	 * keep resolves the file's overlay and marks it resolved in its turn
+	 * record (persisted); discard reverts the file on disk first.
+	 */
+	setFileActions(handlers: IVibeAIFileReviewHandlers): void {
+		this.fileActions = handlers;
 	}
 
 	override dispose(): void {
@@ -76,7 +212,10 @@ export class VibeAIEditorHighlighter extends Disposable {
 	}
 	/**
 	 * Registers a live agent write (`tool_result` with a `code_change`) and
-	 * highlights it once an open editor shows the new content.
+	 * highlights it once an open editor shows the new content. Phase 110:
+	 * the pane passes the turn's accumulated (consolidated) change — the
+	 * highlight shows the file's net diff for the whole turn, not the
+	 * last write's step diff alone.
 	 */
 	highlight(change: IVibeAICodeChange, resolveUri: (path: string) => URI | undefined): void {
 		if (change.action === 'delete' || change.newContent === undefined) {
@@ -100,6 +239,89 @@ export class VibeAIEditorHighlighter extends Disposable {
 	applyForUri(uri: URI): void {
 		if (this.pending.has(uri.toString())) {
 			this.schedule(uri.toString());
+		}
+	}
+
+	/**
+	 * Phase 95: resolves a file's pending change — the red/green overlay
+	 * clears and the change stops re-applying when the file re-opens. The
+	 * green additions ARE the kept on-disk content; the red deleted rows
+	 * disappear. Called by the pane when a keep lands (editor bar, files
+	 * list row or the turn-level Keep) and after a successful per-file
+	 * revert (the on-disk content is the original again).
+	 */
+	resolveForUri(uri: URI, state: 'kept' | 'discarded' = 'kept'): void {
+		if (this.pending.has(uri.toString()) || this.applied.has(uri.toString())) {
+			this.resolveKey(uri.toString(), state);
+			return;
+		}
+		// Defensive: URI spellings can drift between the highlight and the
+		// resolve (casing, drive-letter encoding) — fall back to a decoded
+		// path-suffix match so a Keep can never strand a live overlay.
+		try {
+			const target = decodeURIComponent(uri.path).toLowerCase();
+			for (const source of [this.applied, this.pending]) {
+				for (const candidate of Array.from(source.keys())) {
+					const candidatePath = decodeURIComponent(URI.parse(candidate).path).toLowerCase();
+					if (candidatePath === target || candidatePath.endsWith(target)) {
+						this.resolveKey(candidate, state);
+						return;
+					}
+				}
+			}
+		} catch {
+			// Malformed URI spellings — the exact match above is the contract.
+		}
+	}
+
+	private resolveKey(key: string, state: 'kept' | 'discarded' = 'kept'): void {
+		this.pending.delete(key);
+		this.resolveAppliedHighlight(key, state);
+	}
+
+	/**
+	 * Phase 95 follow-up (user feedback): resolves ONE applied highlight —
+	 * the red/green marks clear but the keep-bar STAYS up: the Keep /
+	 * Discard buttons go and a status chip shows the outcome (Kept /
+	 * Discarded). The applied entry survives (the model listener stays
+	 * armed) so the resolved chip still clears on a model change / a newer
+	 * write; the pane-side marks keep the overlay from resurrecting.
+	 */
+	private resolveAppliedHighlight(key: string, state: 'kept' | 'discarded'): void {
+		const previous = this.applied.get(key);
+		if (!previous || previous.barState === state) {
+			return;
+		}
+		previous.barState = state;
+		try {
+			previous.collection.clear();
+		} catch {
+			// The editor may already be gone — decorations die with it.
+		}
+		this.removeZones(key, previous.zoneIds);
+		for (const resolve of previous.barResolvers) {
+			try {
+				resolve(state);
+			} catch {
+				// The bar is cosmetic — a failed chip update is harmless.
+			}
+		}
+	}
+
+	/** Removes this highlight's deleted-row view zones from every matching editor. */
+	private removeZones(key: string, zoneIds: string[]): void {
+		if (zoneIds.length === 0) {
+			return;
+		}
+		const target = key.toLowerCase();
+		for (const editor of this.codeEditorService.listCodeEditors()) {
+			if ((editor.getModel()?.uri.toString() ?? '').toLowerCase() === target) {
+				editor.changeViewZones(accessor => {
+					for (const id of zoneIds) {
+						accessor.removeZone(id);
+					}
+				});
+			}
 		}
 	}
 
@@ -167,8 +389,11 @@ export class VibeAIEditorHighlighter extends Disposable {
 			const model = editor.getModel();
 			// The model must show the write's new content: a stale model is
 			// still waiting for the file watcher, a dirty buffer is the
-			// user's — never decorate either.
-			if (!model || model.getValue() !== change.newContent) {
+			// user's — never decorate either. `normalizeEol` — the backend
+			// writes `\r\n` on Windows (aiofiles text mode) while the write's
+			// new content is `\n`; a raw comparison mismatched every line and
+			// never decorated.
+			if (!model || normalizeEol(model.getValue()) !== normalizeEol(change.newContent ?? '')) {
 				continue;
 			}
 			this.applyToEditor(editor, key, change);
@@ -250,10 +475,34 @@ export class VibeAIEditorHighlighter extends Disposable {
 			});
 		}
 
+		// Phase 95 (follow-up): the keep-file bar — an always-visible
+		// "Keep changes to x.py?" pill (path label left, Keep / Discard
+		// right) while the red/green overlay is up. Keep clears the
+		// overlay but leaves the bar up (buttons go, a status chip shows
+		// the outcome); Discard reverts the file first. Defensive: a bar
+		// failure must not strand the overlay — the applied entry below
+		// is what resolveForUri / clearHighlight remove.
+		const barWidgets: IOverlayWidget[] = [];
+		const barDomNodes: HTMLElement[] = [];
+		const barResolvers: ((state: 'kept' | 'discarded') => void)[] = [];
+		try {
+			const bar = this.addKeepBar(editor, key, change);
+			if (bar.widget) {
+				barWidgets.push(bar.widget);
+			}
+			barDomNodes.push(bar.domNode);
+			barResolvers.push(bar.resolve);
+		} catch {
+			// The bar is cosmetic — the overlay still resolves cleanly.
+		}
+
 		this.applied.set(key, {
 			change,
 			collection,
 			zoneIds,
+			barWidgets,
+			barDomNodes,
+			barResolvers,
 			// Navigating the editor away leaves stale zones behind — drop
 			// the highlight when the model changes.
 			modelListener: editor.onDidChangeModel(() => this.clearHighlight(key)),
@@ -262,6 +511,128 @@ export class VibeAIEditorHighlighter extends Disposable {
 		if (firstChangedLine !== undefined) {
 			editor.revealLineInCenterIfOutsideViewport(firstChangedLine);
 		}
+	}
+
+	/**
+	 * Phase 95 (follow-up): builds the keep-file bar (Cursor editor overlay
+	 * parity) — an always-visible "Keep changes to <path>?" pill with Keep /
+	 * Discard actions. Phase 95 (user feedback ②): it lives IN the file
+	 * path row — the breadcrumbs row under the editor tabs — pinned to the
+	 * row's right edge (path label left, buttons right, layout unchanged;
+	 * it used to float over the first content lines). The editor's overlay
+	 * layer is clipped to the content area, so no overlay position can
+	 * reach the path row: the bar attaches to the workbench breadcrumb row
+	 * instead, and when breadcrumbs are hidden/disabled it falls back to a
+	 * top-right overlay widget. Keep resolves the overlay and notifies the
+	 * pane (the per-change mark lands in the turn record); Discard asks the
+	 * pane to revert the file first and re-arms when the revert fails.
+	 * Returns the overlay-widget fallback (removed by clearHighlight), the
+	 * DOM node (also removed by clearHighlight) plus the resolve hook — the
+	 * bar STAYS up after a resolve (only the buttons go, a status chip
+	 * shows the outcome), so the chip swap rides on `resolve`.
+	 */
+	private addKeepBar(editor: ICodeEditor, key: string, change: IVibeAICodeChange): { widget: IOverlayWidget | undefined; domNode: HTMLElement; resolve: (state: 'kept' | 'discarded') => void } {
+		const domNode = $('div.vibe-ai-keep-bar');
+		const label = append(domNode, $('span.vibe-ai-keep-bar-label'));
+		label.textContent = localize('vibeAIChat.keepBar.title', "Keep changes to {0}?", change.filePath);
+		label.title = change.filePath;
+		const actions = append(domNode, $('div.vibe-ai-keep-bar-actions'));
+		const keep = append(actions, $('button.vibe-ai-keep-bar-btn.vibe-ai-keep-bar-keep')) as HTMLButtonElement;
+		keep.textContent = localize('vibeAIChat.keepBar.keep', "Keep");
+		keep.title = localize('vibeAIChat.keepBar.keepTitle', "Keep this file's changes and clear the change marks");
+		const discard = append(actions, $('button.vibe-ai-keep-bar-btn.vibe-ai-keep-bar-discard')) as HTMLButtonElement;
+		discard.textContent = localize('vibeAIChat.keepBar.discard', "Discard");
+		discard.title = localize('vibeAIChat.keepBar.discardTitle', "Revert this file to its pre-change content");
+		const status = append(domNode, $('span.vibe-ai-keep-bar-status'));
+		// Widget DOM dies with the widget — plain listeners are enough (they
+		// are dropped when the bar is removed with the highlight).
+		this.wireBarActions(keep, discard, key, change);
+		const resolve = (state: 'kept' | 'discarded') => {
+			// The bar stays up: the buttons go, the status chip shows the
+			// outcome (CSS swaps the display off the `.resolved` class).
+			domNode.classList.add('resolved');
+			domNode.classList.toggle('discarded', state === 'discarded');
+			actions.style.display = 'none';
+			status.textContent = state === 'kept'
+				? localize('vibeAIChat.keepBar.kept', "Kept")
+				: localize('vibeAIChat.keepBar.discarded', "Discarded");
+		};
+		// Phase 95 (user feedback ②): attach to the file path row (the
+		// breadcrumbs row under the tabs) so the bar sits at the row's
+		// right edge — the editor's overlay layer is clipped to the content
+		// area and can never reach it. No visible breadcrumbs row (hidden
+		// or disabled) → overlay-widget fallback pinned to the editor's
+		// top-right corner (TOP_RIGHT_CORNER — the renderer right-anchors
+		// it next to the minimap with setTop(0) + setRight, same anchor as
+		// the find widget, and it stays visible wherever the user scrolls).
+		// No stackOrdinal: the corner stacking branch never right-anchors
+		// (it only bumps the top by previous widgets' widths), which would
+		// drop the bar at the top-left.
+		const pathRow = this.findPathRow(editor);
+		if (pathRow) {
+			pathRow.appendChild(domNode);
+			return { widget: undefined, domNode, resolve };
+		}
+		const widget: IOverlayWidget = {
+			getId: () => `vibe-ai-keep-bar-${key}`,
+			getDomNode: () => domNode,
+			getPosition: () => ({ preference: OverlayWidgetPositionPreference.TOP_RIGHT_CORNER }),
+		};
+		editor.addOverlayWidget(widget);
+		return { widget, domNode, resolve };
+	}
+
+	/**
+	 * The file path row: the breadcrumbs row under the editor tabs (the row
+	 * rendering the file path). Must be visible — breadcrumbs disabled or
+	 * hidden collapses the row (`hidden` class) and would hide the bar with
+	 * it, so the caller falls back to the overlay widget then.
+	 */
+	private findPathRow(editor: ICodeEditor): HTMLElement | undefined {
+		try {
+			const group = editor.getDomNode()?.closest('.editor-group-container');
+			const row = group?.querySelector('.breadcrumbs-below-tabs:not(.hidden)');
+			return row instanceof HTMLElement && row.offsetHeight > 0 ? row : undefined;
+		} catch {
+			return undefined;
+		}
+	}
+
+	/**
+	 * Phase 95: wires the Keep / Discard actions for the pinned bar —
+	 * keep resolves the file's overlay (the pane marks it resolved in
+	 * its turn record); discard reverts the file on disk first (a failed
+	 * revert re-enables the buttons for a retry).
+	 */
+	private wireBarActions(keep: HTMLButtonElement, discard: HTMLButtonElement, key: string, change: IVibeAICodeChange): void {
+		keep.addEventListener('click', e => {
+			e.stopPropagation();
+			this.resolveKey(key, 'kept');
+			this.fileActions?.keepFile(change);
+		});
+		let discarding = false;
+		discard.addEventListener('click', e => {
+			e.stopPropagation();
+			if (discarding) {
+				return;
+			}
+			discarding = true;
+			discard.classList.add('disabled');
+			Promise.resolve(this.fileActions ? this.fileActions.discardFile(change) : false)
+				.then(ok => {
+					discarding = false;
+					if (!ok) {
+						// The revert failed (or nothing handled it) — the
+						// bar stays up for a retry.
+						discard.classList.remove('disabled');
+					}
+				})
+				.catch(() => {
+					// Defensive: the pane logs revert errors itself.
+					discarding = false;
+					discard.classList.remove('disabled');
+				});
+		});
 	}
 
 	private clearHighlight(key: string): void {
@@ -276,16 +647,31 @@ export class VibeAIEditorHighlighter extends Disposable {
 		} catch {
 			// The editor may already be gone — decorations die with it.
 		}
-		if (previous.zoneIds.length > 0) {
+		this.removeZones(key, previous.zoneIds);
+		if (previous.barWidgets.length > 0) {
 			const target = key.toLowerCase();
 			for (const editor of this.codeEditorService.listCodeEditors()) {
 				if ((editor.getModel()?.uri.toString() ?? '').toLowerCase() === target) {
-					editor.changeViewZones(accessor => {
-						for (const id of previous.zoneIds) {
-							accessor.removeZone(id);
+					// Phase 95 (follow-up): the keep-bar goes with the
+					// overlay (a resolved bar only survives while its
+					// applied entry does).
+					for (const widget of previous.barWidgets) {
+						try {
+							editor.removeOverlayWidget(widget);
+						} catch {
+							// The editor may already be gone.
 						}
-					});
+					}
 				}
+			}
+		}
+		// Phase 95 (user feedback ②): path-row keep-bars are plain DOM —
+		// they go with the highlight too.
+		for (const domNode of previous.barDomNodes) {
+			try {
+				domNode.remove();
+			} catch {
+				// The editor may already be gone.
 			}
 		}
 	}

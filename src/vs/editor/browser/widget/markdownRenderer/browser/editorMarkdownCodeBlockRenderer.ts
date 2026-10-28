@@ -14,6 +14,7 @@ import { IMarkdownCodeBlockRenderer, IMarkdownRendererExtraOptions } from '../..
 import { EditorOption, IEditorOptions } from '../../../../common/config/editorOptions.js';
 import { BareFontInfo } from '../../../../common/config/fontInfo.js';
 import { createBareFontInfoFromRawSettings } from '../../../../common/config/fontInfoFromSettings.js';
+import { TokenizationRegistry } from '../../../../common/languages.js';
 import { ILanguageService } from '../../../../common/languages/language.js';
 import { PLAINTEXT_LANGUAGE_ID } from '../../../../common/languages/modesRegistry.js';
 import { tokenizeToString } from '../../../../common/languages/textToHtmlTokenizer.js';
@@ -27,6 +28,12 @@ const FILE_LIKE_PATTERN = /^[\w.\-/\\]+\.\w{1,5}$/;
 
 /** Code blocks longer than this many lines are clamped with an expand pill. */
 const MAX_COLLAPSED_LINES = 20;
+
+/** Retries this often (ms) for a language's tokenizer (grammar) to register. */
+const TOKENIZATION_RETRY_DELAY_MS = 1000;
+
+/** Gives up after this many retries — a language with no grammar keeps rendering plain. */
+const TOKENIZATION_RETRY_ATTEMPTS = 30;
 
 /**
  * The fence info string may carry a file name after the language
@@ -73,21 +80,21 @@ export class EditorMarkdownCodeBlockRenderer implements IMarkdownCodeBlockRender
 
 		// In markdown, it is possible that we stumble upon language aliases (e.g.js instead of javascript).
 		// it is possible no alias is given in which case we fall back to the current editor lang
-		let languageId: string | undefined | null;
-		if (languageAlias) {
-			languageId = this._languageService.getLanguageIdByLanguageName(languageAlias);
-		} else if (editor) {
-			languageId = editor.getModel()?.getLanguageId();
-		}
-		if (!languageId) {
-			// The fence may name a file (```python:11.py — the alias above
-			// already resolves — or a bare ```11.py): the file extension tells
-			// the syntax, so derive the language from the file name.
-			languageId = this.guessLanguageIdFromFileName(languageAlias, rawInfo);
-		}
-		if (!languageId) {
-			languageId = PLAINTEXT_LANGUAGE_ID;
-		}
+		const resolvedLanguageId = this.resolveCodeBlockLanguage(languageAlias, rawInfo, editor);
+		const languageId = resolvedLanguageId ?? PLAINTEXT_LANGUAGE_ID;
+
+		// Phase 94: languages and their grammars register with the extension
+		// host — after the workbench parts render. A fence rendered in that
+		// window (e.g. a chat pane restoring open tabs at startup) falls back
+		// to plaintext and is never re-rendered, so python and markdown code
+		// blocks in restored conversations show up uncolored. When the fence
+		// hints at a language that is not tokenizable yet, schedule the
+		// bounded in-place upgrade below.
+		const hasLanguageHint = !!(languageAlias && languageAlias.trim()) || !!(rawInfo && rawInfo.trim());
+		const needsTokenizationUpgrade =
+			(hasLanguageHint && !resolvedLanguageId)
+			|| (!!resolvedLanguageId && resolvedLanguageId !== PLAINTEXT_LANGUAGE_ID && !TokenizationRegistry.get(resolvedLanguageId));
+
 		const html = await tokenizeToString(this._languageService, value, languageId);
 
 		const content = EditorMarkdownCodeBlockRenderer._ttpTokenizer ? EditorMarkdownCodeBlockRenderer._ttpTokenizer.createHTML(html) ?? html : html;
@@ -105,11 +112,90 @@ export class EditorMarkdownCodeBlockRenderer implements IMarkdownCodeBlockRender
 		// Opt-in (e.g. from the vibeAI chat view): a ChatGPT/GitHub-style header
 		// bar overlaying the top of the block — file name or language on the
 		// left, a hover-revealed copy button on the right.
-		if (options.codeBlockHeader) {
-			return this.withCodeBlockHeader(root, value, languageAlias, rawInfo, this._languageService.getLanguageName(languageId) ?? undefined);
+		const block = options.codeBlockHeader
+			? this.withCodeBlockHeader(root, value, languageAlias, rawInfo, this._languageService.getLanguageName(languageId) ?? undefined)
+			: root;
+		if (needsTokenizationUpgrade) {
+			this.scheduleTokenizationUpgrade(block, languageAlias, rawInfo, value, editor);
 		}
 
-		return root;
+		return block;
+	}
+
+	/**
+	 * Resolves the tokenization language for a fence: the alias (e.g.
+	 * ```python), the surrounding editor's model language, or a file name
+	 * in the fence info (```11.py). Returns undefined when nothing
+	 * resolves — the caller falls back to plaintext.
+	 */
+	private resolveCodeBlockLanguage(languageAlias: string | undefined, rawInfo: string | undefined, editor: ICodeEditor | undefined): string | undefined | null {
+		if (languageAlias) {
+			const byName = this._languageService.getLanguageIdByLanguageName(languageAlias);
+			if (byName) {
+				return byName;
+			}
+		} else if (editor) {
+			const modelLanguage = editor.getModel()?.getLanguageId();
+			if (modelLanguage) {
+				return modelLanguage;
+			}
+		}
+		// The fence may name a file (```python:11.py — the alias above
+		// already resolves — or a bare ```11.py): the file extension tells
+		// the syntax, so derive the language from the file name.
+		return this.guessLanguageIdFromFileName(languageAlias, rawInfo);
+	}
+
+	/**
+	 * Phase 94: upgrades a code block that rendered without tokenization
+	 * (the null-tokenizer fallback) once its language's grammar registers.
+	 * Each attempt's tokenizeToString awaits TokenizationRegistry.getOrCreate,
+	 * which also triggers a pending grammar factory load — the next attempt
+	 * sees it registered and the colored source swaps in place (header, copy
+	 * button and expand pill stay untouched; only the tokenized source node
+	 * is replaced). Bounded: the retries stop when the block left the
+	 * document (its render was replaced) or the attempt cap runs out — a
+	 * language with no grammar keeps rendering plain.
+	 */
+	private scheduleTokenizationUpgrade(block: HTMLElement, languageAlias: string | undefined, rawInfo: string | undefined, value: string, editor: ICodeEditor | undefined): void {
+		const codeBlockWindow = getWindow(block);
+		let attempt = 0;
+		let upgraded = false;
+		const step = () => {
+			attempt++;
+			if (!block.isConnected) {
+				return; // the render was replaced or disposed — stop
+			}
+			const languageId = this.resolveCodeBlockLanguage(languageAlias, rawInfo, editor) ?? PLAINTEXT_LANGUAGE_ID;
+			// tokenizeToString awaits TokenizationRegistry.getOrCreate — a
+			// pending grammar factory load is triggered here, so this
+			// attempt usually lands the colored source directly.
+			void tokenizeToString(this._languageService, value, languageId).then(html => {
+				if (upgraded || !block.isConnected) {
+					return;
+				}
+				const content = EditorMarkdownCodeBlockRenderer._ttpTokenizer ? EditorMarkdownCodeBlockRenderer._ttpTokenizer.createHTML(html) ?? html : html;
+				const holder = document.createElement('span');
+				holder.innerHTML = content as string;
+				// eslint-disable-next-line no-restricted-syntax
+				const source = block.querySelector('.monaco-tokenized-source');
+				// eslint-disable-next-line no-restricted-syntax
+				const tokenized = holder.querySelector('.monaco-tokenized-source');
+				if (!isHTMLElement(source) || !isHTMLElement(tokenized) || tokenized.innerHTML === source.innerHTML) {
+					return; // still plain (or unchanged) — keep retrying
+				}
+				applyFontInfo(tokenized, this.getFontInfo(editor));
+				source.replaceWith(tokenized);
+				upgraded = true;
+			}).catch(() => {
+				// grammar load failure — keep the plain rendering
+			}).then(() => {
+				if (!upgraded && attempt < TOKENIZATION_RETRY_ATTEMPTS && block.isConnected) {
+					codeBlockWindow.setTimeout(step, TOKENIZATION_RETRY_DELAY_MS);
+				}
+			});
+		};
+		codeBlockWindow.setTimeout(step, TOKENIZATION_RETRY_DELAY_MS);
 	}
 
 	/**

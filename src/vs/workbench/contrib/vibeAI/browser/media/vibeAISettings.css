@@ -396,6 +396,47 @@ select.vibe-ai-settings-input {
 	margin-top: 6px;
 }
 
+/* --- customize rows（Phase 142：Rules / Skills / MCP 雙層範圍） --- */
+
+/* scope 徽章（Cursor parity：Project / User 兩層）——專案藍 / 全域灰 */
+.vibe-ai-settings-scope-badge {
+	font-size: 10px;
+	padding: 1px 8px;
+	border-radius: 9px;
+	font-weight: 600;
+	flex-shrink: 0;
+}
+
+.vibe-ai-settings-scope-badge.project {
+	background: rgba(55, 148, 255, 0.18);
+	color: var(--vscode-charts-blue, #3794ff);
+}
+
+.vibe-ai-settings-scope-badge.global {
+	background: rgba(128, 128, 128, 0.18);
+	color: var(--vscode-descriptionForeground);
+}
+
+/* disabled（toggle-off）的 MCP 列——重新啟用前整列調暗（models 列同款） */
+.vibe-ai-settings-custom.off .vibe-ai-settings-model-name,
+.vibe-ai-settings-custom.off .vibe-ai-settings-card-desc,
+.vibe-ai-settings-custom.off .vibe-ai-settings-scope-badge {
+	opacity: 0.5;
+}
+
+/* 新增表單的開關列（label + toggle 同行）與多行內容欄 */
+.vibe-ai-settings-field-row {
+	flex-direction: row;
+	align-items: center;
+	justify-content: space-between;
+}
+
+textarea.vibe-ai-settings-input {
+	resize: vertical;
+	min-height: 90px;
+	font-family: var(--vscode-editor-font-family, monospace);
+}
+
 /* --- empty state --- */
 
 .vibe-ai-settings-empty {

@@ -34,9 +34,21 @@ export function computeDiffStats(original: string, updated: string): { additions
 	return { additions, deletions };
 }
 
+/**
+ * Normalizes CRLF / CR line endings to LF. The backend writes text with
+ * platform line endings (aiofiles text mode translates `\n` to `\r\n` on
+ * Windows) while the write's new content keeps `\n` — comparing or
+ * diffing the raw strings mismatched every line on Windows. Diffing,
+ * previews and the editor highlighter's content guard all normalize
+ * before splitting.
+ */
+export function normalizeEol(text: string): string {
+	return text.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+}
+
 export function computeDiffLines(original: string, updated: string): IVibeAIDiffLine[] {
-	const oldLines = original.length === 0 ? [] : original.split('\n');
-	const newLines = updated.length === 0 ? [] : updated.split('\n');
+	const oldLines = original.length === 0 ? [] : normalizeEol(original).split('\n');
+	const newLines = updated.length === 0 ? [] : normalizeEol(updated).split('\n');
 
 	const result: IVibeAIDiffLine[] = [];
 

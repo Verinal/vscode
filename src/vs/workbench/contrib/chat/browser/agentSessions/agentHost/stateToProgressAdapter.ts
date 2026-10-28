@@ -25,6 +25,8 @@ import { readImageGenerationToolMetadata } from '../../../../../../platform/agen
 import { readAttachmentDetail } from '../../../../../../platform/agentHost/common/meta/attachmentMeta.js';
 import { COPILOT_HYDRA_FUSION_MODEL_ID } from '../../../../../../platform/agentHost/common/copilotCliConfig.js';
 import { getChatErrorDetailsFromMeta, IChatErrorContext } from '../../../common/chatErrorMessages.js';
+import type { IToolResultOutputDetails } from '../../../common/tools/languageModelToolsService.js';
+import type { IToolResultOutputDetailsSerialized } from '../../../common/chatService/chatService.js';
 import { AICustomizationManagementCommands, AICustomizationManagementSection } from '../../../common/aiCustomizationWorkspaceService.js';
 import { AGENT_HOST_SCHEME, createAgentHostResourceUriMapper, type IAgentHostResourceUriMapper, toAgentHostContentUri, toAgentHostUri } from '../../../../../../platform/agentHost/common/agentHostUri.js';
 import { AgentHostElementAttachmentDisplayKind, getElementAttachmentCorrelationId } from '../../../../../../platform/agentHost/common/meta/agentElementAttachments.js';
@@ -1899,6 +1901,25 @@ function getToolInputOutputDetails(tc: ToolCallState, isError: boolean, errorStr
 }
 
 /**
+ * Recovers a custom-renderer data output (e.g. `text/vnd.mermaid`) from a
+ * completed tool call's embedded-resource content. The agent-host protocol
+ * round-trip flattens `toolResultDetails` into `content`, so this is the
+ * only place such an output survives — without recovering it the webview
+ * renderer never runs for agent-host tool calls.
+ */
+function getEmbeddedVndDataBlock(tc: ToolCallState): { mimeType: string; base64Data: string } | undefined {
+	if (tc.status !== ToolCallStatus.Completed) {
+		return undefined;
+	}
+	for (const block of tc.content ?? []) {
+		if (block.type === ToolResultContentType.EmbeddedResource && typeof block.contentType === 'string' && block.contentType.startsWith('text/vnd.')) {
+			return { mimeType: block.contentType, base64Data: block.data };
+		}
+	}
+	return undefined;
+}
+
+/**
  * Builds a minimal {@link MCP.CallToolResult} from an agent-host tool call's
  * content blocks so the chat MCP App webview can receive a
  * `ui/notifications/tool-result` notification with the real tool output
@@ -2186,10 +2207,18 @@ export function completedToolCallToSerialized(tc: ICompletedToolCall, subAgentIn
 			pastTenseMsg = ref;
 		}
 	}
-	const resultDetails = (!toolSpecificData || toolSpecificData.kind === 'generatedImage' || toolSpecificData.kind === 'input' && (toolSpecificData.mcpAppData || toolSpecificData.imageGeneration))
-		&& (tc.status !== ToolCallStatus.Completed || getToolFileEdits(tc).length === 0)
-		? getToolInputOutputDetails(tc, !isSuccess, getToolErrorString(tc), !!(toolSpecificData?.kind === 'input' && toolSpecificData.mcpAppData), connectionAuthority)
+	// Same recovery as finalizeToolInvocation, in the serialized (base64)
+	// shape the renderer part decodes, so restored tool calls keep their
+	// webview output.
+	const vndData = getEmbeddedVndDataBlock(tc);
+	const dataOutput: IToolResultOutputDetailsSerialized | undefined = vndData
+		? { output: { type: 'data', mimeType: vndData.mimeType, base64Data: vndData.base64Data } }
 		: undefined;
+	const resultDetails = dataOutput
+		?? ((!toolSpecificData || toolSpecificData.kind === 'generatedImage' || toolSpecificData.kind === 'input' && (toolSpecificData.mcpAppData || toolSpecificData.imageGeneration))
+			&& (tc.status !== ToolCallStatus.Completed || getToolFileEdits(tc).length === 0)
+			? getToolInputOutputDetails(tc, !isSuccess, getToolErrorString(tc), !!(toolSpecificData?.kind === 'input' && toolSpecificData.mcpAppData), connectionAuthority)
+			: undefined);
 
 	return {
 		kind: 'toolInvocationSerialized',
@@ -3159,13 +3188,21 @@ export function finalizeToolInvocation(invocation: ChatToolInvocation, tc: ToolC
 	// card and the `sessionCreated` linked session title — so we don't duplicate
 	// the result underneath them. Search results and separately-rendered file
 	// edits are likewise excluded.
-	const resultDetails = !isTerminal
-		&& invocation.toolSpecificData?.kind !== 'subagent'
-		&& invocation.toolSpecificData?.kind !== 'sessionCreated'
-		&& getToolKind(tc) !== 'search'
-		&& fileEdits.length === 0
-		? getToolInputOutputDetails(tc, isFailure, errorString, hasMcpAppData, connectionAuthority)
+	// Recover a custom-renderer data output (e.g. `text/vnd.mermaid`) that only
+	// survives the protocol round-trip inside `content`, so the webview
+	// renderer keeps running after the tool call is finalized.
+	const vndData = getEmbeddedVndDataBlock(tc);
+	const dataOutput: IToolResultOutputDetails | undefined = vndData
+		? { output: { type: 'data', mimeType: vndData.mimeType, value: decodeBase64(vndData.base64Data) } }
 		: undefined;
+	const resultDetails = dataOutput
+		?? (!isTerminal
+			&& invocation.toolSpecificData?.kind !== 'subagent'
+			&& invocation.toolSpecificData?.kind !== 'sessionCreated'
+			&& getToolKind(tc) !== 'search'
+			&& fileEdits.length === 0
+			? getToolInputOutputDetails(tc, isFailure, errorString, hasMcpAppData, connectionAuthority)
+			: undefined);
 	const result: IToolResult | undefined = isFailure || resultDetails
 		? { content: [], toolResultError: isFailure ? errorString || (isCompleted ? true : undefined) : undefined, toolResultDetails: resultDetails }
 		: undefined;

@@ -5,7 +5,7 @@
 
 import electron from 'electron';
 import { Disposable } from '../../../base/common/lifecycle.js';
-import { isMacintosh } from '../../../base/common/platform.js';
+import { isLinux, isMacintosh } from '../../../base/common/platform.js';
 import { extUriBiasedIgnorePathCase } from '../../../base/common/resources.js';
 import { URI } from '../../../base/common/uri.js';
 import { IConfigurationService } from '../../configuration/common/configuration.js';
@@ -71,6 +71,16 @@ export class WindowsStateHandler extends Disposable {
 		super();
 
 		this._state = restoreWindowsState(this.stateService.getItem<ISerializedWindowsState>(WindowsStateHandler.windowsStateStorageKey));
+
+		// Vulcan (Phase 149): never silently restore a workspace folder that
+		// contains the product itself (the app root or an ancestor of it).
+		// Legacy releases launched the editor with their own source root as
+		// the default workspace, so session restore kept re-opening it on
+		// every bare launch and the AI agent bound to the product's own
+		// repository without the user ever opening a project. Folders the
+		// user opens explicitly still work; they just never come back on
+		// their own when they wrap the product.
+		this._state = dropProductRootRestore(this._state, this.logService);
 
 		this.registerListeners();
 	}
@@ -484,4 +494,84 @@ function serializeWindowState(windowState: IWindowState): ISerializedWindowState
 		remoteAuthority: windowState.remoteAuthority,
 		uiState: windowState.uiState
 	};
+}
+
+/**
+ * Vulcan (Phase 149): drop persisted window-state entries whose workspace
+ * folder contains the product itself (the app root or an ancestor of it).
+ *
+ * Session restore (`window.restoreWindows`) re-opens whatever was open in
+ * the previous session. Legacy releases forced the product's own source
+ * root as the default workspace, so that folder kept being restored on
+ * every bare launch - and the AI agent then bound to the product's own
+ * repository without the user ever opening or importing a project. Such a
+ * folder must never come back silently: it is dropped from the restore set
+ * here, at the single point where persisted state enters the main process.
+ * Opening it explicitly inside a session still works, and the state saved
+ * at quit no longer contains it, so the residue self-heals.
+ */
+function dropProductRootRestore(state: IWindowsState, logService: ILogService): IWindowsState {
+	let productRoot: string | undefined;
+	try {
+		productRoot = electron.app.getAppPath();
+	} catch {
+		return state; // no app path resolvable - nothing to guard
+	}
+
+	const productPath = normalizeRestorePath(productRoot);
+	if (!productPath) {
+		return state;
+	}
+
+	// A folder "contains the product" when it is the app root itself or an
+	// ancestor of it (e.g. the repository wrapping <repo>/vscode).
+	const containsProduct = (uri: URI | undefined): boolean => {
+		const folderPath = normalizeRestorePath(uri?.fsPath ?? '');
+		return !!folderPath && (folderPath === productPath || productPath.startsWith(`${folderPath}/`));
+	};
+
+	const dropped: string[] = [];
+	const keepWindow = (windowState: IWindowState): boolean => {
+		if (containsProduct(windowState.folderUri)) {
+			dropped.push(windowState.folderUri!.fsPath);
+			return false;
+		}
+
+		// A .code-workspace file inside the product tree is product-internal
+		// metadata too - never restore it on its own.
+		if (windowState.workspace?.configPath) {
+			if (containsProduct(windowState.workspace.configPath)) {
+				dropped.push(windowState.workspace.configPath.fsPath);
+				return false;
+			}
+		}
+
+		return true;
+	};
+
+	const openedWindows = state.openedWindows.filter(keepWindow);
+	const lastActiveWindow = state.lastActiveWindow && keepWindow(state.lastActiveWindow) ? state.lastActiveWindow : undefined;
+
+	if (dropped.length > 0) {
+		logService.warn(`[WindowsStateHandler] not restoring product-internal workspace folder(s) - the editor must not open its own source as the user's project: ${dropped.join(', ')}`);
+		return { ...state, lastActiveWindow, openedWindows };
+	}
+
+	return state;
+}
+
+function normalizeRestorePath(path: string): string | undefined {
+	if (!path) {
+		return undefined;
+	}
+
+	// Windows/macOS compare paths case-insensitively in practice (the
+	// persisted residue may differ in case and URL-encoding from the app
+	// root); normalize separators + case so the guard actually matches.
+	let normalized = path.replace(/\\/g, '/').replace(/\/+$/, '');
+	if (!isLinux) {
+		normalized = normalized.toLowerCase();
+	}
+
+	return normalized || undefined;
 }

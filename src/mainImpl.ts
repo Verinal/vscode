@@ -38,7 +38,7 @@ const portable = configurePortable(product);
 // it - must behave exactly like `scripts/code.bat`: same environment, same
 // profile. Packaged builds are unaffected.
 // NOTE: `app.isPackaged` cannot gate this: the Electron binary is renamed
-// (`Cursor Fork.exe`), which Electron itself treats as a packaged app, so the
+// (`Vulcan.exe`), which Electron itself treats as a packaged app, so the
 // old check never fired on direct launches. Without `VSCODE_DEV` the main
 // process reports `isBuilt: true`, which disables `cssDevService` so the
 // renderer receives no CSS import map and the workbench ESM graph fails on

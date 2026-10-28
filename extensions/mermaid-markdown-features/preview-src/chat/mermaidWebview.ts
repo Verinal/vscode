@@ -15,12 +15,26 @@ interface PanZoomState {
 
 interface PanZoomOptions {
 	readonly defaultView?: 'center' | 'fit';
+	/**
+	 * Plain mouse drag pans (no Alt modifier). Interactive canvases (the
+	 * full-size popup) set it; inline cards keep the Alt requirement so
+	 * drags stay inert inside the chat thread.
+	 */
+	readonly plainDragPan?: boolean;
 }
 
 interface Size {
 	readonly width: number;
 	readonly height: number;
 }
+
+/**
+ * Upper bound of the per-event zoom step (~10%). A mouse wheel notch emits
+ * one large delta (~100px) while pinch gestures emit many small ones - the
+ * pinch multiplier applied to a notch used to double the scale in a single
+ * Ctrl+wheel step.
+ */
+const MAX_WHEEL_ZOOM_STEP = 0.1;
 
 export class PanZoomHandler {
 	private scale = 1;
@@ -51,7 +65,7 @@ export class PanZoomHandler {
 		this.content = content;
 		this.content.style.transformOrigin = '0 0';
 		this.container.style.overflow = 'hidden';
-		this.container.style.cursor = 'default';
+		this.container.style.cursor = this.options.plainDragPan ? 'grab' : 'default';
 		this.setupEventListeners();
 
 		// Chat output containers can resize without triggering a window resize event.
@@ -106,7 +120,7 @@ export class PanZoomHandler {
 	}
 
 	private setCursor(altKey: boolean, shiftKey: boolean): void {
-		if (this.panModeEnabled) {
+		if (this.panModeEnabled || this.options.plainDragPan) {
 			this.container.style.cursor = 'grab';
 			return;
 		}
@@ -158,10 +172,18 @@ export class PanZoomHandler {
 			const mouseY = e.clientY - rect.top;
 
 			// Calculate zoom (scroll up = zoom in, scroll down = zoom out)
-			// Pinch gestures have smaller deltaY values, so use a higher factor
+			// Pinch gestures have smaller deltaY values, so use a higher factor.
+			// A mouse wheel notch emits one large delta (~100px) while a pinch
+			// emits many small ones - the pinch multiplier applied to a notch
+			// used to double the scale in a single step, so line-mode deltas are
+			// normalized and the per-event step is clamped.
+			const deltaY = e.deltaMode === 1 ? e.deltaY * 16 : e.deltaY;
 			const effectiveZoomFactor = isPinchZoom ? this.zoomFactor * 5 : this.zoomFactor;
-			const delta = -e.deltaY * effectiveZoomFactor;
-			const newScale = Math.min(this.maxScale, Math.max(this.minScale, this.scale * (1 + delta)));
+			const delta = Math.max(-MAX_WHEEL_ZOOM_STEP, Math.min(MAX_WHEEL_ZOOM_STEP, -deltaY * effectiveZoomFactor));
+			// Mirror zoomAtPoint's floor so zooming out of a diagram whose
+			// fitted scale is below minScale does not snap the scale back up.
+			const minAllowedScale = Math.min(this.minScale, this.fitScale, this.scale);
+			const newScale = Math.min(this.maxScale, Math.max(minAllowedScale, this.scale * (1 + delta)));
 
 			// Zoom toward mouse position
 			const scaleFactor = newScale / this.scale;
@@ -175,7 +197,7 @@ export class PanZoomHandler {
 	}
 
 	private handleMouseDown(e: MouseEvent): void {
-		if (e.button !== 0 || (!this.panModeEnabled && !e.altKey)) {
+		if (e.button !== 0 || (!this.panModeEnabled && !e.altKey && !this.options.plainDragPan)) {
 			return;
 		}
 		e.preventDefault();
@@ -456,6 +478,7 @@ export async function initializeMermaidWebview(vscode: VsCodeApi, options?: PanZ
 		// 空來源：mermaid.run 對空節點既不輸出也不報錯，圖會永遠隱形。
 		// 以錯誤呈現收斂，至少讓使用者看到原因而不是空白卡。
 		showRenderError(diagram, new Error('Mermaid diagram source is empty'));
+		vscode.postMessage({ type: 'webviewError', message: 'Mermaid diagram source is empty' });
 		return;
 	}
 	const themeTracker = new VsCodeMermaidThemeTracker();
@@ -492,11 +515,16 @@ export async function initializeMermaidWebview(vscode: VsCodeApi, options?: PanZ
 		await withRenderTimeout(mermaid.run({ nodes: [diagram] }));
 	} catch (err) {
 		showRenderError(diagram, err);
+		vscode.postMessage({ type: 'webviewError', message: err instanceof Error ? err.message : String(err) });
 		return;
 	}
 
 	// Show the diagram now that it's rendered
 	diagram.classList.add('rendered');
+
+	// 告知擴充端模組已執行且圖已渲染——擴充端的看門狗以此區分
+	// 「腳本從未執行」與「渲染較慢」。
+	vscode.postMessage({ type: 'webviewReady' });
 
 	const panZoomHandler = new PanZoomHandler(wrapper, content, vscode, options);
 	panZoomHandler.initialize();

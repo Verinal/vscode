@@ -8,10 +8,72 @@ import { Disposable } from '../../../base/common/lifecycle.js';
 import { timeout } from '../../../base/common/async.js';
 import { ILogService } from '../../log/common/log.js';
 import { IProductService } from '../../product/common/productService.js';
-import { IVibeAIChatRequest, IVibeAICompletionRequest, IVibeAIContextUsage, IVibeAIContextUsageRequest, IVibeAIExecutePlanRequest, IVibeAIInlineEditRequest, IVibeAIModelProvider, IVibeAIPlan, IVibeAIPlanStep, IVibeAIService, IVibeAISkill, IVibeAIStreamData, VIBE_AI_DEFAULT_BACKEND_URL } from '../common/vibeAI.js';
+import { IVibeAICustomizeCreateData, IVibeAICustomizeItem, IVibeAICustomizeResult, IVibeAIChatRequest, IVibeAICompletionRequest, IVibeAIContextUsage, IVibeAIContextUsageRequest, IVibeAIExecutePlanRequest, IVibeAIInlineEditRequest, IVibeAIModelProvider, IVibeAIPlan, IVibeAIPlanStep, IVibeAIQuestion, IVibeAIService, IVibeAISkill, IVibeAIStreamData, IVibeAISubagent, VIBE_AI_DEFAULT_BACKEND_URL, VibeAICustomizeKind, VibeAICustomizeScope } from '../common/vibeAI.js';
 import { ChildProcess, spawn } from 'child_process';
-import { existsSync } from 'fs';
-import { join } from 'path';
+import * as os from 'os';
+import { existsSync, rmSync, writeFileSync } from 'fs';
+import { FileAccess } from '../../../base/common/network.js';
+import { dirname, isAbsolute, join, normalize } from '../../../base/common/path.js';
+
+/**
+ * Resolve a possibly-relative `backendRoot` (portable distribution: the
+ * same product.json must work on any machine) to an absolute directory.
+ * Absolute values pass through untouched. Relative values are matched
+ * against candidate anchors and the first one that actually contains
+ * the backend — Phase 147: the compiled `VulcanBackend.exe`, or the dev
+ * checkout's `app/main.py` — wins:
+ * 1. the app root (backend shipped inside the fork checkout),
+ * 2. its parent (dev checkout: `backend/` sits next to `vscode/`),
+ * 3. the exe directory (packaged portable layout).
+ */
+export function resolveBackendRootPath(configured: string, appRoot: string, execPath: string): string {
+	if (!configured || isAbsolute(configured)) {
+		return configured;
+	}
+	const candidates = [join(appRoot, configured), join(dirname(appRoot), configured), join(dirname(execPath), configured)];
+	for (const candidate of candidates) {
+		if (existsSync(join(candidate, 'app', 'main.py')) || existsSync(join(candidate, BACKEND_EXE_NAME))) {
+			return normalize(candidate);
+		}
+	}
+	// Nothing found: return the app-root candidate so the caller's
+	// "backend root not found" warning names a concrete path.
+	return normalize(candidates[0]);
+}
+
+/**
+ * Compiled backend executable shipped by the packaging pipeline (Phase 147):
+ * the Nuitka-compiled `launcher.py`, staged flat into `{backendRoot}`. Its
+ * presence switches the editor to exe spawn (no Python/venv provisioning at
+ * all); a dev checkout without the exe keeps the venv + uvicorn path below.
+ */
+const BACKEND_EXE_NAME = 'VulcanBackend.exe';
+
+/**
+ * First-run provisioning constants: the Python 3.12 release the editor
+ * auto-installs when no usable (3.10+) interpreter exists - winget id
+ * Python.Python.3.12 / the matching python.org Windows installer.
+ */
+const PYTHON_INSTALL_VERSION = '3.12.8';
+const PYTHON_INSTALL_CORE = '3.12';
+
+/**
+ * Extract the python.exe path from `reg query ...InstallPath /ve` output.
+ * reg prints the default value as: "(Default)    REG_SZ    C:\...\Python312\"
+ * - anything else (REG_BINARY, empty or missing output) yields undefined.
+ */
+export function findPythonInRegistryOutput(output: string | null): string | undefined {
+	if (!output) {
+		return undefined;
+	}
+	for (const line of output.split(/\r?\n/)) {
+		const match = /REG_SZ\s+(.+?)\s*$/.exec(line);
+		if (match) {
+			return join(match[1].replace(/\\$/, ''), 'python.exe');
+		}
+	}
+	return undefined;
+}
 
 /**
  * Node (main process) implementation of the {@link IVibeAIService}.
@@ -48,12 +110,18 @@ export class VibeAIService extends Disposable implements IVibeAIService {
 	}
 
 	/**
-	 * Root directory of the local VibeCoding backend (contains `app/main.py`
-	 * and `venv/`). Configured via product.json `vibeAI.backendRoot`, with an
-	 * environment override for local development.
+	 * Root directory of the local VibeCoding backend: the compiled
+	 * `VulcanBackend.exe` (packaged product, Phase 147) or `app/main.py` +
+	 * `venv/` (dev checkout). Configured via product.json `vibeAI.backendRoot`,
+	 * with an environment override for local development.
 	 */
 	get backendRoot(): string {
-		return this.productService.vibeAI?.backendRoot ?? process.env['VIBE_BACKEND_ROOT'] ?? '';
+		// The launcher (start-fork.bat) exports an absolute VIBE_BACKEND_ROOT
+		// for this machine, so it wins over the product.json default; a
+		// relative product value is resolved against the app root (see
+		// resolveBackendRootPath) for portable distributions.
+		const configured = process.env['VIBE_BACKEND_ROOT'] ?? this.productService.vibeAI?.backendRoot ?? '';
+		return resolveBackendRootPath(configured, dirname(FileAccess.asFileUri('').fsPath), process.execPath);
 	}
 
 	/**
@@ -75,13 +143,12 @@ export class VibeAIService extends Disposable implements IVibeAIService {
 		}
 
 		const root = this.backendRoot;
-		if (!root || !existsSync(join(root, 'app', 'main.py'))) {
+		const backendExe = root ? join(root, BACKEND_EXE_NAME) : '';
+		// Dual-path backend (Phase 147): the packaged product ships the
+		// Nuitka-compiled exe (zero Python provisioning); a dev checkout
+		// keeps the venv + `python -m uvicorn` spawn (--reload workflows).
+		if (!root || (!existsSync(backendExe) && !existsSync(join(root, 'app', 'main.py')))) {
 			this.logService.warn(`[VibeAI] backend root not found (${root || 'unset'}), not spawning backend`);
-			return;
-		}
-		const python = join(root, 'venv', 'Scripts', 'python.exe');
-		if (!existsSync(python)) {
-			this.logService.warn(`[VibeAI] backend venv python not found (${python}), not spawning backend`);
 			return;
 		}
 
@@ -96,8 +163,26 @@ export class VibeAIService extends Disposable implements IVibeAIService {
 			return;
 		}
 
-		this.logService.info(`[VibeAI] spawning local backend (uvicorn app.main:app --host ${host} --port ${port})`);
-		const child = spawn(python, ['-m', 'uvicorn', 'app.main:app', '--host', host, '--port', port], {
+		let command: string;
+		let args: string[];
+		if (existsSync(backendExe)) {
+			command = backendExe;
+			args = ['--host', host, '--port', port];
+		} else {
+			// First-run provisioning: when the venv is missing or broken the
+			// editor builds it itself (auto-installing Python 3.10+ when even
+			// that is missing) so a colleague only ever double-clicks the app.
+			const python = await this.ensureVenvPython(root);
+			if (!python) {
+				this.logService.warn('[VibeAI] backend venv unavailable, not spawning backend');
+				return;
+			}
+			command = python;
+			args = ['-m', 'uvicorn', 'app.main:app', '--host', host, '--port', port];
+		}
+
+		this.logService.info(`[VibeAI] spawning local backend (${existsSync(backendExe) ? BACKEND_EXE_NAME : 'uvicorn app.main:app'} --host ${host} --port ${port})`);
+		const child = spawn(command, args, {
 			cwd: root,
 			stdio: ['ignore', 'pipe', 'pipe'],
 			windowsHide: true
@@ -132,6 +217,264 @@ export class VibeAIService extends Disposable implements IVibeAIService {
 			}
 		}
 		this.logService.warn('[VibeAI] backend did not become healthy within 60s');
+	}
+
+	/**
+	 * First-run backend bootstrap (portable distribution): the editor itself
+	 * provisions the backend environment so a colleague only ever double-
+	 * clicks the app - no launcher script, no manual Python install. Returns
+	 * the venv interpreter to spawn uvicorn with, or null when provisioning
+	 * failed (logged and surfaced via popup).
+	 */
+	private async ensureVenvPython(root: string): Promise<string | null> {
+		const venvPython = join(root, 'venv', 'Scripts', 'python.exe');
+		if (existsSync(venvPython) && await this.venvImportsCleanly(venvPython)) {
+			return venvPython;
+		}
+		// A venv bakes in the absolute path of the base python that created
+		// it - one copied from another machine exists but fails the import
+		// probe, so it is rebuilt from scratch either way.
+		const hostPython = await this.findHostPython() ?? await this.installPython();
+		if (!hostPython) {
+			return null;
+		}
+		this.showBackendPopup('正在配置後端環境，首次啟動需下載依賴，請稍候……');
+		if (!await this.buildVenv(root, hostPython, venvPython)) {
+			this.showBackendPopup('後端環境配置失敗，請重新啟動軟件重試。', true);
+			return null;
+		}
+		this.showBackendPopup('後端環境配置完成。');
+		return venvPython;
+	}
+
+	/**
+	 * The venv must import the backend's server dependencies cleanly - the
+	 * probe catches a venv copied from another machine (its baked-in base
+	 * python path broke) as well as a half-finished first install.
+	 */
+	private async venvImportsCleanly(venvPython: string): Promise<boolean> {
+		return this.processSucceeds(venvPython, ['-c', 'import fastapi, uvicorn']);
+	}
+
+	/**
+	 * Locate a usable Python 3.10+: `where` hits first (the first hit may be
+	 * the Microsoft Store stub, which fails the version probe), then the
+	 * known per-user install locations.
+	 */
+	private async findHostPython(): Promise<string | null> {
+		const candidates: string[] = [];
+		for (const executable of ['python', 'py']) {
+			const where = await this.captureProcessOutput('where', [executable]);
+			if (where) {
+				candidates.push(...where.split(/\r?\n/).map(line => line.trim()).filter(line => line.length > 0));
+			}
+		}
+		const localAppData = process.env['LOCALAPPDATA'];
+		if (localAppData) {
+			for (const version of ['Python312', 'Python313']) {
+				candidates.push(join(localAppData, 'Programs', 'Python', version, 'python.exe'));
+			}
+		}
+		for (const candidate of candidates) {
+			if (await this.isPythonAtLeast310(candidate)) {
+				return candidate;
+			}
+		}
+		return null;
+	}
+
+	/**
+	 * The candidate must really run AND be 3.10+ - the Microsoft Store
+	 * python stub exits with an error instead of executing, so a plain
+	 * existsSync/where check is not enough.
+	 */
+	private async isPythonAtLeast310(pythonPath: string): Promise<boolean> {
+		return this.processSucceeds(pythonPath, ['-c', 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)']);
+	}
+
+	/**
+	 * Install Python 3.12 automatically when no usable 3.10+ exists: winget
+	 * first (cleanest), then the official python.org installer fetched over
+	 * HTTPS. Per-user install (InstallAllUsers=0) - no admin rights needed;
+	 * PrependPath=1 makes future launches find it on PATH. Success is judged
+	 * by locating and version-probing the interpreter afterwards, not by the
+	 * installer exit code (3010 = reboot required still counts).
+	 */
+	private async installPython(): Promise<string | null> {
+		this.showBackendPopup('沒有檢測到 Python 環境，正在幫你下載安裝，請稍候……');
+		this.logService.info('[VibeAI] no Python 3.10+ found, installing Python automatically');
+		const wingetOk = await this.processSucceeds('winget', [
+			'install', '-e', '--id', `Python.Python.${PYTHON_INSTALL_CORE}`,
+			'--silent', '--accept-package-agreements', '--accept-source-agreements', '--disable-interactivity'
+		]);
+		if (!wingetOk) {
+			this.logService.info('[VibeAI] winget unavailable or failed, falling back to the python.org installer');
+			const installer = join(process.env['TEMP'] ?? os.tmpdir(), `python-${PYTHON_INSTALL_VERSION}-amd64.exe`);
+			if (!await this.downloadPythonInstaller(installer) || !await this.runPythonInstaller(installer)) {
+				return this.pythonInstallFailed();
+			}
+		}
+		const located = await this.locateInstalledPython();
+		if (!located) {
+			return this.pythonInstallFailed();
+		}
+		this.logService.info(`[VibeAI] Python ready at ${located}`);
+		return located;
+	}
+
+	private pythonInstallFailed(): null {
+		this.showBackendPopup('Python 自動安裝失敗，請手動安裝 Python 3.10 以上版本後重試。', true);
+		return null;
+	}
+
+	private async downloadPythonInstaller(target: string): Promise<boolean> {
+		const url = `https://www.python.org/ftp/python/${PYTHON_INSTALL_VERSION}/python-${PYTHON_INSTALL_VERSION}-amd64.exe`;
+		try {
+			const response = await fetch(url);
+			if (!response.ok) {
+				this.logService.error(`[VibeAI] python.org installer download failed: HTTP ${response.status}`);
+				return false;
+			}
+			writeFileSync(target, Buffer.from(await response.arrayBuffer()));
+			return true;
+		} catch (error) {
+			this.logService.error('[VibeAI] python.org installer download failed', error);
+			return false;
+		}
+	}
+
+	private async runPythonInstaller(installer: string): Promise<boolean> {
+		if (!existsSync(installer)) {
+			return false;
+		}
+		this.logService.info('[VibeAI] installing Python per-user (quiet, no admin rights needed)');
+		return this.waitForProcessExit(installer, ['/quiet', 'InstallAllUsers=0', 'PrependPath=1', 'Include_test=0']);
+	}
+
+	/**
+	 * Find the interpreter the installer just laid down: the known per-user
+	 * locations first, then the PEP 514 registry records (HKCU for per-user
+	 * installs, HKLM for machine-wide ones).
+	 */
+	private async locateInstalledPython(): Promise<string | null> {
+		const localAppData = process.env['LOCALAPPDATA'];
+		if (localAppData) {
+			for (const version of ['Python312', 'Python313']) {
+				const candidate = join(localAppData, 'Programs', 'Python', version, 'python.exe');
+				if (existsSync(candidate) && await this.isPythonAtLeast310(candidate)) {
+					return candidate;
+				}
+			}
+		}
+		for (const hive of ['HKCU', 'HKLM']) {
+			const output = await this.captureProcessOutput('reg', ['query', `${hive}\\Software\\Python\\PythonCore\\${PYTHON_INSTALL_CORE}\\InstallPath`, '/ve']);
+			const candidate = findPythonInRegistryOutput(output);
+			if (candidate && await this.isPythonAtLeast310(candidate)) {
+				return candidate;
+			}
+		}
+		return null;
+	}
+
+	/**
+	 * Create the venv and install the pinned backend dependencies into it.
+	 * A leftover broken venv (copied from another machine) is removed first
+	 * - `python -m venv` would otherwise "succeed" while keeping the broken
+	 * interpreter in place.
+	 */
+	private async buildVenv(root: string, hostPython: string, venvPython: string): Promise<boolean> {
+		const venvDir = join(root, 'venv');
+		if (existsSync(venvDir)) {
+			try {
+				rmSync(venvDir, { recursive: true, force: true });
+			} catch (error) {
+				this.logService.error('[VibeAI] failed to remove the broken backend venv', error);
+				return false;
+			}
+		}
+		if (!await this.processSucceeds(hostPython, ['-m', 'venv', venvDir])) {
+			this.logService.error('[VibeAI] backend venv creation failed');
+			return false;
+		}
+		// Upgrading pip is best-effort: the bundled pip is good enough.
+		await this.processSucceeds(venvPython, ['-m', 'pip', 'install', '--upgrade', 'pip', '-q']);
+		if (!await this.processSucceeds(venvPython, ['-m', 'pip', 'install', '-q', '-r', join(root, 'requirements.txt')])) {
+			this.logService.error('[VibeAI] backend dependency installation failed');
+			return false;
+		}
+		return true;
+	}
+
+	/**
+	 * First-run progress popups. Chinese text is safe here (unlike in batch
+	 * files): the string reaches PowerShell as native UTF-16 on the command
+	 * line, no codepage is involved.
+	 */
+	private showBackendPopup(message: string, warning = false): void {
+		const text = message.replace(/'/g, "''");
+		spawn('powershell', [
+			'-NoProfile', '-Command',
+			`Add-Type -AssemblyName PresentationFramework; [System.Windows.MessageBox]::Show('${text}', 'Vulcan', 'OK', '${warning ? 'Warning' : 'Information'}')`
+		], { windowsHide: true, stdio: 'ignore' }).on('error', error => {
+			this.logService.warn('[VibeAI] failed to show the popup', error);
+		});
+	}
+
+	private async processSucceeds(command: string, args: string[]): Promise<boolean> {
+		return new Promise(resolve => {
+			let settled = false;
+			const done = (value: boolean) => {
+				if (!settled) {
+					settled = true;
+					resolve(value);
+				}
+			};
+			const child = spawn(command, args, { windowsHide: true, stdio: 'ignore' });
+			child.on('error', () => done(false));
+			child.on('close', code => done(code === 0));
+		});
+	}
+
+	/**
+	 * Runs the given program to completion - the exit CODE is ignored on
+	 * purpose (the Python installer returns 3010 when a reboot is required,
+	 * which still means the interpreter landed on disk).
+	 */
+	private async waitForProcessExit(command: string, args: string[]): Promise<boolean> {
+		return new Promise(resolve => {
+			let settled = false;
+			const done = (value: boolean) => {
+				if (!settled) {
+					settled = true;
+					resolve(value);
+				}
+			};
+			const child = spawn(command, args, { windowsHide: true, stdio: 'ignore' });
+			child.on('error', error => {
+				this.logService.error(`[VibeAI] ${command} failed to start`, error);
+				done(false);
+			});
+			child.on('close', () => done(true));
+		});
+	}
+
+	private async captureProcessOutput(command: string, args: string[]): Promise<string | null> {
+		return new Promise(resolve => {
+			let settled = false;
+			const done = (value: string | null) => {
+				if (!settled) {
+					settled = true;
+					resolve(value);
+				}
+			};
+			const child = spawn(command, args, { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+			let output = '';
+			child.stdout?.on('data', (chunk: Buffer) => { output += String(chunk); });
+			child.on('error', () => done(null));
+			// 'close' (not 'exit'): stdio may still hold buffered output when
+			// the process dies, and the reg-query parse needs every line.
+			child.on('close', code => done(code === 0 ? output : null));
+		});
 	}
 
 	override dispose(): void {
@@ -276,16 +619,18 @@ export class VibeAIService extends Disposable implements IVibeAIService {
 		}
 	}
 
-	async restoreFile(path: string, content: string): Promise<boolean> {
+	async restoreFile(path: string, content: string, workspaceRoot?: string): Promise<boolean> {
 		// The files router registers `@router.put("/")` under prefix `/api/files`
 		// — the URL needs the trailing slash to avoid an HTTP 307 redirect.
+		// Phase 107: relative paths resolve against `project_root` (the
+		// editor's opened folder) when given.
 		const controller = new AbortController();
 		const timeout = setTimeout(() => controller.abort(), 10000);
 		try {
 			const response = await fetch(`${this.backendUrl}/api/files/`, {
 				method: 'PUT',
 				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({ path, content }),
+				body: JSON.stringify({ path, content, project_root: workspaceRoot }),
 				signal: controller.signal
 			});
 			return response.ok;
@@ -297,22 +642,82 @@ export class VibeAIService extends Disposable implements IVibeAIService {
 		}
 	}
 
-	async deleteFile(path: string): Promise<boolean> {
+	async deleteFile(path: string, workspaceRoot?: string): Promise<boolean> {
 		// The files router registers `@router.delete("/{path:path}")` under
 		// prefix `/api/files` — the path param arrives percent-decoded, so
 		// encodeURIComponent keeps nested paths intact (uvicorn unquotes
-		// the raw path). Relative paths are resolved against PROJECT_ROOT
-		// server-side (same as PUT).
+		// the raw path). Relative paths resolve against `project_root`
+		// server-side when given (Phase 107, same as PUT), otherwise the
+		// backend's default root.
 		const controller = new AbortController();
 		const timeout = setTimeout(() => controller.abort(), 10000);
+		const rootQuery = workspaceRoot ? `?project_root=${encodeURIComponent(workspaceRoot)}` : '';
 		try {
-			const response = await fetch(`${this.backendUrl}/api/files/${encodeURIComponent(path)}`, {
+			const response = await fetch(`${this.backendUrl}/api/files/${encodeURIComponent(path)}${rootQuery}`, {
 				method: 'DELETE',
 				signal: controller.signal
 			});
 			return response.ok;
 		} catch (error) {
 			this.logService.error('[VibeAI] delete file failed', error);
+			return false;
+		} finally {
+			clearTimeout(timeout);
+		}
+	}
+
+	async resolveApproval(id: string, approved: boolean): Promise<boolean> {
+		// Phase 92: resolves the command approval gate the agent loop waits
+		// on (Run / Skip card). Unknown/already-decided ids resolve to false
+		// (idempotent) — the card keeps its buttons disabled either way.
+		const controller = new AbortController();
+		const timeout = setTimeout(() => controller.abort(), 10000);
+		try {
+			const response = await fetch(`${this.backendUrl}/api/chat/agent/approvals/resolve`, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ id, approved }),
+				signal: controller.signal
+			});
+			if (!response.ok) {
+				return false;
+			}
+			const data = await response.json() as { resolved?: boolean };
+			return data.resolved === true;
+		} catch (error) {
+			this.logService.error('[VibeAI] resolve approval failed', error);
+			return false;
+		} finally {
+			clearTimeout(timeout);
+		}
+	}
+
+	async steer(sessionId: string, content: string, mode?: 'steer' | 'queue'): Promise<boolean> {
+		// Phase 113: queues a mid-turn steer (Cursor's "send now") for the
+		// running Agent turn — the backend's loop injects it at the next
+		// tool boundary and the `steered` event confirms it. Phase 114:
+		// mode=queue rides the queue instead — never injected mid-turn,
+		// the done event reports it as pending_queue and the pane
+		// auto-resumes it as a new turn. 404 (no running turn for the
+		// session — the gate closed when the turn ended) resolves to false
+		// silently, like a decided approval; the pane keeps the text.
+		const controller = new AbortController();
+		const timeout = setTimeout(() => controller.abort(), 5000);
+		try {
+			const response = await fetch(`${this.backendUrl}/api/chat/agent/steer`, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ session_id: sessionId, content, mode: mode ?? 'steer' }),
+				signal: controller.signal
+			});
+			if (!response.ok) {
+				this.logService.debug(`[VibeAI] steer request failed: HTTP ${response.status}`);
+				return false;
+			}
+			const data = await response.json() as { success?: boolean };
+			return data.success === true;
+		} catch (error) {
+			this.logService.error('[VibeAI] steer failed', error);
 			return false;
 		} finally {
 			clearTimeout(timeout);
@@ -403,7 +808,19 @@ export class VibeAIService extends Disposable implements IVibeAIService {
 					context: request.context,
 					contextLimit: request.contextLimit,
 					// Ask-mode estimate: read-only tool subset + Ask system prompt.
-					readonly: request.readonly
+					readonly: request.readonly,
+					// Phase 116: Side Chat — the parent-thread reference (the
+					// `parent` breakdown row; same assembly as the actual
+					// injection, estimate ≡ sent).
+					parent_context: request.parentContext,
+					// Phase 120: the session goal (the same objective the
+					// turns actually send) — the `goal` breakdown row is
+					// assembled by the same function as the injection
+					// (estimate = sent).
+					goal: request.goal,
+					// Phase 107: the editor's opened folder (rules / skills /
+					// MCP are estimated against it).
+					project_root: request.workspaceRoot
 				}),
 				signal: controller.signal
 			});
@@ -416,13 +833,15 @@ export class VibeAIService extends Disposable implements IVibeAIService {
 		}
 	}
 
-	async listSkills(): Promise<IVibeAISkill[]> {
+	async listSkills(workspaceRoot?: string): Promise<IVibeAISkill[]> {
 		// `@router.get("/agent/skills")` under prefix `/api/chat` —
 		// workspace skills for the chat input `/` completion menu (Phase 78).
+		// Phase 107: lists the opened folder's skills when root is given.
 		const controller = new AbortController();
 		const timeout = setTimeout(() => controller.abort(), 10000);
+		const rootQuery = workspaceRoot ? `?project_root=${encodeURIComponent(workspaceRoot)}` : '';
 		try {
-			const response = await fetch(`${this.backendUrl}/api/chat/agent/skills`, {
+			const response = await fetch(`${this.backendUrl}/api/chat/agent/skills${rootQuery}`, {
 				signal: controller.signal
 			});
 			if (!response.ok) {
@@ -430,6 +849,162 @@ export class VibeAIService extends Disposable implements IVibeAIService {
 			}
 			const data = await response.json() as { skills?: IVibeAISkill[] };
 			return Array.isArray(data.skills) ? data.skills : [];
+		} finally {
+			clearTimeout(timeout);
+		}
+	}
+
+	async listSubagents(workspaceRoot?: string): Promise<IVibeAISubagent[]> {
+		// `@router.get("/agent/subagents")` under prefix `/api/chat` —
+		// workspace file-defined subagents for the chat input `/` completion
+		// menu (Phase 127). Phase 107: lists the opened folder's agents.
+		const controller = new AbortController();
+		const timeout = setTimeout(() => controller.abort(), 10000);
+		const rootQuery = workspaceRoot ? `?project_root=${encodeURIComponent(workspaceRoot)}` : '';
+		try {
+			const response = await fetch(`${this.backendUrl}/api/chat/agent/subagents${rootQuery}`, {
+				signal: controller.signal
+			});
+			if (!response.ok) {
+				throw new Error(`VibeAI backend subagents request failed (HTTP ${response.status})`);
+			}
+			const data = await response.json() as { subagents?: IVibeAISubagent[] };
+			return Array.isArray(data.subagents) ? data.subagents : [];
+		} finally {
+			clearTimeout(timeout);
+		}
+	}
+
+	async customizeList(kind: VibeAICustomizeKind, workspaceRoot?: string): Promise<IVibeAICustomizeItem[]> {
+		// `@router.get("/{kind}")` under prefix `/api/customize` — the merged
+		// dual-scope list for the Settings → Rules / Skills / MCP pages
+		// (Phase 142). Phase 107: the opened folder's project layer.
+		const controller = new AbortController();
+		const timeout = setTimeout(() => controller.abort(), 10000);
+		const rootQuery = workspaceRoot ? `?project_root=${encodeURIComponent(workspaceRoot)}` : '';
+		try {
+			const response = await fetch(`${this.backendUrl}/api/customize/${kind}${rootQuery}`, {
+				signal: controller.signal
+			});
+			if (!response.ok) {
+				throw new Error(`VibeAI backend customize request failed (HTTP ${response.status})`);
+			}
+			const data = await response.json() as { items?: IVibeAICustomizeItem[] };
+			return Array.isArray(data.items) ? data.items : [];
+		} finally {
+			clearTimeout(timeout);
+		}
+	}
+
+	async customizeCreate(kind: VibeAICustomizeKind, data: IVibeAICustomizeCreateData, workspaceRoot?: string): Promise<IVibeAICustomizeResult> {
+		// `@router.post("/{kind}")` under prefix `/api/customize` (Phase 142).
+		const controller = new AbortController();
+		const timeout = setTimeout(() => controller.abort(), 10000);
+		const rootQuery = workspaceRoot ? `?project_root=${encodeURIComponent(workspaceRoot)}` : '';
+		try {
+			const response = await fetch(`${this.backendUrl}/api/customize/${kind}${rootQuery}`, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify(data),
+				signal: controller.signal
+			});
+			if (!response.ok) {
+				const text = await response.text().catch(() => '');
+				return { ok: false, error: `HTTP ${response.status}${text ? ` — ${text.substring(0, 160)}` : ''}` };
+			}
+			return await response.json() as IVibeAICustomizeResult;
+		} catch (error) {
+			if (controller.signal.aborted) {
+				return { ok: false, error: 'Timed out after 10s' };
+			}
+			return { ok: false, error: String(error) };
+		} finally {
+			clearTimeout(timeout);
+		}
+	}
+
+	async customizeDelete(kind: VibeAICustomizeKind, name: string, scope: VibeAICustomizeScope, workspaceRoot?: string): Promise<IVibeAICustomizeResult> {
+		// `@router.delete("/{kind}")` — name + scope pick the entry and the
+		// layer (the row's own origin, Phase 142).
+		const controller = new AbortController();
+		const timeout = setTimeout(() => controller.abort(), 10000);
+		const query = new URLSearchParams();
+		if (workspaceRoot) {
+			query.set('project_root', workspaceRoot);
+		}
+		query.set('name', name);
+		query.set('scope', scope);
+		try {
+			const response = await fetch(`${this.backendUrl}/api/customize/${kind}?${query.toString()}`, {
+				method: 'DELETE',
+				signal: controller.signal
+			});
+			if (!response.ok) {
+				const text = await response.text().catch(() => '');
+				return { ok: false, error: `HTTP ${response.status}${text ? ` — ${text.substring(0, 160)}` : ''}` };
+			}
+			return await response.json() as IVibeAICustomizeResult;
+		} catch (error) {
+			if (controller.signal.aborted) {
+				return { ok: false, error: 'Timed out after 10s' };
+			}
+			return { ok: false, error: String(error) };
+		} finally {
+			clearTimeout(timeout);
+		}
+	}
+
+	async customizeToggle(kind: VibeAICustomizeKind, name: string, scope: VibeAICustomizeScope, workspaceRoot?: string): Promise<IVibeAICustomizeResult> {
+		// `@router.post("/{kind}/toggle")` — MCP servers only; the backend
+		// flips `disabled` in the scope's mcp.json and hot-reloads (Phase 142).
+		const controller = new AbortController();
+		const timeout = setTimeout(() => controller.abort(), 10000);
+		const rootQuery = workspaceRoot ? `?project_root=${encodeURIComponent(workspaceRoot)}` : '';
+		try {
+			const response = await fetch(`${this.backendUrl}/api/customize/${kind}/toggle${rootQuery}`, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ name, scope }),
+				signal: controller.signal
+			});
+			if (!response.ok) {
+				const text = await response.text().catch(() => '');
+				return { ok: false, error: `HTTP ${response.status}${text ? ` — ${text.substring(0, 160)}` : ''}` };
+			}
+			return await response.json() as IVibeAICustomizeResult;
+		} catch (error) {
+			if (controller.signal.aborted) {
+				return { ok: false, error: 'Timed out after 10s' };
+			}
+			return { ok: false, error: String(error) };
+		} finally {
+			clearTimeout(timeout);
+		}
+	}
+
+	async reloadMcp(workspaceRoot?: string): Promise<IVibeAICustomizeResult> {
+		// `@router.post("/agent/mcp/reload")` under prefix `/api/chat` —
+		// rebuilds the connection table and reconnects after mcp.json
+		// changes (Phase 142); statuses come back as items.
+		const controller = new AbortController();
+		const timeout = setTimeout(() => controller.abort(), 10000);
+		try {
+			const response = await fetch(`${this.backendUrl}/api/chat/agent/mcp/reload`, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ project_root: workspaceRoot }),
+				signal: controller.signal
+			});
+			if (!response.ok) {
+				const text = await response.text().catch(() => '');
+				return { ok: false, error: `HTTP ${response.status}${text ? ` — ${text.substring(0, 160)}` : ''}` };
+			}
+			return await response.json() as IVibeAICustomizeResult;
+		} catch (error) {
+			if (controller.signal.aborted) {
+				return { ok: false, error: 'Timed out after 10s' };
+			}
+			return { ok: false, error: String(error) };
 		} finally {
 			clearTimeout(timeout);
 		}
@@ -470,7 +1045,35 @@ export class VibeAIService extends Disposable implements IVibeAIService {
 					autoPool: chat.autoPool,
 					autoMode: chat.autoMode,
 					// Phase 71 Plan mode execute phase: the user-approved plan.
-					plan: execute.plan
+					plan: execute.plan,
+					// Phase 113: the conversation's session id — the Agent
+					// endpoint opens its steer gate on it so mid-turn sends
+					// can queue as steers; the chat/plan/execute endpoints
+					// ignore it (backward compatible).
+					session_id: chat.sessionId,
+					// Phase 116: Side Chat — side_of (the parent session id,
+					// log/event marker) + parent_context (the frontend-capped
+					// parent-thread reference; the backend re-clamps and
+					// injects it as a hidden <parent_thread reference>
+					// system-prompt block). Main-thread turns omit both.
+					side_of: chat.sideOf,
+					parent_context: chat.parentContext,
+					// Phase 120: the session goal (Cursor parity: give the
+					// agent a long-lived objective to work towards until
+					// it's fully complete) — carried on every turn of the
+					// conversation that set it via /goal; the backend
+					// injects it as the hidden <session goal> block and
+					// mark_goal_complete confirms completion. Absent = zero
+					// change (backward compatible).
+					goal: chat.goal,
+					// Phase 139: terminal permission mode (Cursor parity:
+					// review_all | high_risk | trusted) — gates the
+					// agent's terminal commands per turn. Absent = the
+					// backend's default (high_risk).
+					permission_mode: chat.permissionMode,
+					// Phase 107: the editor's opened folder — the backend
+					// rebinds its tools / RAG index / rules / skills to it.
+					project_root: request.workspaceRoot
 				}),
 				signal: controller.signal
 			});
@@ -491,7 +1094,12 @@ export class VibeAIService extends Disposable implements IVibeAIService {
 					? detail
 					: `VibeAI backend request failed (HTTP ${response.status})`;
 				this.logService.warn(`[VibeAI] ${message}`);
-				this._onStreamData.fire({ requestId, type: 'error', message });
+				// Phase 154: an HTTP 5xx from the backend (crash, bad
+				// gateway) is worth a Retry — the turn re-rides as-is.
+				// 4xx responses are actionable config errors (e.g. 400
+				// 沒有模型可用) where re-sending cannot help, so they
+				// keep no button.
+				this._onStreamData.fire({ requestId, type: 'error', message, retryable: response.status >= 500 });
 				this._onStreamData.fire({ requestId, type: 'done' });
 				return;
 			}
@@ -523,7 +1131,15 @@ export class VibeAIService extends Disposable implements IVibeAIService {
 				this._onStreamData.fire({ requestId, type: 'done' });
 			} else {
 				this.logService.error('[VibeAI] stream failed', error);
-				this._onStreamData.fire({ requestId, type: 'error', message: String(error) });
+				// Phase 154: transport-level interruptions (timeout, flaky
+				// network, the backend connection dropping mid-stream —
+				// undici's "TypeError: terminated" / "fetch failed",
+				// ECONNRESET, socket hang up) are all "the answer got cut
+				// off" — fire the error WITH `retryable: true` so the pane
+				// renders its Phase 134 Retry button and the turn can be
+				// re-sent instead of retyped (normalizeEvent keeps the
+				// backend's own SSE classification for in-band errors).
+				this._onStreamData.fire({ requestId, type: 'error', message: String(error), retryable: true });
 				this._onStreamData.fire({ requestId, type: 'done' });
 			}
 		} finally {
@@ -591,9 +1207,9 @@ export class VibeAIService extends Disposable implements IVibeAIService {
 	}
 
 	private normalizeEvent(requestId: string, event: any): IVibeAIStreamData[] {
-		// Backend error payload: { "error": string }
+		// Backend error payload: { "error": string, "retryable"?: boolean }
 		if (typeof event?.error === 'string') {
-			return [{ requestId, type: 'error', message: event.error }];
+			return [{ requestId, type: 'error', message: event.error, retryable: event.retryable === true }];
 		}
 
 		// POST /api/chat: OpenAI-compatible chat chunk
@@ -641,7 +1257,13 @@ export class VibeAIService extends Disposable implements IVibeAIService {
 					&& rawResult.read && typeof rawResult.read === 'object'
 					? rawResult.read
 					: undefined;
-				return [{ requestId, type: 'tool_result', tool: { id: event.id, name: event.name, arguments: event.arguments, result, status: event.status, codeChange: event.code_change, output, read }, raw: event }];
+				// Phase 137: needs-console commands (interactive REPLs, dev
+				// servers, ssh…) can't run in the sandboxed executor — the
+				// backend handed them off: the pane runs it in the editor's
+				// integrated terminal (ITerminalService).
+				const editorTerminal = rawResult && typeof rawResult === 'object'
+					&& (rawResult as { editor_terminal?: unknown }).editor_terminal === true;
+				return [{ requestId, type: 'tool_result', tool: { id: event.id, name: event.name, arguments: event.arguments, result, status: event.status, codeChange: event.code_change, output, read, editorTerminal }, raw: event }];
 			}
 			case 'file_delta':
 				// `id` ties streaming write content to its pending tool card.
@@ -668,6 +1290,36 @@ export class VibeAIService extends Disposable implements IVibeAIService {
 				// Phase 51: the round hit its per-round output token budget
 				// (finish_reason=length) — the pane renders a truncation note.
 				return [{ requestId, type: 'output_truncated', raw: event }];
+			case 'limit_reached':
+				// Phase 103: the agent loop exhausted its rounds/segments or
+				// the context window — the turn ends with the backend's
+				// forced summary; the pane renders a note + Continue chip
+				// (Cursor parity) wired to a follow-up send.
+				return [{
+					requestId,
+					type: 'limit_reached',
+					limitReached: {
+						rounds: typeof event.rounds === 'number' ? event.rounds : 0,
+						segments: typeof event.segments === 'number' ? event.segments : 0,
+						reason: typeof event.reason === 'string' ? event.reason : 'rounds',
+					},
+					raw: event
+				}];
+			case 'retry':
+				// Phase 134: the backend is retrying the LLM call after a
+				// transient failure (auto retry with exponential backoff) —
+				// the pane renders a transient Retrying chip.
+				return [{
+					requestId,
+					type: 'retry',
+					retry: {
+						attempt: typeof event.attempt === 'number' ? event.attempt : 0,
+						max: typeof event.max === 'number' ? event.max : 0,
+						delay: typeof event.delay === 'number' ? event.delay : 0,
+						reason: typeof event.reason === 'string' ? event.reason : undefined,
+					},
+					raw: event
+				}];
 			case 'model_routed':
 				// Phase 70: the Auto router picked this model for the turn
 				// (intent+complexity routing over the Settings → Models pool;
@@ -692,6 +1344,63 @@ export class VibeAIService extends Disposable implements IVibeAIService {
 					requestId,
 					type: 'plan',
 					plan: this.normalizePlan(event?.plan),
+					raw: event
+				}];
+			case 'agent_questions':
+				// Phase 121: the model asked clarifying questions without
+				// stopping work (ask_questions) — the pane renders a
+				// question card per event; answers go out via steer() and
+				// inject at the next tool boundary (the loop never waits).
+				return [{
+					requestId,
+					type: 'agent_questions',
+					questions: {
+						id: typeof event.id === 'string' ? event.id : '',
+						items: Array.isArray(event.questions)
+							? event.questions
+								.map((item: unknown): IVibeAIQuestion | null => {
+									const raw = (item ?? {}) as { question?: unknown; options?: unknown };
+									const question = typeof raw.question === 'string' ? raw.question : '';
+									if (question.length === 0) {
+										return null;
+									}
+									const options = Array.isArray(raw.options)
+										? raw.options.filter((o: unknown): o is string => typeof o === 'string' && o.length > 0)
+										: undefined;
+									return { question, options: options && options.length > 0 ? options : undefined };
+								})
+								.filter((q: IVibeAIQuestion | null): q is IVibeAIQuestion => q !== null)
+							: [],
+					},
+					raw: event
+				}];
+			case 'approval_request':
+				// Phase 92: the backend intercepted a terminal command and
+				// parked it at the approval gate — the pane renders the
+				// Run / Skip card (Cursor-parity command approval).
+				return [{
+					requestId,
+					type: 'approval_request',
+					approval: {
+						id: typeof event.id === 'string' ? event.id : '',
+						command: typeof event.command === 'string' ? event.command : '',
+						reason: typeof event.reason === 'string' ? event.reason : '',
+					},
+					raw: event
+				}];
+			case 'approval_resolved':
+				// Phase 92: the gate decided (user click / timeout) — the
+				// card folds to its decided state.
+				return [{
+					requestId,
+					type: 'approval_resolved',
+					approval: {
+						id: typeof event.id === 'string' ? event.id : '',
+						command: '',
+						reason: '',
+						approved: event.approved === true,
+						timedOut: event.timed_out === true,
+					},
 					raw: event
 				}];
 			case 'plan_start':
@@ -744,9 +1453,64 @@ export class VibeAIService extends Disposable implements IVibeAIService {
 					raw: event
 				}];
 			case '_round_end':
-				return [{ requestId, type: 'round_end', raw: event }];
+				// Phase 89: the backend's explicit final-result marker rides
+				// on the round boundary — final=true = this round's text is
+				// THE answer (no tool_calls follow); the pane folds the
+				// Worked shell on it instead of guessing from the length.
+				// Phase 90: the marker precedes the answer text (the backend
+				// holds post-tool rounds' text until the boundary), so the
+				// pane's fold lands before any answer text renders.
+				return [{ requestId, type: 'round_end', final: event.final === true, raw: event }];
+			case 'steered':
+				// Phase 113: the backend injected a queued mid-turn steer
+				// (role=user) at the tool boundary — the pane renders the
+				// thread's Steered bubble with the content.
+				return [{
+					requestId,
+					type: 'steered',
+					steered: typeof event.content === 'string' ? event.content : '',
+					raw: event
+				}];
+			case 'goal_complete':
+				// Phase 120: the model declared the session goal complete
+				// (mark_goal_complete; the event follows the tool_result) —
+				// the pane flips the goal banner to its done state
+				// (idempotent on repeated declarations).
+				return [{ requestId, type: 'goal_complete', goalComplete: true, raw: event }];
+			case 'turn_state':
+				// Phase 150: the backend turn state machine's explicit
+				// lifecycle announcement (Cursor-parity event-driven
+				// design) — the pane stores it on the stream state so
+				// guards read backend state instead of inferred flags.
+				// `final` rides the existing field (terminal states).
+				return [{
+					requestId,
+					type: 'turn_state',
+					turnState: typeof event.state === 'string' ? event.state : undefined,
+					final: event.final === true,
+					raw: event
+				}];
 			case 'done':
-				return [{ requestId, type: 'done', rounds: event.rounds, raw: event }];
+				// Phase 113: steers queued but never injected (the turn
+				// ended without a tool boundary to drain them) ride the
+				// done event's pending_steer — the pane preserves them as
+				// steered history entries with a "not delivered" note.
+				return [{
+					requestId,
+					type: 'done',
+					rounds: event.rounds,
+					pendingSteer: Array.isArray(event.pending_steer)
+						? event.pending_steer.filter((s: unknown): s is string => typeof s === 'string')
+						: undefined,
+					// Phase 114: queue-mode messages the turn ended with —
+					// the pane merges them into its queue and auto-resumes
+					// the first as a NEW agent turn (the rest ride later
+					// turn ends until the queue empties).
+					pendingQueue: Array.isArray(event.pending_queue)
+						? event.pending_queue.filter((s: unknown): s is string => typeof s === 'string')
+						: undefined,
+					raw: event
+				}];
 			default:
 				return [{ requestId, type: 'unknown', raw: event }];
 		}

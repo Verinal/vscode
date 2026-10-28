@@ -9,7 +9,6 @@ import { Disposable, DisposableStore } from '../../../../base/common/lifecycle.j
 import { URI } from '../../../../base/common/uri.js';
 import { localize } from '../../../../nls.js';
 import { IClipboardService } from '../../../../platform/clipboard/common/clipboardService.js';
-import { ICommandService } from '../../../../platform/commands/common/commands.js';
 import { ILogService } from '../../../../platform/log/common/log.js';
 import { IChatOutputRendererService } from '../../chat/browser/chatOutputItemRenderer.js';
 
@@ -31,14 +30,6 @@ const MERMAID_SPINNER_TICK_MS = 50;
 const MERMAID_SPINNER_STEP_DEG = 12;
 /** Consecutive disconnected ticks (~300ms) before the rotation timer stops. */
 const MERMAID_SPINNER_DISCONNECT_TICKS = 6;
-
-/**
- * Command the built-in mermaid extension contributes for the pop-out editor
- * tab (zoom / pan / copy / theme tracking included). Contributed commands
- * auto-activate on executeCommand, so the pop-out needs no extra activation
- * code.
- */
-export const MERMAID_OPEN_IN_EDITOR_COMMAND = '_mermaid-markdown.openInEditor';
 
 /** Whether the fence language routes to the mermaid diagram renderer. */
 export function isMermaidCodeBlock(languageId: string | undefined): boolean {
@@ -63,7 +54,7 @@ export interface IPendingMermaidPart {
 	readonly element: HTMLElement;
 	/**
 	 * Phase 85 streaming reuse: replaces the block's source (the header's
-	 * copy and pop-out handlers read the current one). The element — and
+	 * copy and zoom-popup handlers read the current one). The element — and
 	 * its spinner — is kept, so the spinner is not rebuilt (and its
 	 * timer-driven rotation is not restarted) by every throttled re-render
 	 * of the streaming pass.
@@ -85,7 +76,8 @@ export interface IPendingMermaidPart {
  * renderer (`IChatOutputRendererService.renderCodeBlock`) — the
  * `mermaid-markdown-features` extension renders each block in its own
  * webview (mermaid, pan/zoom, theme tracking and the context-menu
- * open-in-editor / copy actions included).
+ * copy/reset actions included). The header's zoom button opens the
+ * large-diagram popup instead of the old editor tab.
  *
  * This class builds the block shell (header + webview holder) and defers
  * the webview creation until the block's flush runs: webviews are iframes,
@@ -98,12 +90,14 @@ export class VibeAIMermaidRenderer extends Disposable {
 
 	constructor(
 		@IChatOutputRendererService private readonly chatOutputRendererService: IChatOutputRendererService,
-		@ICommandService private readonly commandService: ICommandService,
 		@IClipboardService private readonly clipboardService: IClipboardService,
 		@ILogService private readonly logService: ILogService,
 	) {
 		super();
 	}
+
+	/** The currently open zoom popup (one at a time), or undefined. */
+	private activeZoomModalDisposables: DisposableStore | undefined;
 
 	/**
 	 * Builds a mermaid block shell for the markdown render pass, or
@@ -154,7 +148,7 @@ export class VibeAIMermaidRenderer extends Disposable {
 		if (!this.canRender(languageId)) {
 			return undefined;
 		}
-		// The header's copy/pop-out handlers read the CURRENT source —
+		// The header's copy/zoom-popup handlers read the CURRENT source —
 		// streaming reuse updates it per render (updateSource below).
 		let currentSource = source;
 		const element = $('div.vibe-ai-chat-mermaid');
@@ -240,7 +234,7 @@ export class VibeAIMermaidRenderer extends Disposable {
 		}, MERMAID_SPINNER_TICK_MS);
 	}
 
-	private async renderDiagramWebview(holder: HTMLElement, source: string, disposables: DisposableStore): Promise<void> {
+	private async renderDiagramWebview(holder: HTMLElement, source: string, disposables: DisposableStore, options?: { readonly interactiveCanvas?: boolean }): Promise<void> {
 		DOM.clearNode(holder);
 		try {
 			const part = await this.chatOutputRendererService.renderCodeBlock(
@@ -250,6 +244,10 @@ export class VibeAIMermaidRenderer extends Disposable {
 				{
 					title: localize('vibeAIChat.mermaidTitle', "Mermaid diagram"),
 					chatSessionResource: MERMAID_SESSION_RESOURCE,
+					// The popup renders as a fixed interactive canvas: the webview
+					// fills the modal body (no content-driven height) and the page
+					// enables pan/zoom (fitted view, plain drag, clamped wheel).
+					interactiveCanvas: options?.interactiveCanvas,
 				},
 				CancellationToken.None,
 			);
@@ -286,8 +284,8 @@ export class VibeAIMermaidRenderer extends Disposable {
 	}
 
 	/**
-	 * The block header: mermaid label + the pop-out button (opens the
-	 * built-in mermaid editor tab) + a hover-revealed source copy button.
+	 * The block header: mermaid label + the zoom button (opens the
+	 * large-diagram popup) + a hover-revealed source copy button.
 	 * Reuses the code block header classes so the chat's CSS styles both.
 	 */
 	private createBlockHeader(getSource: () => string): HTMLElement {
@@ -303,22 +301,27 @@ export class VibeAIMermaidRenderer extends Disposable {
 
 		const expandButton = $('button.vibe-ai-code-block-copy.vibe-ai-mermaid-expand') as HTMLButtonElement;
 		expandButton.type = 'button';
-		expandButton.title = localize('vibeAIChat.mermaidOpenInEditor', "Open diagram in editor");
+		expandButton.title = localize('vibeAIChat.mermaidViewLarger', "View larger");
 		expandButton.setAttribute('aria-label', expandButton.title);
-		const expandIcon = $('span.codicon.codicon-link-external');
+		const expandIcon = $('span.codicon.codicon-screen-full');
 		expandIcon.setAttribute('aria-hidden', 'true');
 		expandButton.appendChild(expandIcon);
 		expandButton.addEventListener('click', event => {
 			event.preventDefault();
 			event.stopPropagation();
-			this.commandService.executeCommand(MERMAID_OPEN_IN_EDITOR_COMMAND, {
-				mermaidSource: getSource(),
-				title: localize('vibeAIChat.mermaidTitle', "Mermaid diagram"),
-			}).catch(error => {
-				this.logService.warn('vibeAI chat: failed to open the mermaid editor tab', error);
-			});
+			this.openZoomModal(getSource, expandButton);
 		});
 
+		header.append(titleGroup, expandButton, this.createCopyButton(getSource));
+		return header;
+	}
+
+	/**
+	 * The source copy button (block header + zoom popup titlebar): writes
+	 * the current source and flashes a check mark, like the built-in copy
+	 * buttons.
+	 */
+	private createCopyButton(getSource: () => string): HTMLButtonElement {
 		const copyButton = $('button.vibe-ai-code-block-copy') as HTMLButtonElement;
 		copyButton.type = 'button';
 		copyButton.title = localize('copyCodeBlock', "Copy");
@@ -352,8 +355,96 @@ export class VibeAIMermaidRenderer extends Disposable {
 				copyButton.classList.remove('copied');
 			}, 1600);
 		});
+		return copyButton;
+	}
 
-		header.append(titleGroup, expandButton, copyButton);
-		return header;
+	/**
+	 * The zoom popup: a workbench-level overlay hosting a second diagram
+	 * webview with the same source at full size. The inline card keeps its
+	 * bounded height; the popup shows the whole diagram: the webview renders as an
+	 * interactive canvas on a gray background (fitted view, ctrl+wheel
+	 * zoom, drag pan).
+	 *
+	 * Appended to the workbench root so the theme variables cascade (they
+	 * are scoped to `.monaco-workbench`; a body-level child would not
+	 * inherit them), with a z-index below the context-view layer so
+	 * right-click menus still open above the popup. One popup at a time:
+	 * opening again closes the previous one first.
+	 */
+	private openZoomModal(getSource: () => string, anchor: HTMLElement): void {
+		const source = getSource();
+		if (!source) {
+			return;
+		}
+		this.closeZoomModal();
+		const disposables = new DisposableStore();
+		this.activeZoomModalDisposables = disposables;
+
+		const domWindow = DOM.getWindow(anchor);
+		const container = domWindow.document.querySelector('.monaco-workbench') ?? domWindow.document.body;
+
+		const backdrop = $('div.vibe-ai-mermaid-modal-backdrop');
+		const modal = $('div.vibe-ai-mermaid-modal');
+		modal.setAttribute('role', 'dialog');
+		modal.setAttribute('aria-modal', 'true');
+		modal.setAttribute('aria-label', localize('vibeAIChat.mermaidTitle', "Mermaid diagram"));
+
+		const titlebar = $('div.vibe-ai-mermaid-modal-titlebar');
+		const graphIcon = $('span.codicon.codicon-graph');
+		graphIcon.setAttribute('aria-hidden', 'true');
+		const title = $('span.vibe-ai-mermaid-modal-title');
+		title.textContent = localize('vibeAIChat.mermaidTitle', "Mermaid diagram");
+		const copyButton = this.createCopyButton(getSource);
+		const closeButton = $('button.vibe-ai-mermaid-modal-close') as HTMLButtonElement;
+		closeButton.type = 'button';
+		closeButton.title = localize('vibeAIChat.mermaidModalClose', "Close");
+		closeButton.setAttribute('aria-label', localize('vibeAIChat.mermaidModalClose', "Close"));
+		const closeIcon = $('span.codicon.codicon-close');
+		closeIcon.setAttribute('aria-hidden', 'true');
+		closeButton.appendChild(closeIcon);
+		titlebar.append(graphIcon, title, copyButton, closeButton);
+
+		const body = $('div.vibe-ai-mermaid-modal-body');
+		const holder = $('div.vibe-ai-mermaid-modal-holder');
+		body.appendChild(holder);
+		modal.append(titlebar, body);
+		backdrop.appendChild(modal);
+		container.appendChild(backdrop);
+
+		const close = () => {
+			if (this.activeZoomModalDisposables === disposables) {
+				this.activeZoomModalDisposables = undefined;
+			}
+			disposables.dispose();
+		};
+		// Disposes last (LIFO): the backdrop leaves the DOM only after the
+		// listeners and the webview part are gone.
+		disposables.add({ dispose: () => backdrop.remove() });
+		disposables.add(DOM.addDisposableListener(closeButton, DOM.EventType.CLICK, () => close()));
+		disposables.add(DOM.addDisposableListener(backdrop, DOM.EventType.CLICK, event => {
+			// Clicks on the dialog itself must not close the popup.
+			if (event.target === backdrop) {
+				close();
+			}
+		}));
+		disposables.add(DOM.addDisposableListener(domWindow.document, DOM.EventType.KEY_DOWN, event => {
+			if (event.key === 'Escape') {
+				close();
+			}
+		}));
+
+		// The holder must be in the document before the webview mounts
+		// (iframes reload when moved) - the backdrop is already appended.
+		void this.renderDiagramWebview(holder, source, disposables, { interactiveCanvas: true });
+	}
+
+	private closeZoomModal(): void {
+		this.activeZoomModalDisposables?.dispose();
+		this.activeZoomModalDisposables = undefined;
+	}
+
+	override dispose(): void {
+		this.closeZoomModal();
+		super.dispose();
 	}
 }

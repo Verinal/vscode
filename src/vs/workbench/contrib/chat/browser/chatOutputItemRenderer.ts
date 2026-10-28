@@ -32,6 +32,12 @@ export interface IChatOutputRenderContext {
 	readonly codeBlockContext?: {
 		readonly languageIdentifier: string;
 	};
+	/**
+	 * Mirrors `webviewOptions.interactiveCanvas`: the caller sizes the webview
+	 * (it fills its parent) and the rendered page should behave as an
+	 * interactive canvas (pan/zoom, canvas background).
+	 */
+	readonly interactiveCanvas?: boolean;
 }
 
 interface RegisterOptions {
@@ -78,6 +84,13 @@ interface RenderOutputPartWebviewOptions {
 	readonly title?: string;
 	readonly webviewState?: string;
 	readonly chatSessionResource?: URI;
+	/**
+	 * Interactive canvas mode: the intrinsic-content-size height wiring is
+	 * skipped (the caller sizes the webview) and the flag is forwarded to the
+	 * renderer, whose page enables pan/zoom. Used by full-size diagram
+	 * popups; bounded inline cards keep the content-driven height.
+	 */
+	readonly interactiveCanvas?: boolean;
 }
 
 interface RenderCodeBlockWebviewOptions extends RenderOutputPartWebviewOptions {
@@ -205,20 +218,28 @@ export class ChatOutputRendererService extends Disposable implements IChatOutput
 		}
 
 		const onDidChangeHeight = store.add(new Emitter<number>());
-		store.add(autorun(reader => {
-			const height = reader.readObservable(webview.intrinsicContentSize);
-			if (height) {
-				onDidChangeHeight.fire(height.height);
-				parent.style.height = `${height.height}px`;
-			}
-		}));
+		// Interactive canvas mode: the caller sizes the webview (it fills its
+		// parent), so the content-driven height wiring would fight the fixed
+		// canvas box.
+		if (!webviewOptions.interactiveCanvas) {
+			store.add(autorun(reader => {
+				const height = reader.readObservable(webview.intrinsicContentSize);
+				if (height) {
+					onDidChangeHeight.fire(height.height);
+					parent.style.height = `${height.height}px`;
+				}
+			}));
+		}
 
 		if (webviewOptions.webviewState) {
 			webview.state = webviewOptions.webviewState;
 		}
 
 		webview.mountTo(parent, getWindow(parent));
-		await rendererData.renderer.renderOutputPart(mime, data, webview, context, token);
+		const renderContext: IChatOutputRenderContext = webviewOptions.interactiveCanvas
+			? { ...context, interactiveCanvas: true }
+			: context;
+		await rendererData.renderer.renderOutputPart(mime, data, webview, renderContext, token);
 
 		return {
 			get webview() { return webview; },

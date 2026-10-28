@@ -236,7 +236,11 @@ export function configurePortable(product: Partial<IProductConfiguration>): { po
 	}
 
 	const portableDataPath = getPortableDataPath();
-	const isPortable = !('target' in product) && fs.existsSync(portableDataPath);
+	// Desktop Inno setups patch product.target to 'user'/'system'; portable
+	// data must still work there - the installer seeds {app}\data so installed
+	// builds get their own profile instead of sharing %APPDATA% with dev
+	// builds. Only server-style targets are excluded.
+	const isPortable = product.target !== 'server' && fs.existsSync(portableDataPath);
 	const portableTempPath = path.join(portableDataPath, 'tmp');
 	const isTempPortable = isPortable && fs.existsSync(portableTempPath);
 

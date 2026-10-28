@@ -27,8 +27,12 @@ class MermaidChatOutputRenderer implements vscode.ChatOutputRenderer {
 		private readonly _webviewManager: MermaidWebviewManager
 	) { }
 
-	async renderChatOutput({ value }: vscode.ChatOutputDataItem, chatOutputWebview: vscode.ChatOutputWebview, _ctx: unknown, _token: vscode.CancellationToken): Promise<void> {
+	async renderChatOutput({ value }: vscode.ChatOutputDataItem, chatOutputWebview: vscode.ChatOutputWebview, ctx: vscode.ChatOutputRenderContext, _token: vscode.CancellationToken): Promise<void> {
 		const webview = chatOutputWebview.webview;
+		// Full-size popups render as interactive canvases: the page fills the
+		// viewport, paints a canvas background, and enables pan/zoom (plain
+		// drag pans, ctrl+wheel zooms with a clamped step).
+		const interactiveCanvas = ctx.interactiveCanvas === true;
 		const decoded = decodeMermaidData(value);
 		const mermaidSource = decoded.source;
 		const title = decoded.title;
@@ -36,16 +40,25 @@ class MermaidChatOutputRenderer implements vscode.ChatOutputRenderer {
 		// Generate unique ID for this webview
 		const webviewId = generateUuid();
 
+		// Diagnostic: proves the renderer was invoked at all — its absence
+		// means the extension never activated or the data output never arrived.
+		console.info(`[mermaid-markdown-features] chat diagram renderer invoked (id ${webviewId})`);
+
 		const disposables: vscode.Disposable[] = [];
+
+		// Set once the page reports ready or an error; the watchdog below uses
+		// it to tell "scripts never ran" apart from a slow render.
+		let webviewSignalled = false;
 
 		// Register and set as active
 		disposables.push(this._webviewManager.registerWebview(webviewId, webview, mermaidSource, title, 'chat'));
 
 		// Listen for messages from the webview
 		disposables.push(webview.onDidReceiveMessage(message => {
-			if (message.type === 'openInEditor') {
-				void vscode.commands.executeCommand('_mermaid-markdown.openInEditor', { mermaidWebviewId: webviewId });
+			if (message.type === 'webviewReady') {
+				webviewSignalled = true;
 			} else if (message.type === 'webviewError') {
+				webviewSignalled = true;
 				// The page's failsafe bootstrap / renderer module surfaced a
 				// load or runtime failure — log it where the Extension Host
 				// output channel shows it.
@@ -69,11 +82,10 @@ class MermaidChatOutputRenderer implements vscode.ChatOutputRenderer {
 		const nonce = generateUuid();
 		const mermaidScript = vscode.Uri.joinPath(mediaRoot, 'index.js');
 		const codiconsUri = webview.asWebviewUri(vscode.Uri.joinPath(mediaRoot, 'codicon.css'));
-		const openInEditorLabel = vscode.l10n.t('Open Diagram in Editor');
 
 		webview.html = `
 			<!DOCTYPE html>
-			<html lang="en">
+			<html lang="en"${interactiveCanvas ? ' style="height: 100%;"' : ''}>
 
 			<head>
 				<meta charset="UTF-8">
@@ -85,6 +97,14 @@ class MermaidChatOutputRenderer implements vscode.ChatOutputRenderer {
 				<style>
 					body {
 						padding: 0;
+					}
+					body[data-interactive-canvas="true"] {
+						width: 100%;
+						height: 100%;
+						margin: 0;
+						overflow: hidden;
+						background: var(--vscode-editorWidget-background, #252526);
+						background: color-mix(in srgb, var(--vscode-foreground) 8%, var(--vscode-editor-background));
 					}
 					.mermaid {
 						visibility: hidden;
@@ -100,32 +120,6 @@ class MermaidChatOutputRenderer implements vscode.ChatOutputRenderer {
 						color: var(--vscode-errorForeground, #f66);
 						white-space: pre-wrap;
 						word-break: break-all;
-					}
-					.open-in-editor-btn {
-						position: absolute;
-						top: 8px;
-						right: 8px;
-						display: flex;
-						align-items: center;
-						justify-content: center;
-						width: 26px;
-						height: 26px;
-						background: var(--vscode-editorWidget-background);
-						color: var(--vscode-icon-foreground);
-						border: 1px solid var(--vscode-editorWidget-border);
-						border-radius: 6px;
-						cursor: pointer;
-						z-index: 100;
-						opacity: 0;
-						transition: opacity 0.2s;
-					}
-					body:hover .open-in-editor-btn,
-					.open-in-editor-btn:focus {
-						opacity: 1;
-					}
-					.open-in-editor-btn:hover {
-						opacity: 1;
-						background: var(--vscode-toolbar-hoverBackground);
 					}
 				</style>
 
@@ -166,9 +160,8 @@ class MermaidChatOutputRenderer implements vscode.ChatOutputRenderer {
 				</script>
 			</head>
 
-			<body data-vscode-context='${JSON.stringify({ preventDefaultContextMenuItems: true, mermaidWebviewId: webviewId })}' data-vscode-mermaid-webview-id="${webviewId}">
+			<body${interactiveCanvas ? ' data-interactive-canvas="true"' : ''} data-vscode-context='${JSON.stringify({ preventDefaultContextMenuItems: true, mermaidWebviewId: webviewId })}' data-vscode-mermaid-webview-id="${webviewId}">
 				${renderMermaidConfigSpan()}
-				<button class="open-in-editor-btn" title="${openInEditorLabel}" aria-label="${openInEditorLabel}"><i class="codicon codicon-open-preview" aria-hidden="true"></i></button>
 				<pre class="mermaid">
 					${escapeHtmlText(mermaidSource)}
 				</pre>
@@ -176,6 +169,23 @@ class MermaidChatOutputRenderer implements vscode.ChatOutputRenderer {
 				<script type="module" nonce="${nonce}" src="${webview.asWebviewUri(mermaidScript)}"></script>
 			</body>
 			</html>`;
+
+		// Watchdog: if the page never reports ready or an error, its scripts
+		// were blocked or the module never ran — the in-page failsafe cannot
+		// fire in that case. Fall back to a script-free view of the source so
+		// the card is never a silent blank.
+		const webviewSignalWatchdog = setTimeout(() => {
+			if (webviewSignalled) {
+				return;
+			}
+			console.warn(`[mermaid-markdown-features] chat diagram webview sent no ready/error signal within 15s (id ${webviewId}) — falling back to plain source`);
+			try {
+				webview.html = `<!DOCTYPE html><html><head><meta charset="UTF-8"><style>${interactiveCanvas ? 'html{height:100%;}body{width:100%;height:100%;background:color-mix(in srgb, var(--vscode-foreground) 8%, var(--vscode-editor-background));}' : ''}body{padding:8px;}pre{white-space:pre-wrap;font-family:var(--vscode-editor-font-family,monospace);font-size:12px;margin:0;}</style></head><body><pre>${escapeHtmlText(mermaidSource)}</pre></body></html>`;
+			} catch {
+				// webview already disposed — nothing to recover
+			}
+		}, 15000);
+		disposables.push({ dispose: () => clearTimeout(webviewSignalWatchdog) });
 	}
 }
 

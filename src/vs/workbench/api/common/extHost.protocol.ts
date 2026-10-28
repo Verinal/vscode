@@ -1952,6 +1952,8 @@ export interface IChatOutputRenderContextDto {
 	readonly codeBlockContext?: {
 		readonly languageIdentifier: string;
 	};
+	/** Interactive canvas mode (webview fills its parent; page enables pan/zoom). */
+	readonly interactiveCanvas?: boolean;
 }
 
 export interface ExtHostChatOutputRendererShape {

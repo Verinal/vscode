@@ -76,6 +76,13 @@ declare module 'vscode' {
 			 */
 			readonly languageIdentifier: string;
 		};
+
+		/**
+		 * Set when the webview fills its parent container instead of being sized
+		 * to its content, and the rendered output should behave as an interactive
+		 * canvas (pan/zoom, canvas background).
+		 */
+		readonly interactiveCanvas?: boolean;
 	}
 
 	export interface ChatOutputRenderer {

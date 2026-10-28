@@ -14,8 +14,7 @@
     "vscode": "^1.104.0"
   },
   "enabledApiProposals": [
-    "chatOutputRenderer",
-    "chatParticipantPrivate"
+    "chatOutputRenderer"
   ],
   "capabilities": {
     "virtualWorkspaces": true,
@@ -61,7 +60,7 @@
       "webview/context": [
         {
           "command": "_mermaid-markdown.openInEditor",
-          "when": "webviewId == 'vscode.mermaid-markdown-features.chatOutputItem' || (webviewSection == 'mermaid' && (webviewId == 'markdown.preview' || webviewId == 'vscode.markdown.preview.editor' || webviewId == 'notebook.output'))",
+          "when": "webviewSection == 'mermaid' && (webviewId == 'markdown.preview' || webviewId == 'vscode.markdown.preview.editor' || webviewId == 'notebook.output')",
           "group": "navigation@1"
         },
         {
@@ -213,9 +212,6 @@
         "name": "renderMermaidDiagram",
         "displayName": "Mermaid Renderer",
         "toolReferenceName": "renderMermaidDiagram",
-        "legacyToolReferenceFullNames": [
-          "vscode.mermaid-chat-features/renderMermaidDiagram"
-        ],
         "canBeReferencedInPrompt": true,
         "modelDescription": "Renders a Mermaid diagram from Mermaid.js markup.",
         "userDescription": "Render a Mermaid.js diagram from markup.",

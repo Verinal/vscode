@@ -9,3 +9,8 @@ ThirdPartyNotices.txt eol=crlf
 *.sh eol=lf
 *.rtf -text
 **/*.json linguist-language=jsonc
+
+# The webview bootstrap (pre/index.html) pins its own inline script with a
+# CSP sha256 hash — CRLF checkout would change the hash and silently kill
+# every webview. Force LF for this folder.
+src/vs/workbench/contrib/webview/browser/pre/** text eol=lf

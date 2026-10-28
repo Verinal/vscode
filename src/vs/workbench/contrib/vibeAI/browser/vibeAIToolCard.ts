@@ -5,12 +5,13 @@
 
 import * as DOM from '../../../../base/browser/dom.js';
 import { createTrustedTypesPolicy } from '../../../../base/browser/trustedTypes.js';
+import { timeout } from '../../../../base/common/async.js';
 import { DisposableStore } from '../../../../base/common/lifecycle.js';
 import { localize } from '../../../../nls.js';
 import { URI } from '../../../../base/common/uri.js';
 import { ILanguageService } from '../../../../editor/common/languages/language.js';
 import { PLAINTEXT_LANGUAGE_ID } from '../../../../editor/common/languages/modesRegistry.js';
-import { tokenizeToStringSync } from '../../../../editor/common/languages/textToHtmlTokenizer.js';
+import { tokenizeToString } from '../../../../editor/common/languages/textToHtmlTokenizer.js';
 import { IVibeAICodeChange, IVibeAIReadRange } from '../../../../platform/vibeAI/common/vibeAI.js';
 import { IVibeAIPersistedToolCall } from './vibeAIChatSessionStore.js';
 import { IVibeAIDiffLine, computeDiffLines, computeDiffStats } from './vibeAIDiff.js';
@@ -46,6 +47,17 @@ const EXPANDED_DIFF_BODY_HEIGHT = 384;
 /** Collapsed output preview cap (run_terminal): 5 lines at the 16px line-height. */
 const COLLAPSED_OUTPUT_LINES = 5;
 const COMPRESSED_UNCHANGED_RUN = 4;
+/**
+ * Safety cap for diff-line tokenization (Phase 87): tokenizing a huge
+ * full-file rewrite would block the renderer — beyond this many source
+ * lines the rows keep the plain text (the red/green backgrounds, gutter
+ * and line numbers are unaffected).
+ */
+const MAX_TOKENIZE_LINES = 5000;
+/** Retries this often (ms) for the diff rows' language tokenizer (Phase 94). */
+const TOKENIZATION_RETRY_DELAY_MS = 1000;
+/** Gives up after this many retries — a language with no grammar keeps rendering plain. */
+const TOKENIZATION_RETRY_ATTEMPTS = 30;
 
 /** Tolerant 1-based line-number coercion (models may send string numbers). */
 function asLineNumber(value: unknown): number | undefined {
@@ -77,8 +89,8 @@ function describeReadArgs(record: Record<string, unknown>): string {
 }
 
 /**
- * The raw path argument of a file tool — the open-file hover action uses
- * this (the display summary may carry a line-range suffix).
+ * The raw path argument of a file tool — the header click opens this
+ * (the display summary may be a bare name or carry a line-range suffix).
  */
 function argPath(name: string, args: unknown): string | undefined {
 	if (args && typeof args === 'object') {
@@ -91,18 +103,46 @@ function argPath(name: string, args: unknown): string | undefined {
 	return undefined;
 }
 
+/**
+ * Phase 135: last path segment for the card header — the header shows the
+ * bare file name instead of the relative path (the full path stays in the
+ * tooltip).
+ */
+function baseName(path: string): string {
+	const segments = path.replace(/\\/g, '/').split('/').filter(segment => segment.length > 0);
+	return segments.length > 0 ? segments[segments.length - 1] : path;
+}
+
+/**
+ * Phase 148: mutating tool cards keep their body after completion — the
+ * write diff / command output stay visible (the pre-141 inline agreement,
+ * user request); read-only scan cards fold to the one-line summary row.
+ * Mirrors the pane's `isMutatingTool` — kept local because the pane
+ * imports this module (importing back would be a cycle).
+ */
+function isMutatingTool(name: string): boolean {
+	return name === 'write_file' || name === 'delete_file' || name === 'run_terminal';
+}
+
 function summarizeArgs(name: string, args: unknown): string {
 	if (args && typeof args === 'object') {
 		const record = args as Record<string, unknown>;
 		if (name === 'run_terminal') {
-			return String(record['command'] ?? '');
+			// Phase 136: the command moved into the output area (shown in
+			// full there) — the header line no longer repeats it.
+			return '';
 		}
 		if (name === 'read_file' || name === 'write_file' || name === 'list_files' || name === 'delete_file') {
 			const path = String(record['path'] ?? '.');
 			if (name === 'read_file') {
-				// Phase 63: "x.py L10-L20" / "x.py symbol" right after the path.
+				// Phase 63/135: bare file name + "L10–L20" / symbol — the full
+				// relative path stays in the tooltip.
 				const range = describeReadArgs(record);
-				return range.length > 0 ? `${path} ${range}` : path;
+				return range.length > 0 ? `${baseName(path)} ${range}` : baseName(path);
+			}
+			if (name === 'write_file') {
+				// Phase 135: bare file name — the diff header path line is gone.
+				return baseName(path);
 			}
 			return path;
 		}
@@ -112,7 +152,8 @@ function summarizeArgs(name: string, args: unknown): string {
 		if (name === 'grep') {
 			const pattern = String(record['pattern'] ?? '');
 			const scope = String(record['path'] ?? '');
-			return scope.length > 0 ? `${pattern} · ${scope}` : pattern;
+			// Phase 135: scope shows only its last segment (`backend/app` → `app`).
+			return scope.length > 0 ? `${pattern} · ${baseName(scope)}` : pattern;
 		}
 	}
 	// Fallback: JSON for objects — String() shows "[object Object]".
@@ -172,8 +213,18 @@ function headerJumpRange(
  * Cursor-style activity card for a single agent tool call. Created on
  * `tool_start` (pending), finalized on `tool_result` with a status icon
  * and — for file changes — an inline red/green diff preview with line
- * numbers, theme-matched syntax highlighting, `+N −M` stats, hover actions
- * (open file / restore) and a restore action.
+ * numbers and theme-matched syntax highlighting; the header carries the
+ * bare file name with the new/modified badge and `+N −M` stats, a click
+ * on it opens the file, and the hover actions hold the restore button.
+ * Phase 141: the card itself is a <details> whose header row is the
+ * <summary> — setResult folds a completed card to its one-line summary
+ * row (the chevron/header re-opens it — open-file cards open the editor
+ * at the exact range instead, Phase 65/135 affordance kept).
+ * Phase 148 (Phase 141 reversed for mutating tools, user request):
+ * write_file / delete_file / run_terminal cards KEEP their body after
+ * completion — the red/green diff and the command output are the result
+ * the user reads right on the card (the pre-141 inline agreement); only
+ * read-only scan cards fold to the one-line row.
  */
 export class VibeAIToolCard {
 
@@ -181,6 +232,10 @@ export class VibeAIToolCard {
 
 	private readonly headerStatus: HTMLElement;
 	private readonly argsSummary: HTMLElement;
+	// Phase 135: kept as fields — renderDiff inserts the action badge and the
+	// +N −M stats onto the header, before the hover actions span.
+	private readonly headerEl: HTMLElement;
+	private readonly actionsEl: HTMLElement;
 	private readonly streamSection: HTMLElement;
 	private readonly streamPre: HTMLElement;
 	private readonly outputSection: HTMLElement;
@@ -194,6 +249,9 @@ export class VibeAIToolCard {
 	private output: string | undefined;
 	private change: IVibeAICodeChange | undefined;
 	private read: IVibeAIReadRange | undefined;
+	/** Phase 149: display-only widened range (same-file read merge) — the
+	 * recorded read (snapshot) keeps the call's own resolved range. */
+	private widenedRead: IVibeAIReadRange | undefined;
 	/** Phase 65: first changed line of the rendered diff — header click reveal target. */
 	private firstChangeLine: number | undefined;
 	private restored = false;
@@ -210,10 +268,17 @@ export class VibeAIToolCard {
 	) {
 		this.name = name;
 		this.args = args;
-		this.element = $('.vibe-ai-tool-card');
+		// Phase 141: the card is a <details> — its header row is the
+		// <summary> (the native toggle replaces the old static header).
+		// Pending is expanded (the streaming body is the point); setResult
+		// folds read-only cards to the one-line summary (Phase 148:
+		// mutating cards keep their body — the diff/output IS the result).
+		this.element = $('details.vibe-ai-tool-card');
+		(this.element as HTMLDetailsElement).open = true;
 
-		// --- header
-		const header = DOM.append(this.element, $('.vibe-ai-tool-card-header'));
+		// --- header (the <summary> row)
+		const header = DOM.append(this.element, $('summary.vibe-ai-tool-card-header'));
+		this.headerEl = header;
 
 		this.headerStatus = DOM.append(header, $('span.codicon.codicon-loading.vibe-ai-tool-card-status'));
 		this.headerStatus.setAttribute('aria-hidden', 'true');
@@ -228,37 +293,41 @@ export class VibeAIToolCard {
 		this.argsSummary.textContent = summarizeArgs(name, args);
 		this.argsSummary.title = summarizeArgs(name, args);
 
-		// Phase 65: clicking the header opens the file — read cards jump to
-		// the read range, write cards to the first changed line (Cursor
-		// parity). The hover action buttons stop propagation so a click on
-		// them doesn't double-fire the open.
+		// Phase 65/135: clicking the header (the bare file name) opens the
+		// file — read cards jump to the read range, write cards to the first
+		// changed line (Cursor parity). The hover open-file button is gone —
+		// this click is the open affordance now.
 		if (onOpenFile && (name === 'read_file' || name === 'write_file') && argPath(name, args)) {
 			header.classList.add('vibe-ai-clickable');
 			header.title = localize('vibeAIChat.tool.openHeader', "Open in editor");
-			this.disposables.add(DOM.addDisposableListener(header, DOM.EventType.CLICK, () => {
+			this.disposables.add(DOM.addDisposableListener(header, DOM.EventType.CLICK, e => {
+				// Phase 141: the header is the <summary> — opening the file
+				// must not ALSO toggle the card body (preventDefault stops
+				// the native details toggle; stopPropagation mirrors the
+				// restore button's pattern). Open-file cards keep the Phase
+				// 65/135 semantics: the click opens the editor at the exact
+				// range instead of expanding the inline body.
+				e.preventDefault();
+				e.stopPropagation();
 				const path = argPath(name, args);
 				if (!path) {
 					return;
 				}
-				const range = headerJumpRange(name, args, this.read, this.firstChangeLine);
+				const range = headerJumpRange(name, args, this.displayRead, this.firstChangeLine);
 				onOpenFile(path, range?.start, range?.end);
 			}));
 		}
 
-		// --- hover actions (open file + restore) — reveal on hover
+		// --- hover actions (restore only — Phase 135 removed the open-file
+		//     hover button; clicking the header opens the file instead)
 		const actions = DOM.append(header, $('span.vibe-ai-tool-card-actions'));
-		if (onOpenFile) {
-			const openBtn = DOM.append(actions, $('button.codicon.codicon-go-to-file.vibe-ai-icon-btn')) as HTMLButtonElement;
-			openBtn.title = localize('vibeAIChat.tool.openFile', "Open file");
-			DOM.addDisposableListener(openBtn, DOM.EventType.CLICK, e => {
-				e.stopPropagation(); // header click must not double-fire the open
-				const path = argPath(name, args);
-				if (path) {
-					const range = headerJumpRange(name, args, this.read, this.firstChangeLine);
-					onOpenFile(path, range?.start, range?.end);
-				}
-			});
-		}
+		this.actionsEl = actions;
+
+		// Phase 141: the collapse chevron (Cursor parity, the same
+		// affordance as the Worked shell) — rotates 90deg while the body
+		// is expanded, points right on the folded one-line row.
+		const chevron = DOM.append(header, $('span.codicon.codicon-chevron-right.vibe-ai-tool-card-chevron'));
+		chevron.setAttribute('aria-hidden', 'true');
 
 		// --- streaming write section (shown while write_file content arrives)
 		this.streamSection = DOM.append(this.element, $('.vibe-ai-tool-card-stream'));
@@ -271,6 +340,12 @@ export class VibeAIToolCard {
 		//     arrives; the children are rebuilt by setResult)
 		this.outputSection = DOM.append(this.element, $('.vibe-ai-tool-card-output'));
 		this.outputSection.style.display = 'none';
+		if (name === 'run_terminal') {
+			// Phase 136: the command is the first line of the output area —
+			// shown in full as soon as the card is created (the header no
+			// longer carries it).
+			this.renderOutput(undefined);
+		}
 
 		// --- diff section (shown once a file change result arrives)
 		this.diffSection = DOM.append(this.element, $('.vibe-ai-tool-card-diff'));
@@ -303,6 +378,27 @@ export class VibeAIToolCard {
 		};
 	}
 
+	/**
+	 * Phase 149: the display range for the same-file read merge — the
+	 * widened union set by the Worked grouping, falling back to this
+	 * call's own resolved range (the snapshot keeps recording the call's
+	 * own range; the union is display-only, the header jump follows it).
+	 */
+	get displayRead(): IVibeAIReadRange | undefined {
+		return this.widenedRead ?? this.read;
+	}
+
+	/** Phase 149: widens the displayed read range (same-file read merge). */
+	widenReadRange(range: IVibeAIReadRange): void {
+		if (range.end < range.start) {
+			return;
+		}
+		this.widenedRead = range;
+		if (this.name === 'read_file') {
+			this.updateArgsSummaryWithRead(range);
+		}
+	}
+
 	private readonly disposables = new DisposableStore();
 
 	private appendRestoreAction(actions: HTMLElement): void {
@@ -311,6 +407,7 @@ export class VibeAIToolCard {
 		restoreButton.style.display = 'none'; // shown by setResult when restorable
 		this.disposables.add(DOM.addDisposableListener(restoreButton, DOM.EventType.CLICK, e => {
 			e.stopPropagation(); // header click must not double-fire
+			e.preventDefault(); // Phase 141: a click inside the <summary> must not toggle the card
 			if (this.restoring || this.restored || !this.change) {
 				return;
 			}
@@ -349,6 +446,18 @@ export class VibeAIToolCard {
 		this.output = output;
 		this.read = read;
 		this.streamSection.style.display = 'none';
+		// Phase 141: the card finalized — read-only cards fold to their
+		// one-line summary row (the chevron/header re-opens them, and
+		// open-file cards open the editor at the exact range instead).
+		// Phase 148: mutating cards (write_file / delete_file /
+		// run_terminal) KEEP the body — the red/green diff and the command
+		// output are the result the user reads right here (the pre-141
+		// inline agreement). Restored cards run setResult on construction
+		// too, so restored history renders isomorphic with the live view
+		// (mutating cards expanded, read-only cards one-line; zero wiring).
+		if (!isMutatingTool(this.name)) {
+			(this.element as HTMLDetailsElement).open = false;
+		}
 		// Phase 63: read_file results carry the ACTUAL line range read (args
 		// may omit the range; a symbol read resolves its own range) — replace
 		// the args summary with the resolved "x.py L10-L20".
@@ -373,15 +482,11 @@ export class VibeAIToolCard {
 		}
 	}
 
-	/**
-	 * Phase 58: collapsible output preview for run_terminal results —
-	 * collapsed to 5 lines (80px) with the same Show all / Collapse
-	 * toggle as the diff preview (expanded: 24 scrollable lines).
-	 */
 	/** Phase 63: replaces the args summary with the actual line range read. */
 	private updateArgsSummaryWithRead(read: IVibeAIReadRange): void {
 		const record = (this.args && typeof this.args === 'object') ? this.args as Record<string, unknown> : {};
-		const path = String(record['path'] ?? '.');
+		// Phase 135: bare file name — the full relative path stays in the tooltip.
+		const path = baseName(String(record['path'] ?? '.'));
 		const parts: string[] = [];
 		if (read.symbol) {
 			parts.push(read.symbol);
@@ -392,23 +497,41 @@ export class VibeAIToolCard {
 		this.argsSummary.title = text;
 	}
 
+	/**
+	 * Phase 58: collapsible output preview for run_terminal results —
+	 * collapsed to 5 lines (80px) with the same Show all / Collapse
+	 * toggle as the diff preview (expanded: 24 scrollable lines).
+	 * Phase 136: the command itself is the first line of the output area
+	 * (shown in full, no ellipsis); the "Output" label is gone.
+	 */
 	private renderOutput(output: string | undefined): void {
 		// A repeated setResult replaces the previous render.
 		DOM.clearNode(this.outputSection);
+		const command = this.name === 'run_terminal' ? this.terminalCommand() : '';
 		const text = (output ?? '').replace(/\s+$/, '');
-		if (text.length === 0) {
+		if (command.length === 0 && text.length === 0) {
 			this.outputSection.style.display = 'none';
 			return;
 		}
-		const label = DOM.append(this.outputSection, $('div.vibe-ai-tool-card-output-label'));
-		label.textContent = localize('vibeAIChat.tool.output', "Output");
-		const pre = DOM.append(this.outputSection, $('pre.vibe-ai-tool-card-output-pre'));
-		pre.textContent = text;
-		const lines = text.split('\n').length;
-		if (lines > COLLAPSED_OUTPUT_LINES) {
-			this.appendOutputToggle(this.outputSection, pre, lines);
+		if (command.length > 0) {
+			const cmd = DOM.append(this.outputSection, $('div.vibe-ai-tool-card-cmd'));
+			cmd.textContent = command;
+		}
+		if (text.length > 0) {
+			const pre = DOM.append(this.outputSection, $('pre.vibe-ai-tool-card-output-pre'));
+			pre.textContent = text;
+			const lines = text.split('\n').length;
+			if (lines > COLLAPSED_OUTPUT_LINES) {
+				this.appendOutputToggle(this.outputSection, pre, lines);
+			}
 		}
 		this.outputSection.style.display = 'block';
+	}
+
+	/** Phase 136: the raw command argument of a run_terminal call. */
+	private terminalCommand(): string {
+		const record = (this.args && typeof this.args === 'object') ? this.args as Record<string, unknown> : {};
+		return String(record['command'] ?? '');
 	}
 
 	private appendOutputToggle(section: HTMLElement, body: HTMLElement, lines: number): void {
@@ -426,15 +549,11 @@ export class VibeAIToolCard {
 	}
 
 	private renderDiff(change: IVibeAICodeChange): void {
-		// --- diff header: path + action + stats
-		const header = DOM.append(this.diffSection, $('div.vibe-ai-tool-card-diff-header'));
-
-		const filePath = DOM.append(header, $('span.vibe-ai-tool-card-path'));
-		filePath.textContent = change.filePath;
-		filePath.title = change.filePath;
-
+		// Phase 135: the diff header line (path + action + stats) is gone —
+		// the action badge and stats moved up onto the card header next to
+		// the bare file name (one line per change, Cursor-style).
 		if (change.action) {
-			const action = DOM.append(header, $('span.vibe-ai-tool-card-action'));
+			const action = $('span.vibe-ai-tool-card-action');
 			action.textContent = change.action === 'create'
 				? localize('vibeAIChat.tool.created', "new")
 				: change.action === 'delete'
@@ -442,6 +561,7 @@ export class VibeAIToolCard {
 					: localize('vibeAIChat.tool.modified', "modified");
 			action.style.opacity = '0.6';
 			action.style.flexShrink = '0';
+			this.headerEl.insertBefore(action, this.actionsEl);
 		}
 
 		if (change.action === 'delete') {
@@ -465,38 +585,55 @@ export class VibeAIToolCard {
 		}
 
 		if (change.newContent !== undefined) {
-			// --- +N −M stats
+			// --- +N −M stats (Phase 135: on the card header, after the badge)
 			const stats = computeDiffStats(change.oldContent ?? '', change.newContent);
 			if (stats.additions > 0 || stats.deletions > 0) {
-				this.appendStatsBadge(header, stats);
+				this.headerEl.insertBefore(this.appendStatsBadge(stats), this.actionsEl);
 			}
 
 			// --- inline red/green preview (collapsed to 5 rows, Cursor-style;
 			//     the toggle grows it to 24 scrollable rows)
 			const body = DOM.append(this.diffSection, $('div.vibe-ai-tool-card-diff-body'));
-			const changed = renderDiffBody(body, change.oldContent ?? '', change.newContent, this.languageService, this.languageIdFor(change.filePath));
+			const { changed, firstChangeRow, rows } = renderDiffBody(body, change.oldContent ?? '', change.newContent);
 			// Row count (diff rows + "⋯" separators), not just the changed
 			// count — a context-heavy small edit still clips at the cap.
 			if (body.childElementCount > COLLAPSED_DIFF_LINES) {
-				this.appendExpandToggle(body, changed);
+				this.appendExpandToggle(body, changed, firstChangeRow?.span);
 			}
+			// Phase 87: theme-matched token colors fill in once the file's
+			// language grammar is loaded — rows render plain text until then,
+			// and the collapsed preview already starts at the changed region.
+			// Phase 94: the language is resolved per retry attempt — during
+			// the startup-restore window the registry has no language yet,
+			// so a one-shot resolution here would give up immediately.
+			void fillDiffTokenColors(
+				rows,
+				change.oldContent ?? '',
+				change.newContent,
+				this.languageService,
+				() => this.languageGuessFor(change.filePath)
+			);
 		}
 
 		this.diffSection.style.display = 'block';
 	}
 
-	/** Maps a file path to a tokenization language id (plaintext fallback). */
-	private languageIdFor(filePath: string): string {
+	/**
+	 * Maps a file path to its tokenization language — the raw registry
+	 * guess, null while the language itself is not registered yet (the
+	 * startup-restore window). A genuinely plain-text file resolves
+	 * 'plaintext' statically, so callers can tell the two apart.
+	 */
+	private languageGuessFor(filePath: string): string | null {
 		try {
-			return this.languageService.guessLanguageIdByFilepathOrFirstLine(URI.file(filePath.replace(/\\/g, '/')))
-				?? PLAINTEXT_LANGUAGE_ID;
+			return this.languageService.guessLanguageIdByFilepathOrFirstLine(URI.file(filePath.replace(/\\/g, '/')));
 		} catch {
-			return PLAINTEXT_LANGUAGE_ID;
+			return null;
 		}
 	}
 
-	private appendStatsBadge(header: HTMLElement, stats: { additions: number; deletions: number }): void {
-		const badge = DOM.append(header, $('span.vibe-ai-tool-card-stats'));
+	private appendStatsBadge(stats: { additions: number; deletions: number }): HTMLElement {
+		const badge = $('span.vibe-ai-tool-card-stats');
 		if (stats.additions > 0) {
 			const added = DOM.append(badge, $('span'));
 			added.textContent = `+${stats.additions}`;
@@ -510,9 +647,10 @@ export class VibeAIToolCard {
 			removed.textContent = `-${stats.deletions}`;
 			removed.style.color = 'var(--vscode-charts-red)';
 		}
+		return badge;
 	}
 
-	private appendExpandToggle(body: HTMLElement, changed: number): void {
+	private appendExpandToggle(body: HTMLElement, changed: number, firstChangeRow: HTMLElement | undefined): void {
 		const toggle = DOM.append(this.diffSection, $('button.vibe-ai-tool-card-expand')) as HTMLButtonElement;
 		toggle.textContent = localize('vibeAIChat.tool.expand', "Show all {0} changed lines", changed);
 		let expanded = false;
@@ -521,6 +659,11 @@ export class VibeAIToolCard {
 			// Expand grows the preview to 24 scrollable rows (not unlimited
 			// — the card stays a card instead of swallowing the thread).
 			body.style.maxHeight = expanded ? `${EXPANDED_DIFF_BODY_HEIGHT}px` : `${MAX_DIFF_BODY_HEIGHT}px`;
+			if (!expanded && firstChangeRow) {
+				// Collapsing jumps back to the changed region instead of
+				// leaving the preview wherever the expanded view was.
+				scrollDiffBodyToRow(body, firstChangeRow);
+			}
 			toggle.textContent = expanded
 				? localize('vibeAIChat.tool.collapse', "Collapse")
 				: localize('vibeAIChat.tool.expand', "Show all {0} changed lines", changed);
@@ -543,7 +686,7 @@ const ttpTokenizer = createTrustedTypesPolicy('vibeAIToolCardTokenizer', {
 });
 
 /**
- * `tokenizeToStringSync` returns HTML wrapped in
+ * `_tokenizeToString` returns HTML wrapped in
  * `<div class="monaco-tokenized-source">…</div>`. Diff rows render per-line
  * into an inline `<span>`, so the wrapper is stripped and only the inner
  * `<span class="mtkN">` token spans are kept (same pattern as the fork's
@@ -558,18 +701,124 @@ function stripTokenizedWrapper(html: string): string {
 	return html;
 }
 
-/** Tokenizes one diff line for theme-matched syntax highlighting. */
-function highlightLine(languageService: ILanguageService, text: string, languageId: string): string {
+/**
+ * Tokenizes a whole text and returns the per-line HTML (one entry per
+ * source line, in order). Phase 87: per-row tokenization used
+ * `tokenizeToStringSync`, which returns the null tokenizer for any
+ * language whose TextMate grammar has not been activated yet (no editor
+ * has opened the file) — every diff row rendered uncolored. The async
+ * `tokenizeToString` awaits `TokenizationRegistry.getOrCreate(languageId)`
+ * so the real grammar is used. Tokenizing the whole text also keeps state
+ * (open strings, template literals, block comments) correct across lines.
+ * `_tokenizeToString` separates lines with `<br/>` and HTML-escapes the
+ * text, so splitting on the literal yields ready-to-assign markup.
+ */
+async function tokenizeDiffLines(languageService: ILanguageService, text: string, languageId: string): Promise<string[]> {
+	if (!text || text.split('\n').length > MAX_TOKENIZE_LINES) {
+		return [];
+	}
 	try {
-		const html = tokenizeToStringSync(languageService, text, languageId);
+		const html = await tokenizeToString(languageService, text, languageId);
+		// Phase 94: while the grammar is still missing, getOrCreate resolves
+		// null and the output is the null-tokenizer fallback (default
+		// foreground only). Tokenizing the same text with a null language
+		// yields exactly that baseline — identical output means nothing is
+		// colored yet, so the caller keeps retrying instead of filling the
+		// rows with a visually unchanged swap.
+		const baseline = await tokenizeToString(languageService, text, null);
+		if (html === baseline) {
+			return [];
+		}
 		const inner = stripTokenizedWrapper(html);
-		return (ttpTokenizer ? ttpTokenizer.createHTML(inner) ?? inner : inner) as string;
+		return inner.split('<br/>');
 	} catch {
-		return '';
+		return [];
 	}
 }
 
-function renderDiffBody(container: HTMLElement, original: string, updated: string, languageService: ILanguageService, languageId: string): number {
+/** One rendered diff row, kept for post-render token coloring + scrolling. */
+interface IDiffRowTarget {
+	/** The row's text span — filled with token HTML after tokenization. */
+	readonly span: HTMLElement;
+	readonly type: 'add' | 'del' | 'same';
+	readonly oldLine?: number;
+	readonly newLine?: number;
+}
+
+/**
+ * Fills the rendered diff rows with theme-matched token spans (Phase 87).
+ * Rows render plain text first; once the file's language grammar is loaded
+ * each row's text span is swapped for the tokenized HTML — the markup is
+ * pre-escaped by `_tokenizeToString`, so it is assigned as-is (wrapped in
+ * the card's TrustedHTML policy like the old per-row path).
+ *
+ * Phase 94: the language registry and its TextMate grammars register with
+ * the extension host after the pane re-renders restored conversations — a
+ * restored card's one-shot pass resolved no language and every row stayed
+ * default-colored (gray) forever. The language is re-resolved per attempt
+ * (a genuinely plain-text file resolves 'plaintext' statically and stops);
+ * each attempt's tokenizeToString awaits TokenizationRegistry.getOrCreate,
+ * which also triggers a pending grammar factory load — a later attempt
+ * usually lands the colored markup. Bounded: the retries stop on success,
+ * error, the attempt cap, or when the rows left the document (re-render /
+ * dispose) — a language with no grammar keeps rendering plain.
+ */
+async function fillDiffTokenColors(rows: readonly IDiffRowTarget[], original: string, updated: string, languageService: ILanguageService, resolveLanguageId: () => string | null): Promise<void> {
+	if (rows.length === 0) {
+		return;
+	}
+	for (let attempt = 1; attempt <= TOKENIZATION_RETRY_ATTEMPTS; attempt++) {
+		// Re-resolved per attempt: during the restore window the guess for a
+		// code file returns null (the language itself is not registered yet).
+		const languageId = resolveLanguageId();
+		if (languageId === PLAINTEXT_LANGUAGE_ID) {
+			return; // genuinely plain text — nothing to color
+		}
+		if (languageId !== null) {
+			const [oldTokens, newTokens] = await Promise.all([
+				tokenizeDiffLines(languageService, original, languageId),
+				tokenizeDiffLines(languageService, updated, languageId),
+			]);
+			if (oldTokens.length > 0 || newTokens.length > 0) {
+				for (const row of rows) {
+					const tokens = row.type === 'del' ? oldTokens : newTokens;
+					const index = ((row.type === 'del' ? row.oldLine : row.newLine) ?? 0) - 1;
+					const html = index >= 0 && index < tokens.length ? tokens[index] : undefined;
+					if (html !== undefined && html.length > 0) {
+						row.span.innerHTML = (ttpTokenizer ? ttpTokenizer.createHTML(html) ?? html : html) as string;
+					}
+				}
+				return;
+			}
+		}
+		// Not tokenizable yet (language or grammar not registered — the
+		// startup-restore window). The next attempt's tokenizeToString
+		// bootstraps the pending registrations, so wait and re-resolve.
+		if (!rows[0].span.isConnected) {
+			return; // the card was re-rendered — these rows are gone
+		}
+		await timeout(TOKENIZATION_RETRY_DELAY_MS);
+	}
+}
+
+/**
+ * Scrolls a diff body so a row (measured by its text span) is in view —
+ * used when the expanded preview collapses back down (Phase 87).
+ */
+function scrollDiffBodyToRow(body: HTMLElement, row: HTMLElement): void {
+	if (body.getBoundingClientRect().height === 0) {
+		// Not laid out (hidden card) — nothing to scroll.
+		return;
+	}
+	// Keep ~2 context rows visible above the change instead of snapping it
+	// to the very top edge; the browser clamps the result into range.
+	const delta = row.getBoundingClientRect().top - body.getBoundingClientRect().top - 32;
+	if (Math.abs(delta) > 2) {
+		body.scrollTop += delta;
+	}
+}
+
+function renderDiffBody(container: HTMLElement, original: string, updated: string): { changed: number; firstChangeRow: IDiffRowTarget | undefined; rows: IDiffRowTarget[] } {
 	const lines = computeDiffLines(original, updated);
 	let changed = 0;
 	for (const line of lines) {
@@ -578,6 +827,20 @@ function renderDiffBody(container: HTMLElement, original: string, updated: strin
 		}
 	}
 
+	const rows: IDiffRowTarget[] = [];
+	let firstChangeRow: IDiffRowTarget | undefined;
+	const pushRow = (line: IVibeAIDiffLine): void => {
+		const row = appendDiffRow(container, line);
+		rows.push(row);
+		if (!firstChangeRow && line.type !== 'same') {
+			firstChangeRow = row;
+		}
+	};
+	const pushSeparator = (omitted: number): void => {
+		const separator = DOM.append(container, $('div.vibe-ai-diff-separator'));
+		separator.textContent = localize('vibeAIChat.tool.unchanged', "⋯ {0} unchanged lines ⋯", omitted);
+	};
+
 	let i = 0;
 	while (i < lines.length) {
 		if (lines[i].type === 'same') {
@@ -585,28 +848,41 @@ function renderDiffBody(container: HTMLElement, original: string, updated: strin
 			while (i + run < lines.length && lines[i + run].type === 'same') {
 				run++;
 			}
-			// Compress long unchanged runs between changes (Cursor-style "⋯").
-			if (i > 0 && i + run < lines.length && run > COMPRESSED_UNCHANGED_RUN) {
-				appendDiffRow(container, lines[i], languageService, languageId);
-				appendDiffRow(container, lines[i + 1], languageService, languageId);
-				const separator = DOM.append(container, $('div.vibe-ai-diff-separator'));
-				separator.textContent = localize('vibeAIChat.tool.unchanged', "⋯ {0} unchanged lines ⋯", run - COMPRESSED_UNCHANGED_RUN);
-				i += run - 2;
-				continue;
-			}
-			for (let k = 0; k < run; k++) {
-				appendDiffRow(container, lines[i + k], languageService, languageId);
+			// Compress long unchanged runs (Cursor-style "⋯") — Phase 87:
+			// leading and trailing runs keep 2 context lines toward the
+			// change so the collapsed preview starts at the changed region
+			// instead of the file head; middle runs keep 2 on each side.
+			if (run > COMPRESSED_UNCHANGED_RUN && !(i === 0 && i + run === lines.length)) {
+				if (i === 0) {
+					pushSeparator(run - 2);
+					pushRow(lines[i + run - 2]);
+					pushRow(lines[i + run - 1]);
+				} else if (i + run === lines.length) {
+					pushRow(lines[i]);
+					pushRow(lines[i + 1]);
+					pushSeparator(run - 2);
+				} else {
+					pushRow(lines[i]);
+					pushRow(lines[i + 1]);
+					pushSeparator(run - COMPRESSED_UNCHANGED_RUN);
+					pushRow(lines[i + run - 2]);
+					pushRow(lines[i + run - 1]);
+				}
+			} else {
+				for (let k = 0; k < run; k++) {
+					pushRow(lines[i + k]);
+				}
 			}
 			i += run;
 			continue;
 		}
-		appendDiffRow(container, lines[i], languageService, languageId);
+		pushRow(lines[i]);
 		i++;
 	}
-	return changed;
+	return { changed, firstChangeRow, rows };
 }
 
-function appendDiffRow(container: HTMLElement, line: IVibeAIDiffLine, languageService: ILanguageService, languageId: string): void {
+function appendDiffRow(container: HTMLElement, line: IVibeAIDiffLine): IDiffRowTarget {
 	const row = DOM.append(container, $('div.vibe-ai-diff-line'));
 	row.classList.add(line.type);
 
@@ -626,12 +902,17 @@ function appendDiffRow(container: HTMLElement, line: IVibeAIDiffLine, languageSe
 	lineNo.style.userSelect = 'none';
 	lineNo.textContent = String(line.type === 'add' ? line.newLine ?? '' : line.oldLine ?? '');
 
-	// syntax-highlighted text (token spans styled by the workbench theme)
+	// Plain text first — theme-matched token spans fill in once the file's
+	// language grammar is loaded (fillDiffTokenColors, Phase 87). The old
+	// per-row path tokenized with `tokenizeToStringSync`, which used the
+	// null tokenizer for languages whose grammar was not yet activated and
+	// broke multi-line token state.
 	const text = DOM.append(row, $('span.diff-text'));
-	text.innerHTML = highlightLine(languageService, line.text, languageId);
+	text.textContent = line.text;
 	if (line.type === 'same') {
 		text.style.opacity = '0.55';
 	}
+	return { span: text, type: line.type, oldLine: line.oldLine, newLine: line.newLine };
 }
 
 

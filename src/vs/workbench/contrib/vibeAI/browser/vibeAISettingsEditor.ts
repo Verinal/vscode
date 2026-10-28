@@ -8,6 +8,7 @@ import { CancellationToken } from '../../../../base/common/cancellation.js';
 import { Codicon } from '../../../../base/common/codicons.js';
 import { DisposableStore } from '../../../../base/common/lifecycle.js';
 import { ThemeIcon } from '../../../../base/common/themables.js';
+import { URI } from '../../../../base/common/uri.js';
 import { localize } from '../../../../nls.js';
 import { IConfigurationService } from '../../../../platform/configuration/common/configuration.js';
 import { ICommandService } from '../../../../platform/commands/common/commands.js';
@@ -16,7 +17,7 @@ import { INotificationService } from '../../../../platform/notification/common/n
 import { IStorageService, StorageScope } from '../../../../platform/storage/common/storage.js';
 import { ITelemetryService } from '../../../../platform/telemetry/common/telemetry.js';
 import { IThemeService } from '../../../../platform/theme/common/themeService.js';
-import { IVibeAIService } from '../../../../platform/vibeAI/common/vibeAI.js';
+import { IVibeAICustomizeCreateData, IVibeAICustomizeItem, IVibeAIService, VibeAICustomizeKind, VibeAICustomizeScope } from '../../../../platform/vibeAI/common/vibeAI.js';
 import { EditorPane } from '../../../browser/parts/editor/editorPane.js';
 import { EditorInputCapabilities, IEditorOpenContext, IUntypedEditorInput } from '../../../common/editor.js';
 import { EditorInput } from '../../../common/editor/editorInput.js';
@@ -27,7 +28,7 @@ import './media/vibeAISettings.css';
 const $ = DOM.$;
 
 /** Pages rendered in the settings editor's content area. */
-type SettingsPage = 'general' | 'models' | 'unavailable';
+type SettingsPage = 'general' | 'models' | 'rules' | 'skills' | 'mcp' | 'unavailable';
 
 /**
  * One sidebar navigation entry. `command` entries run directly and keep
@@ -57,7 +58,9 @@ const NAV_ENTRIES: Array<INavEntry | 'divider'> = [
 	'divider',
 	{ id: 'models', label: "Models", icon: 'codicon-server', page: 'models' },
 	{ id: 'git', label: "Git & PRs", icon: 'codicon-git-pull-request', page: 'unavailable' },
-	{ id: 'customize', label: "Customize", icon: 'codicon-wand', page: 'unavailable' },
+	{ id: 'rules', label: "Rules", icon: 'codicon-notebook', page: 'rules' },
+	{ id: 'skills', label: "Skills", icon: 'codicon-lightbulb', page: 'skills' },
+	{ id: 'mcp', label: "MCP", icon: 'codicon-plug', page: 'mcp' },
 	{ id: 'browser', label: "Browser & Network", icon: 'codicon-globe', page: 'unavailable' },
 	{ id: 'tab', label: "Tab", icon: 'codicon-arrow-right', page: 'unavailable' },
 	{ id: 'indexing', label: "Indexing & Docs", icon: 'codicon-book', page: 'unavailable' },
@@ -124,10 +127,14 @@ export class VibeAISettingsEditorInput extends EditorInput {
  * bar): a searchable sidebar and a content area rendered directly in the
  * editor area as a tab. Fully implemented pages: General (backend check,
  * VS Code settings shortcuts, Tab completion / status bar toggles, chat
- * history) and Models (provider connections — type + base URL + API key —
+ * history), Models (provider connections — type + base URL + API key —
  * plus imported model names routed through them; the registry the chat
- * pane's model dropdown reads). The remaining Cursor sections are rendered
- * as placeholders.
+ * pane's model dropdown reads) and the Customize trio (Phase 142): Rules,
+ * Skills and MCP — dual-scope lists (project .vibe / global ~/.vibe with
+ * scope badges, project wins on name conflicts), an add form per page and
+ * per-row open / delete actions; MCP rows carry an enable toggle and a
+ * connection-status light backed by the config hot-reload. The remaining
+ * Cursor sections are rendered as placeholders.
  */
 export class VibeAISettingsEditorPane extends EditorPane {
 
@@ -152,6 +159,8 @@ export class VibeAISettingsEditorPane extends EditorPane {
 	private editingConnectionId: string | 'new' | undefined;
 	/** Model form state on the Models page: 'new' | registry id | undefined (closed). */
 	private editingModelId: string | 'new' | undefined;
+	/** Phase 142: open add-form kind on the Rules / Skills / MCP pages (undefined = closed). */
+	private customizeFormKind: VibeAICustomizeKind | undefined;
 	/** Model connectivity results: id -> '' (ok) or error message. */
 	private readonly testResults = new Map<string, string>();
 	/** Connection scan results: id -> message shown on the connection row. */
@@ -300,6 +309,15 @@ export class VibeAISettingsEditorPane extends EditorPane {
 			case 'models':
 				this.renderModelsPage();
 				break;
+			case 'rules':
+				this.renderRulesPage();
+				break;
+			case 'skills':
+				this.renderSkillsPage();
+				break;
+			case 'mcp':
+				this.renderMcpPage();
+				break;
 			default:
 				this.renderUnavailablePage(entry?.label ?? '');
 				break;
@@ -353,6 +371,19 @@ export class VibeAISettingsEditorPane extends EditorPane {
 			localize('vibeAISettings.tabCompletion', "Tab Completion"),
 			localize('vibeAISettings.tabCompletionDesc', "Enable Cursor-style Tab completion (ghost text)"),
 			'vibeAI.inlineCompletion.enabled',
+		);
+
+		// Phase 139: terminal permission control (Cursor parity) — the
+		// approval-mode select feeds the agent's terminal gate per turn.
+		this.appendSelectCard(
+			localize('vibeAISettings.permissionMode', "Terminal Permission"),
+			localize('vibeAISettings.permissionModeDesc', "When the agent's terminal commands need your approval"),
+			'vibeAI.agent.permissionMode',
+			[
+				{ value: 'review_all', label: localize('vibeAISettings.permissionMode.reviewAll', "Always ask") },
+				{ value: 'high_risk', label: localize('vibeAISettings.permissionMode.highRisk', "High-risk only (default)") },
+				{ value: 'trusted', label: localize('vibeAISettings.permissionMode.trusted', "Full trust") },
+			],
 		);
 
 		this.appendGroupLabel(localize('vibeAISettings.layout', "Layout"));
@@ -418,6 +449,36 @@ export class VibeAISettingsEditorPane extends EditorPane {
 			const current = this.configurationService.getValue<boolean>(settingKey) !== false;
 			await this.configurationService.updateValue(settingKey, !current);
 			sync();
+		}));
+	}
+
+	/** Card with a Cursor-style select bound to an enum setting. */
+	private appendSelectCard(title: string, description: string, settingKey: string, options: { value: string; label: string }[]): void {
+		if (!this.contentEl) {
+			return;
+		}
+		const card = DOM.append(this.contentEl, $('.vibe-ai-settings-card'));
+		DOM.append(card, $('.vibe-ai-settings-card-title')).textContent = title;
+		DOM.append(card, $('.vibe-ai-settings-card-desc')).textContent = description;
+		const actions = DOM.append(card, $('.vibe-ai-settings-card-actions'));
+		const select = DOM.append(actions, $('select.vibe-ai-settings-input')) as HTMLSelectElement;
+		for (const opt of options) {
+			const option = DOM.append(select, $('option')) as HTMLOptionElement;
+			option.value = opt.value;
+			option.textContent = opt.label;
+		}
+		const sync = () => {
+			const current = this.configurationService.getValue<string>(settingKey);
+			select.value = options.some(o => o.value === current) ? current : (options[1]?.value ?? options[0]?.value ?? '');
+		};
+		sync();
+		this.pageDisposables.add(DOM.addDisposableListener(select, DOM.EventType.CHANGE, async () => {
+			await this.configurationService.updateValue(settingKey, select.value);
+		}));
+		this.pageDisposables.add(this.configurationService.onDidChangeConfiguration(e => {
+			if (e.affectsConfiguration(settingKey)) {
+				sync();
+			}
 		}));
 	}
 
@@ -960,6 +1021,385 @@ export class VibeAISettingsEditorPane extends EditorPane {
 			this.editingModelId = undefined;
 			this.showPage(this.currentPage);
 		}));
+	}
+
+	// ==================== Customize pages (Rules / Skills / MCP) ====================
+
+	private renderRulesPage(): void {
+		this.renderCustomizeShell(
+			'rules',
+			localize('vibeAISettings.rules', "Rules"),
+			localize('vibeAISettings.rulesDesc', "Project rules live in .vibe/rules/*.mdc and inject by trigger (alwaysApply / globs / description). Global rules live in ~/.vibe/rules and apply to every workspace. Project entries win on name conflicts."),
+			localize('vibeAISettings.addRule', "Add Rule"),
+		);
+	}
+
+	private renderSkillsPage(): void {
+		this.renderCustomizeShell(
+			'skills',
+			localize('vibeAISettings.skills', "Skills"),
+			localize('vibeAISettings.skillsDesc', "Skills are SKILL.md packages under .vibe/skills/<name>/ (project) or ~/.vibe/skills (global). The model sees the directory listing and loads the full skill with activate_skill. Project entries win on name conflicts."),
+			localize('vibeAISettings.addSkill', "Add Skill"),
+		);
+	}
+
+	private renderMcpPage(): void {
+		this.renderCustomizeShell(
+			'mcp',
+			localize('vibeAISettings.mcp', "MCP"),
+			localize('vibeAISettings.mcpDesc', "MCP servers come from .vibe/mcp.json (project) and ~/.vibe/mcp.json (global); project wins on name conflicts. Toggle a server to enable or disable it — the change hot-reloads and reconnects."),
+			localize('vibeAISettings.addServer', "Add Server"),
+		);
+	}
+
+	/**
+	 * Shared page shell for the customize pages: head (title + Add button),
+	 * description, the open add form (when any) and the async item list.
+	 */
+	private renderCustomizeShell(kind: VibeAICustomizeKind, title: string, description: string, addLabel: string): void {
+		if (!this.contentEl) {
+			return;
+		}
+		const head = DOM.append(this.contentEl, $('.vibe-ai-settings-page-head'));
+		DOM.append(head, $('h1.vibe-ai-settings-title')).textContent = title;
+		const addBtn = DOM.append(head, $('button.vibe-ai-settings-btn.primary')) as HTMLButtonElement;
+		addBtn.textContent = addLabel;
+		this.pageDisposables.add(DOM.addDisposableListener(addBtn, DOM.EventType.CLICK, () => {
+			this.customizeFormKind = kind;
+			this.showPage(this.currentPage);
+		}));
+		DOM.append(this.contentEl, $('.vibe-ai-settings-page-desc')).textContent = description;
+		if (this.customizeFormKind === kind) {
+			this.renderCustomizeForm(kind);
+		}
+		const listEl = DOM.append(this.contentEl, $('.vibe-ai-settings-list'));
+		this.loadCustomizeItems(kind, listEl);
+	}
+
+	/** Fetches the merged dual-scope list and renders one row per entry. */
+	private loadCustomizeItems(kind: VibeAICustomizeKind, listEl: HTMLElement): void {
+		listEl.innerText = '';
+		DOM.append(listEl, $('.vibe-ai-settings-empty')).textContent = '…';
+		this.vibeAIService.customizeList(kind).then(items => {
+			if (!listEl.isConnected) {
+				return; // the page switched while the request was in flight
+			}
+			listEl.innerText = '';
+			if (items.length === 0) {
+				DOM.append(listEl, $('.vibe-ai-settings-empty')).textContent = localize('vibeAISettings.noCustomItems', "Nothing here yet — add one.");
+				return;
+			}
+			for (const item of items) {
+				this.renderCustomizeRow(kind, item, listEl);
+			}
+		}).catch(error => {
+			if (!listEl.isConnected) {
+				return;
+			}
+			listEl.innerText = '';
+			const failed = DOM.append(listEl, $('.vibe-ai-settings-empty'));
+			failed.textContent = localize('vibeAISettings.loadFailed', "Failed to load — check the backend connection.");
+			failed.title = String(error);
+		});
+	}
+
+	/** The row's scope: origin "global" → global layer, else project (Phase 142). */
+	private customizeScopeOf(item: IVibeAICustomizeItem): VibeAICustomizeScope {
+		return item.origin === 'global' ? 'global' : 'project';
+	}
+
+	/**
+	 * One customize row: name + scope badge (project blue / global grey) +
+	 * kind meta + actions — MCP rows carry a status light and an enable
+	 * toggle; every row opens its definition file and deletes itself from
+	 * its own scope (Phase 142).
+	 */
+	private renderCustomizeRow(kind: VibeAICustomizeKind, item: IVibeAICustomizeItem, container: HTMLElement): void {
+		const card = DOM.append(container, $('.vibe-ai-settings-card.vibe-ai-settings-custom' + (item.enabled === false ? '.off' : '')));
+		const titleRow = DOM.append(card, $('.vibe-ai-settings-model-title'));
+		DOM.append(titleRow, $('span.vibe-ai-settings-model-name')).textContent = item.name;
+		const isGlobal = item.origin === 'global';
+		const badge = DOM.append(titleRow, $('span.vibe-ai-settings-scope-badge'));
+		badge.classList.add(isGlobal ? 'global' : 'project');
+		badge.textContent = isGlobal
+			? localize('vibeAISettings.scopeBadgeGlobal', "Global")
+			: localize('vibeAISettings.scopeBadgeProject', "Project");
+
+		const metaParts: string[] = [];
+		if (item.description) {
+			metaParts.push(item.description);
+		}
+		if (kind === 'rules') {
+			metaParts.push(
+				item.alwaysApply
+					? localize('vibeAISettings.ruleAlways', "always apply")
+					: (item.globs?.length ? `globs: ${item.globs.join(', ')}` : localize('vibeAISettings.ruleOnDemand', "on demand")),
+			);
+		}
+		if (kind === 'mcp') {
+			if (item.command) {
+				metaParts.push(item.command);
+			}
+			if (item.status === 'connected' && typeof item.toolCount === 'number') {
+				metaParts.push(localize('vibeAISettings.mcpTools', "{0} tools", item.toolCount));
+			}
+		}
+		DOM.append(card, $('.vibe-ai-settings-card-desc')).textContent = metaParts.join(' · ');
+
+		const actions = DOM.append(card, $('.vibe-ai-settings-model-actions'));
+		const scope = this.customizeScopeOf(item);
+
+		if (kind === 'mcp') {
+			// --- connection-status light (lazy: not connected until the
+			// agent loop or the reload button connects)
+			const statusEl = DOM.append(actions, $('span.vibe-ai-settings-check-result'));
+			const status = item.status ?? 'disconnected';
+			if (status === 'connected') {
+				statusEl.className = 'vibe-ai-settings-check-result ok';
+				statusEl.textContent = localize('vibeAISettings.mcpConnected', "✓ Connected");
+			} else if (status === 'failed') {
+				statusEl.className = 'vibe-ai-settings-check-result fail';
+				statusEl.textContent = localize('vibeAISettings.mcpFailed', "✗ Failed");
+				statusEl.title = item.error ?? '';
+			} else if (status === 'disabled') {
+				statusEl.className = 'vibe-ai-settings-check-result';
+				statusEl.textContent = localize('vibeAISettings.mcpDisabled', "Disabled");
+			} else {
+				statusEl.className = 'vibe-ai-settings-check-result';
+				statusEl.textContent = localize('vibeAISettings.mcpDisconnected', "Not connected");
+			}
+
+			// --- enabled toggle (Cursor-parity switch; writes + hot-reloads)
+			const toggle = DOM.append(actions, $('.vibe-ai-settings-toggle'));
+			toggle.classList.toggle('checked', item.enabled !== false);
+			toggle.title = item.enabled !== false
+				? localize('vibeAISettings.mcpEnabledTip', "Enabled — click to disable this server")
+				: localize('vibeAISettings.mcpDisabledTip', "Disabled — click to enable this server");
+			this.pageDisposables.add(DOM.addDisposableListener(toggle, DOM.EventType.CLICK, () => {
+				void this.vibeAIService.customizeToggle('mcp', item.name, scope).then(result => {
+					if (!result.ok) {
+						this.notificationService.error(result.error ?? localize('vibeAISettings.toggleFailed', "Toggle failed"));
+						return;
+					}
+					this.showPage(this.currentPage);
+				});
+			}));
+
+			// --- reload & reconnect (after mcp.json changes)
+			const reloadBtn = this.mkIconButton(actions, 'codicon-refresh', localize('vibeAISettings.mcpReload', "Reload & reconnect"));
+			this.pageDisposables.add(DOM.addDisposableListener(reloadBtn, DOM.EventType.CLICK, () => {
+				void this.vibeAIService.reloadMcp().then(result => {
+					if (!result.ok) {
+						this.notificationService.error(result.error ?? localize('vibeAISettings.reloadFailed', "Reload failed"));
+					}
+					this.showPage(this.currentPage);
+				});
+			}));
+		}
+
+		// --- open the definition file (rules .mdc / skills SKILL.md / mcp.json)
+		const openBtn = this.mkIconButton(actions, 'codicon-go-to-file', localize('vibeAISettings.openFile', "Open file"));
+		if (!item.path) {
+			openBtn.disabled = true;
+		} else {
+			this.pageDisposables.add(DOM.addDisposableListener(openBtn, DOM.EventType.CLICK, () => {
+				void this.commandService.executeCommand('vscode.open', URI.file(item.path));
+			}));
+		}
+
+		// --- delete (from the row's own scope)
+		const deleteBtn = this.mkIconButton(actions, 'codicon-trash', localize('vibeAISettings.deleteItem', "Delete"));
+		this.pageDisposables.add(DOM.addDisposableListener(deleteBtn, DOM.EventType.CLICK, () => {
+			void this.vibeAIService.customizeDelete(kind, item.name, scope).then(result => {
+				if (!result.ok) {
+					this.notificationService.error(result.error ?? localize('vibeAISettings.deleteFailed', "Delete failed"));
+					return;
+				}
+				this.showPage(this.currentPage);
+			});
+		}));
+	}
+
+	/** Add form (modeled on the Models connection form): scope first, then kind fields. */
+	private renderCustomizeForm(kind: VibeAICustomizeKind): void {
+		if (!this.contentEl) {
+			return;
+		}
+		const card = DOM.append(this.contentEl, $('.vibe-ai-settings-card.vibe-ai-settings-form'));
+		DOM.append(card, $('.vibe-ai-settings-form-title')).textContent = localize('vibeAISettings.addCustomTitle', "Add {0}", kind);
+
+		const errorEl = DOM.append(card, $('span.vibe-ai-settings-form-error'));
+		errorEl.style.display = 'none';
+
+		const scopeSelect = this.mkScopeSelect(card, 'project');
+		const nameInput = this.mkFormField(card,
+			localize('vibeAISettings.fieldCustomName', "Name"),
+			'',
+			this.customizeNamePlaceholder(kind),
+			false,
+		);
+
+		let descInput: HTMLInputElement | undefined;
+		let contentInput: HTMLTextAreaElement | undefined;
+		let globsInput: HTMLInputElement | undefined;
+		let alwaysToggle: HTMLElement | undefined;
+		let disableToggle: HTMLElement | undefined;
+		let commandInput: HTMLInputElement | undefined;
+		let argsInput: HTMLInputElement | undefined;
+		if (kind !== 'mcp') {
+			descInput = this.mkFormField(card,
+				localize('vibeAISettings.fieldDescription', "Description (optional)"),
+				'',
+				localize('vibeAISettings.fieldDescriptionPh', "Shown in the rules directory / skill listing"),
+				false,
+			);
+			contentInput = this.mkFormTextarea(card,
+				localize('vibeAISettings.fieldContent', "Content (Markdown body)"),
+				'',
+				localize('vibeAISettings.fieldContentPh', "The rule / skill instructions written in Markdown"),
+			);
+		}
+		if (kind === 'rules') {
+			globsInput = this.mkFormField(card,
+				localize('vibeAISettings.fieldGlobs', "Globs (optional, comma-separated)"),
+				'',
+				localize('vibeAISettings.fieldGlobsPh', "e.g. *.py, src/**/*.ts — matched against context files"),
+				false,
+			);
+			alwaysToggle = this.mkFormToggle(card,
+				localize('vibeAISettings.fieldAlwaysApply', "Always apply"),
+				localize('vibeAISettings.fieldAlwaysApplyDesc', "Inject into every prompt (otherwise trigger by globs / description)"),
+			);
+		}
+		if (kind === 'skills') {
+			disableToggle = this.mkFormToggle(card,
+				localize('vibeAISettings.fieldDisableInvocation', "Disable model invocation"),
+				localize('vibeAISettings.fieldDisableInvocationDesc', "Hide from the model — only triggerable by typing /name"),
+			);
+		}
+		if (kind === 'mcp') {
+			commandInput = this.mkFormField(card,
+				localize('vibeAISettings.fieldCommand', "Command"),
+				'',
+				localize('vibeAISettings.fieldCommandPh', "Executable, e.g. npx, python or node"),
+				false,
+			);
+			argsInput = this.mkFormField(card,
+				localize('vibeAISettings.fieldArgs', "Arguments (space-separated)"),
+				'',
+				localize('vibeAISettings.fieldArgsPh', "e.g. -y @modelcontextprotocol/server-filesystem /tmp"),
+				false,
+			);
+		}
+
+		const actions = DOM.append(card, $('.vibe-ai-settings-form-actions'));
+		const saveBtn = DOM.append(actions, $('button.vibe-ai-settings-btn.primary')) as HTMLButtonElement;
+		saveBtn.textContent = localize('vibeAISettings.save', "Save");
+		const cancelBtn = DOM.append(actions, $('button.vibe-ai-settings-btn')) as HTMLButtonElement;
+		cancelBtn.textContent = localize('vibeAISettings.cancel', "Cancel");
+
+		const showFormMessage = (message: string, ok: boolean): void => {
+			errorEl.className = `vibe-ai-settings-form-error ${ok ? 'ok' : 'fail'}`;
+			errorEl.textContent = message;
+			errorEl.style.display = 'block';
+		};
+
+		this.pageDisposables.add(DOM.addDisposableListener(cancelBtn, DOM.EventType.CLICK, () => {
+			this.customizeFormKind = undefined;
+			this.showPage(this.currentPage);
+		}));
+
+		this.pageDisposables.add(DOM.addDisposableListener(saveBtn, DOM.EventType.CLICK, async () => {
+			const name = nameInput.value.trim();
+			if (!name) {
+				showFormMessage(localize('vibeAISettings.nameRequired', "Name is required."), false);
+				return;
+			}
+			if (kind === 'mcp' && !commandInput?.value.trim()) {
+				showFormMessage(localize('vibeAISettings.commandRequired', "Command is required — the executable the MCP server runs, e.g. npx or python."), false);
+				return;
+			}
+			const args = kind === 'mcp' ? (argsInput?.value.trim().split(/\s+/).filter(Boolean) ?? []) : [];
+			const globs = kind === 'rules' ? (globsInput?.value ?? '').split(',').map(g => g.trim()).filter(Boolean) : [];
+			const data: IVibeAICustomizeCreateData = {
+				name,
+				scope: scopeSelect.value as VibeAICustomizeScope,
+				// rules / skills: description + Markdown body
+				...(kind !== 'mcp' && descInput?.value.trim() ? { description: descInput.value.trim() } : {}),
+				...(kind !== 'mcp' && contentInput?.value.trim() ? { content: contentInput.value } : {}),
+				// rules: trigger matrix (alwaysApply / globs)
+				...(kind === 'rules' && alwaysToggle?.classList.contains('checked') ? { alwaysApply: true } : {}),
+				...(kind === 'rules' && globs.length > 0 ? { globs } : {}),
+				// skills: hide from the model (user-trigger only)
+				...(kind === 'skills' && disableToggle?.classList.contains('checked') ? { disableModelInvocation: true } : {}),
+				// mcp: command + space-split args
+				...(kind === 'mcp' ? { command: commandInput!.value.trim() } : {}),
+				...(kind === 'mcp' && args.length > 0 ? { args } : {}),
+			};
+			saveBtn.disabled = true;
+			const result = await this.vibeAIService.customizeCreate(kind, data);
+			saveBtn.disabled = false;
+			if (!result.ok) {
+				showFormMessage(result.error ?? localize('vibeAISettings.createFailed', "Create failed."), false);
+				return;
+			}
+			this.customizeFormKind = undefined;
+			this.showPage(this.currentPage);
+		}));
+	}
+
+	/** Scope select (project / global) for the customize add form. */
+	private mkScopeSelect(card: HTMLElement, current: VibeAICustomizeScope): HTMLSelectElement {
+		const field = DOM.append(card, $('.vibe-ai-settings-field'));
+		DOM.append(field, $('label')).textContent = localize('vibeAISettings.fieldScope', "Scope");
+		const select = DOM.append(field, $('select.vibe-ai-settings-input')) as HTMLSelectElement;
+		for (const [value, label] of [
+			['project', localize('vibeAISettings.scopeProject', "Project (.vibe, this workspace)")],
+			['global', localize('vibeAISettings.scopeGlobal', "Global (~/.vibe, every workspace)")],
+		] as const) {
+			const option = DOM.append(select, $('option')) as HTMLOptionElement;
+			option.value = value;
+			option.textContent = label;
+		}
+		select.value = current;
+		return select;
+	}
+
+	/** Multi-line content field for the customize add form. */
+	private mkFormTextarea(card: HTMLElement, labelText: string, value: string, placeholder: string): HTMLTextAreaElement {
+		const field = DOM.append(card, $('.vibe-ai-settings-field'));
+		DOM.append(field, $('label')).textContent = labelText;
+		const textarea = DOM.append(field, $('textarea.vibe-ai-settings-input')) as HTMLTextAreaElement;
+		textarea.spellcheck = false;
+		textarea.value = value;
+		textarea.placeholder = placeholder;
+		textarea.rows = 6;
+		return textarea;
+	}
+
+	/** Cursor-parity toggle row inside the customize add form (tooltip = description). */
+	private mkFormToggle(card: HTMLElement, labelText: string, description: string): HTMLElement {
+		const field = DOM.append(card, $('.vibe-ai-settings-field.vibe-ai-settings-field-row'));
+		const label = DOM.append(field, $('label'));
+		label.textContent = labelText;
+		label.title = description;
+		const toggle = DOM.append(field, $('.vibe-ai-settings-toggle'));
+		toggle.title = description;
+		this.pageDisposables.add(DOM.addDisposableListener(toggle, DOM.EventType.CLICK, () => {
+			toggle.classList.toggle('checked');
+		}));
+		return toggle;
+	}
+
+	/** Name placeholder per customize kind (what the backend creates). */
+	private customizeNamePlaceholder(kind: VibeAICustomizeKind): string {
+		if (kind === 'rules') {
+			return localize('vibeAISettings.ruleNamePh', "kebab-case name, e.g. code-review (creates <name>.mdc)");
+		}
+		if (kind === 'skills') {
+			return localize('vibeAISettings.skillNamePh', "folder name, e.g. commit-helper (creates <name>/SKILL.md)");
+		}
+		return localize('vibeAISettings.mcpNamePh', "server name, e.g. filesystem");
 	}
 
 	private renderUnavailablePage(label: string): void {

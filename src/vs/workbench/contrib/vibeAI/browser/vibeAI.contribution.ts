@@ -587,5 +587,20 @@ Registry.as<IConfigurationRegistry>(ConfigurationExtensions.Configuration).regis
 			default: true,
 			markdownDescription: localize('vibeAI.chat.autoReveal', "Show which model the Auto router picked for each turn (Cursor-parity underlying-model display; on by default in this fork for single-machine debugging)."),
 		},
+		// Phase 139: terminal permission control (Cursor parity) — when the
+		// agent's terminal commands need approval. The chat pane reads it
+		// live per turn and forwards it as the request's permission_mode;
+		// the backend falls back to its own default when absent.
+		'vibeAI.agent.permissionMode': {
+			type: 'string',
+			enum: ['review_all', 'high_risk', 'trusted'],
+			enumDescriptions: [
+				localize('vibeAI.agent.permissionMode.reviewAll', "Ask before every terminal command the agent runs."),
+				localize('vibeAI.agent.permissionMode.highRisk', "Run the terminal whitelist automatically; everything else asks (default)."),
+				localize('vibeAI.agent.permissionMode.trusted', "Run every terminal command automatically except deny-listed high-risk ones."),
+			],
+			default: 'high_risk',
+			markdownDescription: localize('vibeAI.agent.permissionMode', "Terminal permission control for the VibeAI agent (Cursor parity): when the agent's terminal commands need your approval. Settable from the Settings → General page."),
+		},
 	},
 });

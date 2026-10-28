@@ -181,7 +181,23 @@ function fromLocalEsbuild(extensionPath: string, esbuildConfigFileName: string):
 		});
 	}).then(() => {
 		// After esbuild completes, collect all files using vsce
-		return vsce.listFiles({ cwd: extensionPath, packageManager: vsce.PackageManager.None });
+		// Extensions with their own build system (dot-prefixed esbuild script,
+		// e.g. copilot) rely on `.vscodeignore` negation patterns to re-include
+		// selective runtime `node_modules/**` files (e.g. `@github/copilot/sdk/**`).
+		// vsce only collects node_modules when a package manager resolves the
+		// dependency tree: with PackageManager.None it never yields any
+		// node_modules files at all, so those re-includes silently package
+		// nothing and built-in packaging misses the Copilot SDK (finalize then
+		// throws "Copilot SDK directory not found"). Opt those extensions into
+		// Npm so vsce walks the dependency tree first (their own node_modules +
+		// lockfile resolve cleanly); standard esbuild extensions bundle
+		// everything, so they keep PackageManager.None — running npm list for
+		// them would walk up into the repo root's node_modules and fail on its
+		// known-tolerated ELSPROBLEMS (e.g. missing tslib).
+		const packageManager = esbuildConfigFileName.startsWith('.')
+			? vsce.PackageManager.Npm
+			: vsce.PackageManager.None;
+		return vsce.listFiles({ cwd: extensionPath, packageManager });
 	}).then(fileNames => {
 		if (packagedDependencies.length > 0) {
 			const packagedDependencyFileNames = packagedDependencies.flatMap(dependency =>

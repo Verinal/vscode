@@ -15,56 +15,28 @@
 	height: 100%;
 }
 
-/* ==================== Chat scrollbars (editor parity, Phase 80) ==================== */
+/* ==================== Chat scrollbars (hidden, Phase 103) ==================== */
 
-/* Phase 80: the chat view now renders the same editor-style scrollbars as
-   every other workbench area (mirrors the global styling in workbench
-   style.css). Phase 40's full hiding made inner scroll state invisible:
-   the wheel over an inner scroller (thinking window / tool output / code
-   block / table / file list) scrolls THAT window first and only chains to
-   the thread at its boundary — with no visible scrollbar the page just
-   looked frozen near blocks and there was nothing to drag ("劃不動").
-   Visible themed scrollbars show the inner scroll happening and give the
-   lane back for dragging. NOTE: deliberately no scrollbar-width
-   declarations here — in Chromium ≥121 the standard property overrides
-   ::-webkit-scrollbar styling entirely (scrollbar-width: none would keep
-   every scrollbar hidden and resurrect the original bug). */
+/* Hide every scrollbar inside the chat view (message list, input box,
+   thinking window, tool output, diff preview, code blocks, tables, file
+   lists, tab strip, history menu, skill menu) — Phase 40's full hiding,
+   restored by user request. Scrolling itself still works via wheel /
+   drag / touch; only the scrollbar visuals are removed. Two declarations
+   are required: ::-webkit-scrollbar { display: none } covers older
+   Chromium, while scrollbar-width: none covers Chromium ≥121 where the
+   standard property fully overrides ::-webkit-scrollbar styling (and
+   Firefox). !important keeps the hiding ahead of any other scrollbar
+   styling inside the view. */
 .vibe-ai-chat-view ::-webkit-scrollbar,
 .vibe-ai-chat-view::-webkit-scrollbar {
-	width: 14px;
-	height: 12px;
-}
-
-.vibe-ai-chat-view ::-webkit-scrollbar-track,
-.vibe-ai-chat-view::-webkit-scrollbar-track {
-	background: transparent;
-}
-
-.vibe-ai-chat-view ::-webkit-scrollbar-thumb,
-.vibe-ai-chat-view::-webkit-scrollbar-thumb {
-	background: var(--vscode-scrollbarSlider-background, rgba(121, 121, 121, 0.4));
-}
-
-.vibe-ai-chat-view ::-webkit-scrollbar-thumb:hover,
-.vibe-ai-chat-view::-webkit-scrollbar-thumb:hover {
-	background: var(--vscode-scrollbarSlider-hoverBackground, rgba(100, 100, 100, 0.7));
-}
-
-.vibe-ai-chat-view ::-webkit-scrollbar-thumb:active,
-.vibe-ai-chat-view::-webkit-scrollbar-thumb:active {
-	background: var(--vscode-scrollbarSlider-activeBackground, rgba(191, 191, 191, 0.4));
-}
-
-.vibe-ai-chat-view ::-webkit-scrollbar-button,
-.vibe-ai-chat-view::-webkit-scrollbar-button {
-	display: none;
+	display: none !important;
 	width: 0;
 	height: 0;
 }
 
-.vibe-ai-chat-view ::-webkit-scrollbar-corner,
-.vibe-ai-chat-view::-webkit-scrollbar-corner {
-	background: transparent;
+.vibe-ai-chat-view,
+.vibe-ai-chat-view * {
+	scrollbar-width: none !important;
 }
 
 /* ==================== Cursor-style in-pane tab bar ==================== */
@@ -112,6 +84,17 @@
 	user-select: none;
 	white-space: nowrap;
 	overflow: hidden;
+}
+
+/* Phase 116: Side Chat — the Side badge on a side thread's tab. */
+.vibe-ai-tab-side-badge {
+	flex-shrink: 0;
+	padding: 0 5px;
+	border-radius: 4px;
+	background: var(--vscode-charts-blue, #4fc1ff);
+	color: var(--vscode-editorWidget-background, #1e1e1e);
+	font-size: 10px;
+	line-height: 15px;
 }
 
 .vibe-ai-tab:hover {
@@ -314,6 +297,43 @@
 	margin: 0;
 }
 
+/* Phase 113: a steer injected mid-turn (Cursor's "send now") — a user
+   bubble inside the Working timeline with a Steered marker. NOT a
+   .vibe-ai-turn-user row (steers are never dispatched user turns — the
+   truncate / turn-record alignment maps those 1:1) and not editable (the
+   steer is consumed by the backend at injection). */
+.vibe-ai-turn-steered {
+	margin: 4px 0 8px;
+}
+
+.vibe-ai-steered-meta {
+	display: flex;
+	align-items: center;
+	gap: 5px;
+	margin-bottom: 4px;
+	font-size: 11px;
+	color: var(--vscode-descriptionForeground);
+	user-select: none;
+}
+
+.vibe-ai-steered-meta .codicon {
+	font-size: 13px;
+}
+
+.vibe-ai-steered-bubble {
+	background: var(--vscode-input-background);
+	border: 1px solid var(--vscode-input-border, transparent);
+	border-left: 2px solid var(--vscode-charts-purple, #b180d7);
+	border-radius: 8px;
+	padding: 7px 10px;
+	white-space: pre-wrap;
+	word-break: break-word;
+	line-height: 1.5;
+	user-select: text;
+	-webkit-user-select: text;
+	color: var(--vscode-foreground);
+}
+
 /* assistant turn */
 .vibe-ai-turn-assistant {
 	width: 100%;
@@ -388,6 +408,29 @@
 	overflow-y: visible;
 }
 
+/* Phase 93: the thinking row's summary label shimmers while the run
+   streams — a black-white gradient sweep (Cursor parity). The row stays
+   collapsed while streaming (no auto-open of the ~10-line window); the
+   pane lifts the class when the run folds to its "Thought for Xs"
+   summary (closeThinkingRun). */
+.vibe-ai-thinking-shimmer {
+	background: linear-gradient(90deg, var(--vscode-descriptionForeground) 25%, #fff 50%, var(--vscode-descriptionForeground) 75%);
+	background-size: 200% 100%;
+	-webkit-background-clip: text;
+	background-clip: text;
+	-webkit-text-fill-color: transparent;
+	animation: vibe-ai-thinking-shimmer-sweep 1.8s linear infinite;
+}
+
+@keyframes vibe-ai-thinking-shimmer-sweep {
+	0% {
+		background-position: 200% 0;
+	}
+	100% {
+		background-position: -200% 0;
+	}
+}
+
 /* --- collapsible tool activity ("Worked for Xs") --- */
 .vibe-ai-worked {
 	margin-bottom: 8px;
@@ -444,13 +487,78 @@
 	margin: 4px 0;
 }
 
+/* Phase 149: grouped read-only steps — repeated reads of one file fold
+   into the first row (union range) and scan kinds fold into a count
+   group row ("Read 7 files", "Listed 3 directories"). The group is a
+   <details> like the cards: the summary is the one-line header, the
+   body holds the member rows (indented). Mutating cards, thinking rows,
+   narration and steers never group. */
+.vibe-ai-worked-group {
+	margin: 0 0 6px 0;
+	border: 1px solid var(--vscode-input-border, var(--vscode-panelSectionHeader-border, transparent));
+	border-radius: 8px;
+	background: var(--vscode-editor-background);
+	overflow: hidden;
+	font-size: 12px;
+}
+
+.vibe-ai-worked-group > summary {
+	list-style: none;
+	cursor: pointer;
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	padding: 5px 8px;
+	color: var(--vscode-descriptionForeground);
+}
+
+.vibe-ai-worked-group > summary::-webkit-details-marker {
+	display: none;
+}
+
+.vibe-ai-worked-group > summary:hover {
+	color: var(--vscode-foreground);
+}
+
+.vibe-ai-worked-group-chevron {
+	flex-shrink: 0;
+	font-size: 12px;
+	opacity: 0.7;
+	transition: transform 0.1s ease;
+}
+
+.vibe-ai-worked-group[open] > summary .vibe-ai-worked-group-chevron {
+	transform: rotate(90deg);
+}
+
+.vibe-ai-worked-group-icon {
+	flex-shrink: 0;
+	font-size: 13px;
+}
+
+.vibe-ai-worked-group-label {
+	flex: 1 1 auto;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.vibe-ai-worked-group-body {
+	margin: 0 0 4px 12px;
+}
+
+/* Phase 149: the settled "Worked for Xs · Read 5 files" count suffix. */
+.vibe-ai-worked-summary-counts {
+	opacity: 0.75;
+}
+
 /* Phase 81: no compact single-step mode — while the agent works, every
    step (narration bodies, file-read cards, thinking sub-blocks) is
    visible and STAYS visible (the old "only the latest step" hiding is
    removed — user request: reveal what was answered and which files were
-   read, keep it). The Worked shell folds at the answer's first streamed
-   char (pane foldWorkShell); the chevron mirrors the native [open]
-   state (rule above). */
+   read, keep it). The Worked shell folds on the backend's round_end
+   final marker (pane foldWorkShell, Phase 89); the chevron mirrors the
+   native [open] state (rule above). */
 
 /* --- markdown answer (Cursor-style typography) --- */
 .vibe-ai-chat-markdown {
@@ -730,12 +838,12 @@
 	display: block;
 	width: 100%;
 	min-height: 38px;
-	/* tall diagrams clip — the pop-out button opens the full editor tab */
+	/* tall diagrams clip — the zoom button opens the full-size popup */
 	max-height: 80vh;
 	overflow: hidden;
 }
 
-/* the pop-out button stays visible (the copy button next to it is
+/* the zoom button stays visible (the copy button next to it is
    hover-revealed via the shared class) */
 .vibe-ai-chat-markdown div[data-code] .vibe-ai-mermaid-expand {
 	opacity: 1;
@@ -761,6 +869,98 @@
 	white-space: normal;
 }
 
+/* --- zoom popup: the header's zoom button opens a workbench-level overlay
+   hosting a second diagram webview with the same source at full size.
+   Appended to the workbench root so the theme variables cascade (they are
+   scoped to .monaco-workbench); the z-index sits below the context-view
+   layer so right-click menus still open above the popup. --- */
+.vibe-ai-mermaid-modal-backdrop {
+	position: fixed;
+	inset: 0;
+	z-index: 2000;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	background: rgba(0, 0, 0, 0.45);
+}
+
+.vibe-ai-mermaid-modal {
+	display: flex;
+	flex-direction: column;
+	width: min(90vw, 1400px);
+	height: min(88vh, 1200px);
+	overflow: hidden;
+	/* Gray canvas: the whole popup paints a neutral gray (mixed from the
+	   theme foreground over the editor background) instead of the editor
+	   background, so the diagram floats on a canvas instead of near-black. */
+	background: var(--vscode-editorWidget-background, #252526);
+	background: color-mix(in srgb, var(--vscode-foreground) 8%, var(--vscode-editor-background));
+	border: 1px solid var(--vscode-widget-border, var(--vscode-contrastBorder, transparent));
+	border-radius: 8px;
+	box-shadow: 0 8px 24px var(--vscode-widget-shadow, rgba(0, 0, 0, 0.4));
+}
+
+.vibe-ai-mermaid-modal-titlebar {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	padding: 6px 10px;
+	border-bottom: 1px solid var(--vscode-editorWidget-border, var(--vscode-widget-border, transparent));
+	user-select: none;
+}
+
+.vibe-ai-mermaid-modal-titlebar .codicon-graph {
+	color: var(--vscode-descriptionForeground);
+	flex-shrink: 0;
+}
+
+.vibe-ai-mermaid-modal-title {
+	flex: 1;
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	font-size: 12px;
+	font-weight: 600;
+}
+
+.vibe-ai-mermaid-modal-titlebar button {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	flex-shrink: 0;
+	width: 22px;
+	height: 22px;
+	padding: 0;
+	border: none;
+	border-radius: 4px;
+	background: transparent;
+	color: var(--vscode-descriptionForeground);
+	cursor: pointer;
+}
+
+.vibe-ai-mermaid-modal-titlebar button:hover {
+	background: var(--vscode-toolbar-hoverBackground, rgba(128, 128, 128, 0.15));
+	color: var(--vscode-foreground);
+}
+
+.vibe-ai-mermaid-modal-titlebar button.copied {
+	color: var(--vscode-charts-green, var(--vscode-foreground));
+}
+
+.vibe-ai-mermaid-modal-body {
+	flex: 1 1 0;
+	min-height: 0;
+	/* Interactive canvas: the webview fills the body and handles pan/zoom
+	   itself, so the body must not scroll. */
+	overflow: hidden;
+}
+
+.vibe-ai-mermaid-modal-holder {
+	width: 100%;
+	height: 100%;
+}
+
 /* streaming caret (Cursor-style pulsing cursor while the answer streams) */
 .vibe-ai-chat-markdown.vibe-ai-streaming::after {
 	content: '●';
@@ -778,33 +978,17 @@
 	}
 }
 
-/* Phase 84.6: the streaming text body is a bounded, auto-following window
-   (thinking-window parity, ~10 lines) — a non-compliant model's mid-turn
-   narration wall never dominates the page while it streams. 84.4 only
-   trimmed the text when the run FOLDED into the Worked shell, so the
-   transient wall was still fully visible mid-turn, and its fold collapsed
-   the page height under a reading user (the "scroll stuck, can't go
-   down" symptom). The class lifts at run close (the same toggle that
-   drops the streaming caret): the answer renders in full inline, a
-   narration folds into the shell with 84.4's capped head. Restored
-   bodies never carry the class. */
-.vibe-ai-chat-markdown.vibe-ai-streaming {
-	max-height: 15em;
-	overflow-y: auto;
-}
-
-/* Phase 84.11: once the Worked shell folds mid-answer (the live run
-   outgrew the narration budget — it can only be the final answer), the
-   body drops the bounded follow window: the answer streams at full
-   height and the thread follows the tail (user: the final output is
-   not a scrollbar). The caret (::after) and the streaming class stay;
-   at the turn-end fold the run close already toggled the streaming
-   class off, which also makes this modifier inert on settled bodies.
-   Restored bodies never carry either class. */
-.vibe-ai-chat-markdown.vibe-ai-streaming.vibe-ai-answer-stream {
-	max-height: none;
-	overflow-y: visible;
-}
+/* Phase 89: the 84.6 bounded streaming window (15em max-height +
+   overflow-y: auto on .vibe-ai-streaming) is REMOVED. With the Worked
+   shell's collapse moved to the backend's explicit round_end final
+   marker, the frontend can no longer know mid-stream whether the live
+   run is the final answer — a kept window would trap every long final
+   answer behind a scrollbar (84.9's complaint: the final output streams
+   directly, not in a scroll box). Live bodies now stream at full height;
+   intermediate narrations never fold the shell (Phase 89) and tuck into
+   it with 84.4's capped head at their close. The streaming class stays
+   for the caret (::after) and the run-close toggle; restored bodies
+   never carry it. */
 
 /* --- per-turn footer (checkpoint + relative time) --- */
 .vibe-ai-turn-footer {
@@ -975,6 +1159,56 @@
 	flex-shrink: 0;
 }
 
+/* --- Phase 95: per-file Keep / Discard (one file at a time) --- */
+.vibe-ai-files-list-actions {
+	display: flex;
+	align-items: center;
+	gap: 4px;
+	flex-shrink: 0;
+}
+
+.vibe-ai-files-list-row-action {
+	padding: 1px 8px;
+	border-radius: 4px;
+	border: 1px solid var(--vscode-input-border, transparent);
+	background: var(--vscode-input-background);
+	color: var(--vscode-foreground);
+	font-size: 11px;
+	line-height: 16px;
+	cursor: pointer;
+}
+
+.vibe-ai-files-list-row-action:hover:not(.disabled) {
+	background: var(--vscode-list-hoverBackground);
+	border-color: var(--vscode-focusBorder, var(--vscode-input-border, transparent));
+}
+
+.vibe-ai-files-list-row-action.disabled {
+	opacity: 0.5;
+	cursor: default;
+}
+
+.vibe-ai-files-list-keep {
+	color: var(--vscode-charts-green, var(--vscode-foreground));
+}
+
+.vibe-ai-files-list-discard {
+	color: var(--vscode-errorForeground, var(--vscode-foreground));
+}
+
+/* --- Phase 95 follow-up: a resolved review bar keeps the file list
+   visible — the action buttons go, a status chip shows the outcome
+   (kept / discarded; the chip's color rides inline in the pane) --- */
+.vibe-ai-files-summary-status {
+	font-size: 11px;
+	flex-shrink: 0;
+}
+
+.vibe-ai-files-list-status {
+	font-size: 11px;
+	flex-shrink: 0;
+}
+
 /* --- error row --- */
 .vibe-ai-chat-error {
 	padding: 6px 10px;
@@ -985,6 +1219,139 @@
 	font-size: 12px;
 	white-space: pre-wrap;
 	word-break: break-word;
+}
+
+/* ==================== Phase 134: LLM retry (Cursor parity) ==================== */
+
+/* Transient error rows carry a Retry button that re-sends the turn. */
+.vibe-ai-chat-error-retry {
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+	margin-top: 6px;
+	padding: 2px 8px;
+	border-radius: 4px;
+	border: 1px solid var(--vscode-charts-red);
+	color: var(--vscode-charts-red);
+	cursor: pointer;
+	font-weight: 600;
+	font-size: 12px;
+}
+
+.vibe-ai-chat-error-retry:hover {
+	background: var(--vscode-toolbar-hoverBackground);
+}
+
+/* The backend's auto-retry wait renders a transient chip in the thread. */
+.vibe-ai-chat-retry {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	padding: 4px 10px;
+	margin-bottom: 10px;
+	border-radius: 6px;
+	color: var(--vscode-descriptionForeground);
+	font-size: 12px;
+	font-style: italic;
+}
+
+.vibe-ai-chat-retry .codicon {
+	animation: vibe-ai-retry-spin 1.2s linear infinite;
+}
+
+.vibe-ai-chat-retry-label {
+	white-space: pre-wrap;
+	word-break: break-word;
+}
+
+@keyframes vibe-ai-retry-spin {
+	from {
+		transform: rotate(0deg);
+	}
+	to {
+		transform: rotate(360deg);
+	}
+}
+
+/* ==================== Phase 120: goal banner (Cursor parity) ==================== */
+
+/* The ACTIVE conversation's session goal (/goal), docked directly above
+   the input box (below the files dock). Active state: target icon +
+   charts-purple accents; done state: the mark_goal_complete confirmation
+   flips the icon/label/accents to charts-green. */
+.vibe-ai-goal-banner {
+	display: none;
+	align-items: center;
+	gap: 6px;
+	/* Same 12px side margins as the input container below — the banner
+	   spans exactly the input's width; the input's 6px top margin forms
+	   the snug gap. */
+	margin: 0 12px 6px;
+	padding: 5px 8px 5px 10px;
+	border: 1px solid color-mix(in srgb, var(--vscode-charts-purple, #b180d7) 45%, transparent);
+	border-left: 3px solid var(--vscode-charts-purple, #b180d7);
+	border-radius: 6px;
+	background: color-mix(in srgb, var(--vscode-charts-purple, #b180d7) 8%, var(--vscode-editor-background));
+	flex-shrink: 0;
+}
+
+.vibe-ai-goal-banner.done {
+	border-color: color-mix(in srgb, var(--vscode-charts-green, #89d185) 45%, transparent);
+	border-left-color: var(--vscode-charts-green, #89d185);
+	background: color-mix(in srgb, var(--vscode-charts-green, #89d185) 8%, var(--vscode-editor-background));
+}
+
+.vibe-ai-goal-banner .vibe-ai-goal-icon {
+	color: var(--vscode-charts-purple, #b180d7);
+	font-size: 14px;
+	flex-shrink: 0;
+}
+
+.vibe-ai-goal-banner.done .vibe-ai-goal-icon {
+	color: var(--vscode-charts-green, #89d185);
+}
+
+.vibe-ai-goal-banner .vibe-ai-goal-body {
+	display: flex;
+	align-items: baseline;
+	gap: 8px;
+	flex: 1;
+	min-width: 0;
+	overflow: hidden;
+}
+
+.vibe-ai-goal-banner .vibe-ai-goal-label {
+	font-size: 11px;
+	font-weight: 600;
+	color: var(--vscode-charts-purple, #b180d7);
+	flex-shrink: 0;
+}
+
+.vibe-ai-goal-banner.done .vibe-ai-goal-label {
+	color: var(--vscode-charts-green, #89d185);
+}
+
+.vibe-ai-goal-banner .vibe-ai-goal-text {
+	font-size: 12px;
+	color: var(--vscode-foreground);
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	min-width: 0;
+}
+
+.vibe-ai-goal-banner .vibe-ai-goal-clear {
+	flex-shrink: 0;
+	color: var(--vscode-descriptionForeground, #9d9d9d);
+	cursor: pointer;
+	font-size: 14px;
+	padding: 2px;
+	border-radius: 4px;
+}
+
+.vibe-ai-goal-banner .vibe-ai-goal-clear:hover {
+	color: var(--vscode-foreground);
+	background: var(--vscode-toolbar-hoverBackground, rgba(128, 128, 128, 0.15));
 }
 
 /* ==================== Cursor-style input box ==================== */
@@ -1007,6 +1374,13 @@
 	   right-side icons can never be pushed out of the border. */
 	min-width: 220px;
 	flex-shrink: 0;
+}
+
+/* Phase 105: drag-over highlight — dragging a file/folder over the
+   composer lights the border up; dropping attaches it as a chip. */
+.vibe-ai-input-container.vibe-ai-dragover {
+	border-color: var(--vscode-focusBorder, #0078d4);
+	background: color-mix(in srgb, var(--vscode-focusBorder, #0078d4) 6%, var(--vscode-input-background));
 }
 
 /* Cursor parity: a new (empty) chat keeps the input box pinned at the
@@ -1114,6 +1488,9 @@
 	padding: 2px;
 	background: var(--vscode-editor-background);
 	border: 1px solid var(--vscode-input-border, transparent);
+	/* Phase 139: the remove badge's containing block — the badge anchors
+	   to the chip's top-right corner. */
+	position: relative;
 }
 
 .vibe-ai-image-chip-thumb {
@@ -1122,6 +1499,41 @@
 	height: 44px;
 	object-fit: cover;
 	border-radius: 4px;
+}
+
+/* Phase 139: the image chip's remove button floats as a small circular
+   badge ON the thumbnail's top-right corner (Cursor parity) — hidden
+   until the chip is hovered, no longer inline to the right of the
+   image. File chips keep the shared inline rule above. These overrides
+   must stay AFTER `.vibe-ai-chip .vibe-ai-chip-remove` (equal
+   specificity: the later rule wins). */
+.vibe-ai-image-chip .vibe-ai-chip-remove {
+	position: absolute;
+	top: -6px;
+	right: -6px;
+	width: 16px;
+	height: 16px;
+	justify-content: center;
+	align-items: center;
+	border-radius: 50%;
+	background: var(--vscode-badge-background, rgba(128, 128, 128, 0.9));
+	color: var(--vscode-badge-foreground, #fff);
+	font-size: 10px;
+	opacity: 0;
+	pointer-events: none;
+	transition: opacity 0.1s ease;
+	z-index: 2;
+}
+
+.vibe-ai-chip.vibe-ai-image-chip:hover .vibe-ai-chip-remove,
+.vibe-ai-image-chip .vibe-ai-chip-remove:focus-visible {
+	opacity: 1;
+	pointer-events: auto;
+}
+
+.vibe-ai-image-chip .vibe-ai-chip-remove:hover {
+	opacity: 1;
+	background: color-mix(in srgb, var(--vscode-badge-background, #808080) 75%, var(--vscode-badge-foreground, #fff));
 }
 
 /* Phase 61: images sent with a user message — thumbnail strip above the
@@ -1324,6 +1736,28 @@
 	font-size: 12px;
 }
 
+/* Phase 141: the card is a <details> and its header row is the <summary> —
+   hide the native disclosure triangle (the chevron span replaces it). */
+.vibe-ai-tool-card > summary.vibe-ai-tool-card-header {
+	list-style: none;
+	cursor: pointer;
+}
+
+.vibe-ai-tool-card > summary.vibe-ai-tool-card-header::-webkit-details-marker {
+	display: none;
+}
+
+.vibe-ai-tool-card-chevron {
+	flex-shrink: 0;
+	font-size: 12px;
+	opacity: 0.7;
+	transition: transform 0.1s ease;
+}
+
+.vibe-ai-tool-card[open] .vibe-ai-tool-card-chevron {
+	transform: rotate(90deg);
+}
+
 .vibe-ai-tool-card-header {
 	display: flex;
 	align-items: center;
@@ -1405,16 +1839,24 @@
 	color: var(--vscode-descriptionForeground);
 }
 
-/* run_terminal output preview (Phase 58): same 5-line collapsed cap as the
-   diff body, the expand toggle grows it to 24 scrollable lines. */
+/* run_terminal output area (Phase 58): the command line (Phase 136) opens
+   the block and the output preview below keeps the 5-line collapsed cap;
+   the expand toggle grows it to 24 scrollable lines. */
 .vibe-ai-tool-card-output {
 	border-top: 1px solid var(--vscode-input-border, var(--vscode-panelSectionHeader-border, transparent));
 }
 
-.vibe-ai-tool-card-output-label {
-	padding: 3px 8px;
-	font-weight: 600;
-	opacity: 0.7;
+/* Phase 136: the run command itself — the first line of the output area,
+   shown in full (wraps, no ellipsis); the "Output" label is gone. */
+.vibe-ai-tool-card-cmd {
+	padding: 4px 8px;
+	font-family: var(--monaco-monospace-font);
+	font-size: 11px;
+	line-height: 16px;
+	white-space: pre-wrap;
+	word-break: break-all;
+	color: var(--vscode-foreground);
+	background: var(--vscode-textCodeBlock-background, var(--vscode-editor-background));
 }
 
 .vibe-ai-tool-card-output-pre {
@@ -1435,23 +1877,6 @@
 
 .vibe-ai-tool-card-diff {
 	border-top: 1px solid var(--vscode-input-border, var(--vscode-panelSectionHeader-border, transparent));
-}
-
-.vibe-ai-tool-card-diff-header {
-	display: flex;
-	align-items: center;
-	gap: 6px;
-	padding: 5px 8px;
-}
-
-.vibe-ai-tool-card-path {
-	font-family: var(--monaco-monospace-font);
-	font-weight: 600;
-	overflow: hidden;
-	text-overflow: ellipsis;
-	white-space: nowrap;
-	flex: 1;
-	min-width: 0;
 }
 
 .vibe-ai-tool-card-note {
@@ -1595,6 +2020,107 @@
 	overflow: hidden;
 	background: rgba(248, 81, 73, 0.18);
 	color: var(--vscode-editor-foreground, var(--vscode-descriptionForeground));
+}
+
+/* Phase 95 (user feedback): the keep-file bar lives IN the file path row —
+   the breadcrumbs row under the editor tabs — pinned to the row's right
+   edge (path label left, Keep / Discard right, layout unchanged; it used to
+   float over the first content lines). The row becomes the positioning
+   context here (position: relative is inert without offsets); the pill is
+   vertically centered on the row. Keep resolves the overlay (the green
+   additions ARE the kept on-disk content and the red deleted rows
+   disappear), Discard reverts the file on disk. Breadcrumbs disabled → the
+   pill falls back to the editor's top-right overlay corner: the widget
+   manager pins top/right inline (overriding the stylesheet), so the
+   path-row-only top/right/transform stay out of the base rule and the
+   fallback is never clipped in half by the editor's overflow-guard. */
+.breadcrumbs-below-tabs {
+	position: relative;
+}
+
+.vibe-ai-keep-bar {
+	position: absolute;
+	z-index: 40;
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	padding: 1px 8px;
+	background: var(--vscode-editorWidget-background, var(--vscode-editor-background));
+	border: 1px solid var(--vscode-input-border, transparent);
+	border-radius: 6px;
+	box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
+	font-size: 12px;
+	line-height: 16px;
+	white-space: nowrap;
+}
+
+.breadcrumbs-below-tabs .vibe-ai-keep-bar {
+	top: 50%;
+	right: 8px;
+	transform: translateY(-50%);
+}
+
+.vibe-ai-keep-bar-label {
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	color: var(--vscode-foreground);
+}
+
+.vibe-ai-keep-bar-actions {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	margin-left: auto;
+}
+
+.vibe-ai-keep-bar-btn {
+	padding: 1px 10px;
+	border-radius: 4px;
+	border: 1px solid var(--vscode-input-border, transparent);
+	background: var(--vscode-input-background);
+	color: var(--vscode-foreground);
+	font-size: 11px;
+	line-height: 16px;
+	cursor: pointer;
+}
+
+.vibe-ai-keep-bar-btn:hover:not(.disabled) {
+	background: var(--vscode-list-hoverBackground);
+	border-color: var(--vscode-focusBorder, var(--vscode-input-border, transparent));
+}
+
+.vibe-ai-keep-bar-btn.disabled {
+	opacity: 0.5;
+	cursor: default;
+}
+
+.vibe-ai-keep-bar-keep {
+	color: var(--vscode-charts-green, var(--vscode-foreground));
+}
+
+.vibe-ai-keep-bar-discard {
+	color: var(--vscode-errorForeground, var(--vscode-foreground));
+}
+
+/* Phase 95 follow-up (user feedback): the bar STAYS after a keep/discard —
+   the Keep / Discard buttons go and a status chip shows the outcome. */
+.vibe-ai-keep-bar-status {
+	display: none;
+	font-weight: 600;
+}
+
+.vibe-ai-keep-bar.resolved .vibe-ai-keep-bar-actions {
+	display: none;
+}
+
+.vibe-ai-keep-bar.resolved .vibe-ai-keep-bar-status {
+	display: inline;
+	color: var(--vscode-charts-green, var(--vscode-foreground));
+}
+
+.vibe-ai-keep-bar.resolved.discarded .vibe-ai-keep-bar-status {
+	color: var(--vscode-descriptionForeground, var(--vscode-foreground));
 }
 
 /* ==================== Phase 41: Context Usage panel (Cursor parity) ==================== */
@@ -1809,6 +2335,44 @@
 	color: var(--vscode-descriptionForeground);
 }
 
+/* Phase 103: the limit-reached note + Continue chip (limit_reached) — the
+   agent loop exhausted its tool-call budget / context window; the chip
+   re-invokes the loop (Cursor-parity Continue). Mirrors the truncation
+   note's rhythm; the chip mirrors the plan card's Build button. */
+.vibe-ai-limit-reached-note {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	margin: 6px 12px 4px;
+	padding: 3px 8px;
+	border-left: 2px solid var(--vscode-charts-yellow, #cca700);
+	font-size: 11px;
+	color: var(--vscode-descriptionForeground);
+}
+
+.vibe-ai-limit-reached-text {
+	flex: 1 1 auto;
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.vibe-ai-limit-continue {
+	flex: 0 0 auto;
+	padding: 1px 10px;
+	border-radius: 4px;
+	border: 1px solid transparent;
+	background: var(--vscode-button-background, #0078d4);
+	color: var(--vscode-button-foreground, #ffffff);
+	font-size: 11px;
+	cursor: pointer;
+}
+
+.vibe-ai-limit-continue:hover {
+	background: var(--vscode-button-hoverBackground, #026ec1);
+}
+
 /* Phase 70: the Auto router's pick (model_routed) — which model answered
    this turn (Cursor-parity underlying-model display). Rendered at the
    assistant row end, directly above the turn footer; the routing reason
@@ -1821,6 +2385,54 @@
 	font-size: 11px;
 	font-style: italic;
 	color: var(--vscode-descriptionForeground);
+}
+
+/* Phase 97: a turn interrupted by the next send — the streamed progress
+   above stays (partial answer, tool cards, file changes); the note at the
+   turn end explains why it has no completion (informational tone — cut
+   short by the user, not an error). */
+.vibe-ai-turn-interrupted {
+	margin: 6px 12px 4px;
+	padding: 3px 8px;
+	border-left: 2px solid var(--vscode-charts-yellow, #cca700);
+	font-size: 11px;
+	font-style: italic;
+	color: var(--vscode-descriptionForeground);
+}
+
+/* Phase 113: steers the turn ended with (queued but never injected) —
+   the not-delivered note explains they ride the next turn (Phase 114's
+   queue auto-resume takes over). Same informational tone as the
+   interruption note. */
+.vibe-ai-steer-pending-note {
+	margin: 6px 12px 4px;
+	padding: 3px 8px;
+	border-left: 2px solid var(--vscode-charts-yellow, #cca700);
+	font-size: 11px;
+	font-style: italic;
+	color: var(--vscode-descriptionForeground);
+}
+
+/* Phase 114: the queue badge (Shift+Enter queued messages, Cursor's
+   "queue") — a small pill between the chips row and the textarea inside
+   the composer; the count counts down as turns end and the queue
+   auto-resumes one message per turn end. Charts-purple accent mirrors
+   the Steered mark (both are mid-turn message flow, not turn content). */
+.vibe-ai-queue-badge {
+	display: flex;
+	align-items: center;
+	gap: 4px;
+	align-self: flex-start;
+	padding: 1px 8px;
+	border-radius: 8px;
+	background: var(--vscode-badge-background, rgba(128, 128, 128, 0.2));
+	color: var(--vscode-badge-foreground, var(--vscode-descriptionForeground));
+	font-size: 11px;
+	white-space: nowrap;
+}
+
+.vibe-ai-queue-badge-icon {
+	font-size: 12px;
 }
 
 /* ==================== Phase 49: history dropdown (Cursor parity) ==================== */
@@ -1848,6 +2460,7 @@
 .vibe-ai-history-search {
 	display: flex;
 	align-items: center;
+	gap: 6px;
 	margin: 8px;
 	padding: 4px 8px;
 	border: 1px solid var(--vscode-input-border, var(--vscode-panel-border, transparent));
@@ -1869,6 +2482,14 @@
 
 .vibe-ai-history-search-input::placeholder {
 	color: var(--vscode-input-placeholderForeground);
+}
+
+/* Phase 108: the workbench's global input focus outline (focusBorder)
+   renders as a loud blue box around the history search input —
+   suppress it with a higher-specificity rule (same trick as
+   .vibe-ai-chat-pane textarea.vibe-ai-input:focus). */
+.vibe-ai-chat-pane input.vibe-ai-history-search-input:focus {
+	outline: none;
 }
 
 .vibe-ai-history-list {
@@ -1919,6 +2540,17 @@
 	white-space: nowrap;
 }
 
+/* Phase 116: Side Chat — the Side badge on a history-list row. */
+.vibe-ai-history-item-side-badge {
+	flex-shrink: 0;
+	padding: 0 5px;
+	border-radius: 4px;
+	background: var(--vscode-charts-blue, #4fc1ff);
+	color: var(--vscode-editorWidget-background, #1e1e1e);
+	font-size: 10px;
+	line-height: 15px;
+}
+
 /* Row actions reveal on hover and keyboard focus (reveal-on-intent). */
 .vibe-ai-history-item-actions {
 	display: none;
@@ -1961,6 +2593,76 @@
 	padding: 10px 8px;
 	color: var(--vscode-descriptionForeground);
 	font-style: italic;
+}
+
+/* ==================== Phase 123: cross-session search ==================== */
+
+/* The scope toggle rides the search row (This chat / All chats). */
+.vibe-ai-history-search-scope {
+	display: flex;
+	flex-shrink: 0;
+	gap: 2px;
+}
+
+.vibe-ai-history-scope-btn {
+	padding: 1px 7px;
+	border: none;
+	border-radius: 4px;
+	background: transparent;
+	color: var(--vscode-descriptionForeground);
+	cursor: pointer;
+	font-size: 11px;
+	font-family: inherit;
+	white-space: nowrap;
+}
+
+.vibe-ai-history-scope-btn:hover {
+	background: var(--vscode-toolbar-hoverBackground, rgba(128, 128, 128, 0.2));
+	color: var(--vscode-foreground);
+}
+
+.vibe-ai-history-scope-btn.active {
+	background: var(--vscode-list-hoverBackground);
+	color: var(--vscode-foreground);
+	font-weight: 600;
+}
+
+/* Hit row: kind badge + matched snippet (item hover styles reuse). */
+.vibe-ai-history-hit-kind {
+	flex-shrink: 0;
+	min-width: 38px;
+	padding: 0 4px;
+	border-radius: 4px;
+	background: var(--vscode-badge-background, rgba(128, 128, 128, 0.2));
+	color: var(--vscode-badge-foreground, var(--vscode-foreground));
+	font-size: 9px;
+	line-height: 14px;
+	text-align: center;
+	text-transform: uppercase;
+	user-select: none;
+}
+
+.vibe-ai-history-hit-snippet {
+	flex: 1;
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+/* A hit's brief landing highlight (the editor find-match token). The
+   1.6s animation mirrors the pane's SEARCH_HIT_FLASH_MS. */
+.vibe-ai-search-hit-flash {
+	animation: vibe-ai-search-hit-flash 1.6s ease-out;
+}
+
+@keyframes vibe-ai-search-hit-flash {
+	0%, 50% {
+		background: var(--vscode-editor-findMatchHighlightBackground, rgba(236, 190, 60, 0.3));
+	}
+	100% {
+		background: transparent;
+	}
 }
 
 /* ==================== Phase 71: Plan mode card ==================== */
@@ -2315,3 +3017,209 @@
 	color: var(--vscode-descriptionForeground);
 }
 
+/* ==================== Phase 92: command approval card ==================== */
+
+/* The approval card renders in the assistant turn when the backend
+   intercepts a terminal command and parks it at the approval gate:
+   command + reason with Run / Skip while waiting, a short note after. */
+.vibe-ai-approval-card {
+	border: 1px solid var(--vscode-input-border, var(--vscode-panelSectionHeader-border, transparent));
+	border-radius: 8px;
+	background: var(--vscode-editor-background);
+	margin: 4px 0 8px 0;
+	overflow: hidden;
+	font-size: 12px;
+}
+
+.vibe-ai-approval-header {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	padding: 6px 10px;
+}
+
+.vibe-ai-approval-icon {
+	font-size: 13px;
+	opacity: 0.85;
+	color: var(--vscode-charts-orange, var(--vscode-editorWarning-foreground, #cca700));
+}
+
+.vibe-ai-approval-title {
+	font-weight: 600;
+	opacity: 0.85;
+}
+
+.vibe-ai-approval-reason {
+	padding: 0 10px 4px 10px;
+	color: var(--vscode-descriptionForeground);
+	white-space: pre-wrap;
+	word-break: break-word;
+}
+
+.vibe-ai-approval-command {
+	margin: 0 10px 6px 10px;
+	padding: 6px 8px;
+	border-radius: 4px;
+	background: var(--vscode-textCodeBlock-background, var(--vscode-input-background, rgba(128, 128, 128, 0.1)));
+	font-family: var(--vscode-editor-font-family, monospace);
+	white-space: pre-wrap;
+	word-break: break-all;
+}
+
+.vibe-ai-approval-actions {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	padding: 0 10px 8px 10px;
+}
+
+.vibe-ai-approval-run {
+	padding: 3px 14px;
+	border-radius: 4px;
+	border: 1px solid transparent;
+	background: var(--vscode-button-background, #0078d4);
+	color: var(--vscode-button-foreground, #ffffff);
+	font-size: 12px;
+	cursor: pointer;
+}
+
+.vibe-ai-approval-run:hover {
+	background: var(--vscode-button-hoverBackground, #026ec1);
+}
+
+.vibe-ai-approval-skip {
+	padding: 3px 12px;
+	border-radius: 4px;
+	border: 1px solid var(--vscode-input-border, var(--vscode-panelSectionHeader-border, transparent));
+	background: transparent;
+	color: var(--vscode-foreground);
+	font-size: 12px;
+	cursor: pointer;
+}
+
+.vibe-ai-approval-skip:hover {
+	background: var(--vscode-toolbar-hoverBackground, rgba(128, 128, 128, 0.2));
+}
+
+.vibe-ai-approval-note {
+	padding: 0 10px 8px 10px;
+	color: var(--vscode-descriptionForeground);
+	opacity: 0.85;
+}
+
+/* ==================== Phase 121: agent questions card ==================== */
+
+/* The questions card renders in the Working timeline when the model
+   asks clarifying questions without stopping work (ask_questions):
+   numbered questions (+ option chips) with an answer box while live,
+   an "answered" note after. */
+.vibe-ai-questions-card {
+	border: 1px solid var(--vscode-input-border, var(--vscode-panelSectionHeader-border, transparent));
+	border-radius: 8px;
+	background: var(--vscode-editor-background);
+	margin: 4px 0 8px 0;
+	overflow: hidden;
+	font-size: 12px;
+}
+
+.vibe-ai-questions-header {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	padding: 6px 10px;
+}
+
+.vibe-ai-questions-icon {
+	font-size: 13px;
+	opacity: 0.85;
+	color: var(--vscode-charts-purple, var(--vscode-editorInfo-foreground, #3794ff));
+}
+
+.vibe-ai-questions-title {
+	font-weight: 600;
+	opacity: 0.85;
+}
+
+.vibe-ai-questions-list {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+	padding: 0 10px 6px 10px;
+}
+
+.vibe-ai-questions-item {
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+}
+
+.vibe-ai-questions-text {
+	white-space: pre-wrap;
+	word-break: break-word;
+}
+
+.vibe-ai-questions-options {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	flex-wrap: wrap;
+}
+
+.vibe-ai-questions-option {
+	padding: 2px 10px;
+	border-radius: 12px;
+	border: 1px solid var(--vscode-input-border, var(--vscode-panelSectionHeader-border, transparent));
+	background: transparent;
+	color: var(--vscode-foreground);
+	font-size: 11px;
+	cursor: pointer;
+}
+
+.vibe-ai-questions-option:hover {
+	background: var(--vscode-toolbar-hoverBackground, rgba(128, 128, 128, 0.2));
+}
+
+.vibe-ai-questions-answer {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	padding: 0 10px 8px 10px;
+}
+
+.vibe-ai-questions-input {
+	flex: 1;
+	padding: 4px 8px;
+	border-radius: 4px;
+	border: 1px solid var(--vscode-input-border, var(--vscode-panelSectionHeader-border, transparent));
+	background: var(--vscode-input-background, rgba(128, 128, 128, 0.1));
+	color: var(--vscode-input-foreground, var(--vscode-foreground));
+	font-size: 12px;
+}
+
+.vibe-ai-questions-input:focus {
+	outline: 1px solid var(--vscode-focusBorder, #0078d4);
+}
+
+.vibe-ai-questions-send {
+	padding: 3px 14px;
+	border-radius: 4px;
+	border: 1px solid transparent;
+	background: var(--vscode-button-background, #0078d4);
+	color: var(--vscode-button-foreground, #ffffff);
+	font-size: 12px;
+	cursor: pointer;
+}
+
+.vibe-ai-questions-send:hover {
+	background: var(--vscode-button-hoverBackground, #026ec1);
+}
+
+.vibe-ai-questions-note {
+	padding: 0 10px 8px 10px;
+	color: var(--vscode-descriptionForeground);
+	opacity: 0.85;
+}
+
+.vibe-ai-questions-note.error {
+	color: var(--vscode-errorForeground, #f48771);
+}

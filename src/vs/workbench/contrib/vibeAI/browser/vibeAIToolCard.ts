@@ -28,6 +28,8 @@ const TOOL_LABELS: Record<string, string> = {
 	run_terminal: localize('vibeAIChat.tool.run_terminal', "Run command"),
 	search_codebase: localize('vibeAIChat.tool.search_codebase', "Search codebase"),
 	grep: localize('vibeAIChat.tool.grep', "Grep"),
+	web_search: localize('vibeAIChat.tool.web_search', "Web search"),
+	fetch_url: localize('vibeAIChat.tool.fetch_url', "Fetch page"),
 };
 
 const TOOL_ICONS: Record<string, string> = {
@@ -39,6 +41,8 @@ const TOOL_ICONS: Record<string, string> = {
 	run_terminal: 'codicon-terminal',
 	search_codebase: 'codicon-search',
 	grep: 'codicon-search',
+	web_search: 'codicon-globe',
+	fetch_url: 'codicon-link',
 };
 
 const MAX_DIFF_BODY_HEIGHT = 80;
@@ -156,6 +160,21 @@ function summarizeArgs(name: string, args: unknown): string {
 			const scope = String(record['path'] ?? '');
 			// Phase 135: scope shows only its last segment (`backend/app` → `app`).
 			return scope.length > 0 ? `${pattern} · ${baseName(scope)}` : pattern;
+		}
+		if (name === 'web_search') {
+			// Phase 164: the query is the whole call — show it verbatim.
+			return String(record['query'] ?? '');
+		}
+		if (name === 'fetch_url') {
+			// Phase 164: host + first path segment (the full URL stays in the tooltip).
+			const raw = String(record['url'] ?? '');
+			try {
+				const url = new URL(raw);
+				const segment = url.pathname.split('/').filter(s => s.length > 0)[0];
+				return segment ? `${url.host}/${segment}` : url.host;
+			} catch {
+				return raw.slice(0, 60);
+			}
 		}
 	}
 	// Fallback: JSON for objects — String() shows "[object Object]".

@@ -3690,6 +3690,11 @@ export class VibeAIChatPane extends ViewPane {
 			card?.element.remove();
 			state.toolCards.delete(id);
 			state.toolsRunToolIds = state.toolsRunToolIds.filter(toolId => toolId !== id);
+			// Phase 162: the removed card may have sat between two Thought
+			// rows — newly adjacent settled blocks merge (the regroup rule).
+			if (state.workSteps) {
+				this.consolidateThoughtBlocks(state.workSteps);
+			}
 		} else {
 			state.toolCards.get(id)?.setResult(data.tool?.status, data.tool?.result, data.tool?.codeChange, data.tool?.output, data.tool?.read);
 			// Phase 137: needs-console commands (interactive REPLs, dev
@@ -5162,7 +5167,9 @@ export class VibeAIChatPane extends ViewPane {
 		const summary = DOM.append(thinkingDetails, $('summary'));
 		const chevron = DOM.append(summary, $('span.codicon.codicon-chevron-right.vibe-ai-thinking-chevron'));
 		chevron.setAttribute('aria-hidden', 'true');
-		const thinkingLabel = DOM.append(summary, $('span'));
+		// Phase 162: the label class is the merge hook —
+		// mergeThoughtBlockInto rewrites the surviving block's label via it.
+		const thinkingLabel = DOM.append(summary, $('span.vibe-ai-thinking-label'));
 		thinkingLabel.textContent = localize('vibeAIChat.thinking', "Thinking…");
 		// Phase 93: black-white shimmer while the run streams — the class
 		// lifts when the run folds to its "Thought for Xs" summary.
@@ -5324,6 +5331,10 @@ export class VibeAIChatPane extends ViewPane {
 			return;
 		}
 		regroupWorkedSteps(state.workSteps, state.toolCards);
+		// Phase 162: grouping pulls read-only cards out from between two
+		// Thought rows (into per-file rows / count groups) — newly adjacent
+		// settled blocks merge (durations sum, texts blank-line join).
+		this.consolidateThoughtBlocks(state.workSteps);
 	}
 
 	/**
@@ -5362,12 +5373,17 @@ export class VibeAIChatPane extends ViewPane {
 		}
 		const start = state.thinkingRunStart;
 		const end = state.turn.thinking.length;
+		// Phase 162: the run's own duration — recorded on the timeline node
+		// AND on the block element (data-vibe-thought-ms) so
+		// consolidateThoughtBlocks can sum adjacent blocks into the merged
+		// label.
+		const runMs = Date.now() - (state.thinkingRunStartedAt ?? Date.now());
 		if (end > start) {
 			state.timeline.push({
 				kind: 'thinking',
 				start,
 				end,
-				durationMs: Date.now() - (state.thinkingRunStartedAt ?? Date.now()),
+				durationMs: runMs,
 			});
 		}
 		if (state.thinkingDetails && state.thinkingLabel) {
@@ -5376,7 +5392,8 @@ export class VibeAIChatPane extends ViewPane {
 			// hidden below — the class lift is moot there).
 			state.thinkingLabel.classList.remove('vibe-ai-thinking-shimmer');
 			if (end > start) {
-				state.thinkingLabel.textContent = localize('vibeAIChat.thought', "Thought for {0}", getDurationString(Date.now() - (state.thinkingRunStartedAt ?? Date.now())));
+				state.thinkingDetails.dataset.vibeThoughtMs = String(runMs);
+				state.thinkingLabel.textContent = localize('vibeAIChat.thought', "Thought for {0}", getDurationString(runMs));
 				// Phase 84.2: the run is over — the window drops the ~10-line
 				// cap so re-expanding it shows the full reasoning in the
 				// thread scroll (only the streaming window stays capped).
@@ -5395,10 +5412,97 @@ export class VibeAIChatPane extends ViewPane {
 				state.thinkingDetails.style.display = 'none';
 			}
 		}
+		// Phase 162: merge the just-folded block into a preceding adjacent
+		// one (and sweep stale hidden empties) — consecutive Thought rows
+		// collapse into ONE block. Runs after the refs clear: the folded
+		// block is settled and every merge participant is out of state.
+		const thoughtParent = state.thinkingDetails?.parentElement;
 		state.thinkingDetails = undefined;
 		state.thinkingLabel = undefined;
 		state.thinkingText = undefined;
 		state.thinkingRunStartedAt = undefined;
+		if (thoughtParent) {
+			this.consolidateThoughtBlocks(thoughtParent);
+		}
+	}
+
+	/**
+	 * Phase 162: merges runs of adjacent settled "Thought for Xs" blocks
+	 * in `parent` into their FIRST block — the user rule: consecutive
+	 * Thought rows collapse into ONE block, each run's reasoning separated
+	 * by a blank line. Adjacency is DOM-level: blocks separated by any
+	 * other step (card, group row, narration body) stay separate. Runs at
+	 * every thinking-run fold (closeThinkingRun) and after every Worked
+	 * regroup (grouping pulls read-only cards out from between two Thought
+	 * rows, which makes them adjacent); the restore path runs it after its
+	 * node loops so restored history shows the same merged blocks. The
+	 * absorbed blocks' durations ride data-vibe-thought-ms (written at
+	 * fold / restore) and sum into the surviving block's label; the
+	 * reasoning texts join the surviving text element with a blank line
+	 * (the element is pre-wrap). Hidden empty rows (heartbeat-only runs)
+	 * are removed — left in place they would break their neighbours'
+	 * adjacency. Streaming rows (shimmer label) never merge.
+	 */
+	private consolidateThoughtBlocks(parent: HTMLElement): void {
+		let anchor: HTMLDetailsElement | undefined;
+		for (const child of Array.from(parent.children)) {
+			if (!child.classList.contains('vibe-ai-thinking')) {
+				anchor = undefined;
+				continue;
+			}
+			const details = child as HTMLDetailsElement;
+			if (details.style.display === 'none') {
+				details.remove();
+				continue;
+			}
+			if (details.querySelector('.vibe-ai-thinking-shimmer')) {
+				anchor = undefined;
+				continue;
+			}
+			if (!anchor) {
+				anchor = details;
+				continue;
+			}
+			this.mergeThoughtBlockInto(anchor, details);
+		}
+	}
+
+	/**
+	 * Phase 162: absorbs `block` into `anchor` — the reasoning texts join
+	 * the anchor's LAST text element blank-line separated (one element;
+	 * pre-wrap renders the blank line), the durations sum into the
+	 * anchor's label, the block element is removed. Blocks without
+	 * duration data (defensive restore paths) merge texts only and keep
+	 * their labels.
+	 */
+	private mergeThoughtBlockInto(anchor: HTMLDetailsElement, block: HTMLDetailsElement): void {
+		const anchorTexts = anchor.querySelectorAll('.vibe-ai-thinking-text');
+		let target = anchorTexts.length > 0 ? anchorTexts[anchorTexts.length - 1] as HTMLElement : undefined;
+		let absorbed = '';
+		for (const text of Array.from(block.querySelectorAll('.vibe-ai-thinking-text'))) {
+			const value = text.textContent ?? '';
+			if (value.length === 0) {
+				continue;
+			}
+			absorbed = absorbed.length > 0 ? `${absorbed}\n\n${value}` : value;
+		}
+		if (absorbed.length > 0) {
+			if (!target) {
+				target = DOM.append(anchor, $('.vibe-ai-thinking-text'));
+				target.classList.add('vibe-ai-thinking-text-settled');
+			}
+			const existing = target.textContent ?? '';
+			target.textContent = existing.length > 0 ? `${existing}\n\n${absorbed}` : absorbed;
+		}
+		if (anchor.dataset.vibeThoughtMs !== undefined || block.dataset.vibeThoughtMs !== undefined) {
+			const total = (parseFloat(anchor.dataset.vibeThoughtMs ?? '') || 0) + (parseFloat(block.dataset.vibeThoughtMs ?? '') || 0);
+			anchor.dataset.vibeThoughtMs = String(total);
+			const label = anchor.querySelector('.vibe-ai-thinking-label');
+			if (label) {
+				label.textContent = localize('vibeAIChat.thought', "Thought for {0}", getDurationString(total));
+			}
+		}
+		block.remove();
 	}
 
 	/**
@@ -8282,10 +8386,16 @@ export class VibeAIChatPane extends ViewPane {
 			const summary = DOM.append(thinkingDetails, $('summary'));
 			const chevron = DOM.append(summary, $('span.codicon.codicon-chevron-right.vibe-ai-thinking-chevron'));
 			chevron.setAttribute('aria-hidden', 'true');
-			const label = DOM.append(summary, $('span'));
+			// Phase 162: same merge hooks as the other creation sites (one
+			// block per legacy turn — the dataset is inert here, consistency
+			// only).
+			const label = DOM.append(summary, $('span.vibe-ai-thinking-label'));
 			label.textContent = turn.thinkingDurationMs !== undefined
 				? localize('vibeAIChat.thought', "Thought for {0}", getDurationString(turn.thinkingDurationMs))
 				: localize('vibeAIChat.thinking', "Thinking…");
+			if (turn.thinkingDurationMs !== undefined) {
+				thinkingDetails.dataset.vibeThoughtMs = String(turn.thinkingDurationMs);
+			}
 			const thinkingText = DOM.append(thinkingDetails, $('.vibe-ai-thinking-text'));
 			// Phase 84.2: restored reasoning is static — no 10-line window
 			// (same settled class as the timeline restore path).
@@ -8513,6 +8623,10 @@ export class VibeAIChatPane extends ViewPane {
 					this.appendRestoredTextBody(conversation, row, turn, node);
 				}
 			}
+			// Phase 162: consecutive Thought nodes render as one merged
+			// block (durations sum, texts blank-line separated) — live
+			// parity with closeThinkingRun's consolidation.
+			this.consolidateThoughtBlocks(row);
 		} else {
 			// --- tools turn: ONE Worked shell with everything inside
 			// except the final text node (the answer). The answer is the
@@ -8598,7 +8712,11 @@ export class VibeAIChatPane extends ViewPane {
 			// Phase 149: the same grouping as the live view — repeated reads
 			// of a file fold into the first row (union range), scans fold
 			// into count group rows — then the label carries the counts.
+			// Phase 162: after the grouping pulls cards out from between
+			// Thought rows, adjacent settled blocks merge (same rule as the
+			// live regroup).
 			regroupWorkedSteps(steps, restoredCards);
+			this.consolidateThoughtBlocks(steps);
 			this.appendWorkedCountsSuffix(label, steps, restoredCards);
 			// Phase 61 fix (restored answers vanished): the answer node is
 			// skipped by the loop above — render it OUTSIDE the shell as
@@ -8706,10 +8824,15 @@ export class VibeAIChatPane extends ViewPane {
 		const summary = DOM.append(thinkingDetails, $('summary'));
 		const chevron = DOM.append(summary, $('span.codicon.codicon-chevron-right.vibe-ai-thinking-chevron'));
 		chevron.setAttribute('aria-hidden', 'true');
-		const label = DOM.append(summary, $('span'));
+		// Phase 162: label class + duration dataset — the same merge hooks
+		// the live blocks carry (consolidateThoughtBlocks sums them).
+		const label = DOM.append(summary, $('span.vibe-ai-thinking-label'));
 		label.textContent = node.durationMs !== undefined
 			? localize('vibeAIChat.thought', "Thought for {0}", getDurationString(node.durationMs))
 			: localize('vibeAIChat.thinking', "Thinking…");
+		if (node.durationMs !== undefined) {
+			thinkingDetails.dataset.vibeThoughtMs = String(node.durationMs);
+		}
 		const thinkingText = DOM.append(thinkingDetails, $('.vibe-ai-thinking-text'));
 		// Phase 84.2: restored reasoning is static — no 10-line window; the
 		// full text joins the thread scroll when the block is expanded.

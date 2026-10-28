@@ -506,7 +506,22 @@ export interface IVibeAIQuestion {
 	readonly options?: string[];
 }
 
-export type VibeAIStreamEventType = 'text' | 'thinking' | 'tool_start' | 'tool_result' | 'file_delta' | 'round_end' | 'context_compressed' | 'output_truncated' | 'limit_reached' | 'model_routed' | 'plan' | 'plan_start' | 'plan_step_start' | 'plan_step_done' | 'plan_done' | 'agent_questions' | 'approval_request' | 'approval_resolved' | 'steered' | 'done' | 'goal_complete' | 'turn_state' | 'error' | 'retry' | 'unknown';
+/**
+ * Phase 159 (IDE diagnostics feedback, Cursor lint-feedback parity): one
+ * problem the IDE's language services reported for a file the agent just
+ * changed — collected by the chat pane from the marker service and pushed
+ * to the running turn (`pushDiagnostics`); the backend injects them as a
+ * user message at the next tool boundary.
+ */
+export interface IVibeAIDiagnostic {
+	readonly path: string;
+	readonly severity: 'error' | 'warning';
+	readonly message: string;
+	readonly line?: number;
+	readonly source?: string;
+}
+
+export type VibeAIStreamEventType = 'text' | 'thinking' | 'tool_start' | 'tool_result' | 'file_delta' | 'round_end' | 'context_compressed' | 'output_truncated' | 'limit_reached' | 'model_routed' | 'plan' | 'plan_start' | 'plan_step_start' | 'plan_step_done' | 'plan_done' | 'agent_questions' | 'approval_request' | 'approval_resolved' | 'steered' | 'diagnostics' | 'done' | 'goal_complete' | 'turn_state' | 'error' | 'retry' | 'unknown';
 
 export interface IVibeAIStreamData {
 	readonly requestId: string;
@@ -639,6 +654,14 @@ export interface IVibeAIStreamData {
 	 * the pane renders the thread's Steered bubble with it.
 	 */
 	readonly steered?: string;
+	/**
+	 * Phase 159 (`diagnostics`): the backend just injected the IDE's
+	 * diagnostics report (<ide_diagnostics> block, role=user) for the
+	 * files the agent changed — count of the entries injected. The pane
+	 * acknowledges it without layout changes (observability parity with
+	 * the turn_state precedent).
+	 */
+	readonly diagnosticsCount?: number;
 	/**
 	 * Phase 113 (`done`): steers that were queued but never injected —
 	 * the turn ended (natural finish / forced summary) before a tool
@@ -773,8 +796,17 @@ export interface IVibeAIService {
 	 * /api/chat/agent/approvals/resolve`). Called by the chat pane's
 	 * Run / Skip card while the backend's agent loop waits at the gate.
 	 * Returns true when the backend confirmed the resolution.
+	 *
+	 * Phase 160 (approval memory, Cursor auto-run parity): `scope`
+	 * extends an approval with memory — "once" (default, plain Run),
+	 * "turn" (the same command stops asking until the turn ends), or
+	 * "project" (persisted to `<projectRoot>/.vibe/approvals.json`,
+	 * the gate hot-reads it). `projectRoot` is the opened folder's
+	 * path (`currentWorkspaceRoot()`); empty/invalid → the backend
+	 * downgrades to once silently. Blacklist commands are never
+	 * exempted by memory (backend-enforced).
 	 */
-	resolveApproval(id: string, approved: boolean): Promise<boolean>;
+	resolveApproval(id: string, approved: boolean, scope?: 'once' | 'turn' | 'project', projectRoot?: string): Promise<boolean>;
 
 	/**
 	 * Phase 113: queues a mid-turn steer for the running Agent turn
@@ -788,6 +820,17 @@ export interface IVibeAIService {
 	 * or the request failed — the caller keeps the text.
 	 */
 	steer(sessionId: string, content: string, mode?: 'steer' | 'queue'): Promise<boolean>;
+
+	/**
+	 * Phase 159: pushes the IDE's diagnostics (errors/warnings) for the
+	 * files the agent just changed to the running Agent turn (`POST
+	 * /api/chat/agent/diagnostics`, session_id = the request's session).
+	 * The backend's loop injects them as a user message at the next tool
+	 * boundary. Fire-and-forget: resolves false when the turn already
+	 * finished (the backend drops the push silently — queued 0) or the
+	 * request failed; the caller never surfaces an error.
+	 */
+	pushDiagnostics(sessionId: string, diagnostics: IVibeAIDiagnostic[]): Promise<boolean>;
 
 	/**
 	 * Fetches a Tab completion for the given cursor context

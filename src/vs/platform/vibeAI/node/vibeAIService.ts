@@ -8,7 +8,7 @@ import { Disposable } from '../../../base/common/lifecycle.js';
 import { timeout } from '../../../base/common/async.js';
 import { ILogService } from '../../log/common/log.js';
 import { IProductService } from '../../product/common/productService.js';
-import { IVibeAICustomizeCreateData, IVibeAICustomizeItem, IVibeAICustomizeResult, IVibeAIChatRequest, IVibeAICompletionRequest, IVibeAIContextUsage, IVibeAIContextUsageRequest, IVibeAIExecutePlanRequest, IVibeAIInlineEditRequest, IVibeAIModelProvider, IVibeAIPlan, IVibeAIPlanStep, IVibeAIQuestion, IVibeAIService, IVibeAISkill, IVibeAIStreamData, IVibeAISubagent, VIBE_AI_DEFAULT_BACKEND_URL, VibeAICustomizeKind, VibeAICustomizeScope } from '../common/vibeAI.js';
+import { IVibeAICustomizeCreateData, IVibeAICustomizeItem, IVibeAICustomizeResult, IVibeAIChatRequest, IVibeAICompletionRequest, IVibeAIContextUsage, IVibeAIContextUsageRequest, IVibeAIDiagnostic, IVibeAIExecutePlanRequest, IVibeAIInlineEditRequest, IVibeAIModelProvider, IVibeAIPlan, IVibeAIPlanStep, IVibeAIQuestion, IVibeAIService, IVibeAISkill, IVibeAIStreamData, IVibeAISubagent, VIBE_AI_DEFAULT_BACKEND_URL, VibeAICustomizeKind, VibeAICustomizeScope } from '../common/vibeAI.js';
 import { ChildProcess, spawn } from 'child_process';
 import * as os from 'os';
 import { existsSync, rmSync, writeFileSync } from 'fs';
@@ -666,17 +666,20 @@ export class VibeAIService extends Disposable implements IVibeAIService {
 		}
 	}
 
-	async resolveApproval(id: string, approved: boolean): Promise<boolean> {
+	async resolveApproval(id: string, approved: boolean, scope?: 'once' | 'turn' | 'project', projectRoot?: string): Promise<boolean> {
 		// Phase 92: resolves the command approval gate the agent loop waits
 		// on (Run / Skip card). Unknown/already-decided ids resolve to false
 		// (idempotent) — the card keeps its buttons disabled either way.
+		// Phase 160: scope/projectRoot extend the approval with memory
+		// (once / turn / project — the backend persists scope=project to
+		// <projectRoot>/.vibe/approvals.json and hot-reads it at the gate).
 		const controller = new AbortController();
 		const timeout = setTimeout(() => controller.abort(), 10000);
 		try {
 			const response = await fetch(`${this.backendUrl}/api/chat/agent/approvals/resolve`, {
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({ id, approved }),
+				body: JSON.stringify({ id, approved, scope: scope ?? 'once', project_root: projectRoot }),
 				signal: controller.signal
 			});
 			if (!response.ok) {
@@ -718,6 +721,36 @@ export class VibeAIService extends Disposable implements IVibeAIService {
 			return data.success === true;
 		} catch (error) {
 			this.logService.error('[VibeAI] steer failed', error);
+			return false;
+		} finally {
+			clearTimeout(timeout);
+		}
+	}
+
+	async pushDiagnostics(sessionId: string, diagnostics: IVibeAIDiagnostic[]): Promise<boolean> {
+		// Phase 159: pushes the IDE's diagnostics for the files the agent
+		// just changed to the running Agent turn — the backend's loop
+		// injects them as a user message at the next tool boundary
+		// (<ide_diagnostics> block). Fire-and-forget: a finished turn (no
+		// open gate) answers queued 0 and a failed request resolves false
+		// silently — the caller never surfaces an error for this.
+		const controller = new AbortController();
+		const timeout = setTimeout(() => controller.abort(), 5000);
+		try {
+			const response = await fetch(`${this.backendUrl}/api/chat/agent/diagnostics`, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ session_id: sessionId, diagnostics }),
+				signal: controller.signal
+			});
+			if (!response.ok) {
+				this.logService.debug(`[VibeAI] pushDiagnostics request failed: HTTP ${response.status}`);
+				return false;
+			}
+			const data = await response.json() as { success?: boolean };
+			return data.success === true;
+		} catch (error) {
+			this.logService.error('[VibeAI] pushDiagnostics failed', error);
 			return false;
 		} finally {
 			clearTimeout(timeout);
@@ -1474,6 +1507,17 @@ export class VibeAIService extends Disposable implements IVibeAIService {
 					requestId,
 					type: 'steered',
 					steered: typeof event.content === 'string' ? event.content : '',
+					raw: event
+				}];
+			case 'diagnostics':
+				// Phase 159: the backend injected the IDE's diagnostics
+				// report (<ide_diagnostics> block, role=user) at the tool
+				// boundary — count only; the pane acknowledges without
+				// layout changes (turn_state observability precedent).
+				return [{
+					requestId,
+					type: 'diagnostics',
+					diagnosticsCount: typeof event.count === 'number' ? event.count : undefined,
 					raw: event
 				}];
 			case 'goal_complete':

@@ -6,7 +6,7 @@
 import { Emitter, Event } from '../../../base/common/event.js';
 import { Disposable, DisposableStore } from '../../../base/common/lifecycle.js';
 import { IChannel, IServerChannel } from '../../../base/parts/ipc/common/ipc.js';
-import { IVibeAICustomizeCreateData, IVibeAICustomizeItem, IVibeAICustomizeResult, IVibeAIChatRequest, IVibeAICompletionRequest, IVibeAIContextUsage, IVibeAIContextUsageRequest, IVibeAIExecutePlanRequest, IVibeAIInlineEditRequest, IVibeAIModelProvider, IVibeAIService, IVibeAISkill, IVibeAIStreamData, IVibeAISubagent, VibeAICustomizeKind, VibeAICustomizeScope } from './vibeAI.js';
+import { IVibeAICustomizeCreateData, IVibeAICustomizeItem, IVibeAICustomizeResult, IVibeAIChatRequest, IVibeAICompletionRequest, IVibeAIContextUsage, IVibeAIContextUsageRequest, IVibeAIDiagnostic, IVibeAIExecutePlanRequest, IVibeAIInlineEditRequest, IVibeAIModelProvider, IVibeAIService, IVibeAISkill, IVibeAIStreamData, IVibeAISubagent, VibeAICustomizeKind, VibeAICustomizeScope } from './vibeAI.js';
 
 /**
  * Main process side of the VibeAI service IPC. Registered on the
@@ -66,8 +66,10 @@ export class VibeAIChannel implements IServerChannel {
 				return this.service.deleteFile(path, workspaceRoot);
 			}
 			case 'resolveApproval': {
-				const { id, approved } = arg as { id: string; approved: boolean };
-				return this.service.resolveApproval(id, approved);
+				// Phase 160: scope/projectRoot extend the approval with
+				// memory (once / turn / project, per the interface docs).
+				const { id, approved, scope, projectRoot } = arg as { id: string; approved: boolean; scope?: 'once' | 'turn' | 'project'; projectRoot?: string };
+				return this.service.resolveApproval(id, approved, scope, projectRoot);
 			}
 			case 'steer': {
 				// Phase 113: queue a mid-turn steer for the running Agent
@@ -76,6 +78,12 @@ export class VibeAIChannel implements IServerChannel {
 				// (mode=queue, auto-resumes after the turn ends).
 				const { sessionId, content, mode } = arg as { sessionId: string; content: string; mode?: 'steer' | 'queue' };
 				return this.service.steer(sessionId, content, mode);
+			}
+			case 'pushDiagnostics': {
+				// Phase 159: push the IDE's diagnostics for the files the
+				// agent just changed to the running turn (fire-and-forget).
+				const { sessionId, diagnostics } = arg as { sessionId: string; diagnostics: IVibeAIDiagnostic[] };
+				return this.service.pushDiagnostics(sessionId, diagnostics);
 			}
 			case 'complete': {
 				return this.service.complete(arg as IVibeAICompletionRequest);
@@ -184,14 +192,21 @@ export class VibeAIClient extends Disposable implements IVibeAIService {
 		return this.channel.call<boolean>('deleteFile', { path, workspaceRoot });
 	}
 
-	resolveApproval(id: string, approved: boolean): Promise<boolean> {
-		return this.channel.call<boolean>('resolveApproval', { id, approved });
+	resolveApproval(id: string, approved: boolean, scope?: 'once' | 'turn' | 'project', projectRoot?: string): Promise<boolean> {
+		// Phase 160: scope/projectRoot extend the approval with memory.
+		return this.channel.call<boolean>('resolveApproval', { id, approved, scope, projectRoot });
 	}
 
 	steer(sessionId: string, content: string, mode?: 'steer' | 'queue'): Promise<boolean> {
 		// Phase 113: queue a mid-turn steer (Cursor's "send now"); Phase
 		// 114: mode=queue rides the queue (auto-resume after the turn).
 		return this.channel.call<boolean>('steer', { sessionId, content, mode });
+	}
+
+	pushDiagnostics(sessionId: string, diagnostics: IVibeAIDiagnostic[]): Promise<boolean> {
+		// Phase 159: push the IDE's diagnostics to the running turn — the
+		// backend injects them at the next tool boundary (fire-and-forget).
+		return this.channel.call<boolean>('pushDiagnostics', { sessionId, diagnostics });
 	}
 
 	complete(request: IVibeAICompletionRequest): Promise<string | null> {

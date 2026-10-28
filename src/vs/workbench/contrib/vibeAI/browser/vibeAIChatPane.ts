@@ -32,13 +32,14 @@ import { IInstantiationService } from '../../../../platform/instantiation/common
 import { IKeybindingService } from '../../../../platform/keybinding/common/keybinding.js';
 import { ILogService } from '../../../../platform/log/common/log.js';
 import { IMarkdownRendererExtraOptions, IMarkdownRendererService } from '../../../../platform/markdown/browser/markdownRenderer.js';
+import { IMarkerService, MarkerSeverity } from '../../../../platform/markers/common/markers.js';
 import { INotificationService } from '../../../../platform/notification/common/notification.js';
 import { IOpenerService } from '../../../../platform/opener/common/opener.js';
 import { IQuickInputService } from '../../../../platform/quickinput/common/quickInput.js';
 import { IStorageService } from '../../../../platform/storage/common/storage.js';
 import { IThemeService } from '../../../../platform/theme/common/themeService.js';
 import { IWorkspaceContextService } from '../../../../platform/workspace/common/workspace.js';
-import { IVibeAIChatRequest, IVibeAICodeChange, IVibeAIContextUsage, IVibeAIExecutePlanRequest, IVibeAIFileContext, IVibeAIMessage, IVibeAIModelProvider, IVibeAIModelRouting, IVibeAIPlan, IVibeAISkill, IVibeAIStreamData, IVibeAIService, IVibeAISubagent } from '../../../../platform/vibeAI/common/vibeAI.js';
+import { IVibeAIChatRequest, IVibeAICodeChange, IVibeAIContextUsage, IVibeAIDiagnostic, IVibeAIExecutePlanRequest, IVibeAIFileContext, IVibeAIMessage, IVibeAIModelProvider, IVibeAIModelRouting, IVibeAIPlan, IVibeAISkill, IVibeAIStreamData, IVibeAIService, IVibeAISubagent } from '../../../../platform/vibeAI/common/vibeAI.js';
 import { VibeAIChatSessionStore, IVibeAIChatSession, IVibeAIChatScrollPos, IVibeAIChatSearchHit, IVibeAIPersistedToolCall, IVibeAIPersistedTurn, IVibeAIPersistedTurnSegment, IVibeAITurnTimelineNode, searchConversationContent } from './vibeAIChatSessionStore.js';
 import { IVibeAIModelConfig, VIBE_AI_NO_MODEL_MESSAGE, VibeAIModelStore } from './vibeAIModelStore.js';
 import { computeDiffLines, computeDiffStats } from './vibeAIDiff.js';
@@ -998,7 +999,8 @@ export class VibeAIChatPane extends ViewPane {
 		@INotificationService private readonly notificationService: INotificationService,
 		@IFileService private readonly fileService: IFileService,
 		@IClipboardService private readonly clipboardService: IClipboardService,
-		@ITerminalService private readonly terminalService: ITerminalService
+		@ITerminalService private readonly terminalService: ITerminalService,
+		@IMarkerService private readonly markerService: IMarkerService
 	) {
 		super(
 			options,
@@ -2769,6 +2771,13 @@ export class VibeAIChatPane extends ViewPane {
 					conversation.stream.turnState = data.turnState;
 				}
 				break;
+			case 'diagnostics':
+				// Phase 159: the backend injected the IDE's diagnostics
+				// report (<ide_diagnostics> block, role=user) at the tool
+				// boundary — explicit no-op (observability parity with
+				// turn_state): the injection is the model's input, not a
+				// UI step; it shows up as the next round's narration.
+				break;
 			case 'done':
 				// Phase 113: steers queued but never injected (the turn
 				// ended without a tool boundary to drain them) ride the
@@ -3083,6 +3092,17 @@ export class VibeAIChatPane extends ViewPane {
 		const skip = DOM.append(actions, $('button.vibe-ai-approval-skip')) as HTMLButtonElement;
 		skip.textContent = localize('vibeAIChat.approvalSkip', "Skip");
 		skip.type = 'button';
+		// Phase 160: approval memory (Cursor auto-run parity) — secondary
+		// options that approve AND remember: this turn (loop-local — the
+		// same command stops asking until the turn ends) or this project
+		// (persisted to <root>/.vibe/approvals.json, the gate hot-reads it).
+		// Blacklist commands are never exempted by memory (backend-enforced).
+		const allowTurn = DOM.append(actions, $('button.vibe-ai-approval-skip')) as HTMLButtonElement;
+		allowTurn.textContent = localize('vibeAIChat.approvalAllowTurn', "Allow for this turn");
+		allowTurn.type = 'button';
+		const allowProject = DOM.append(actions, $('button.vibe-ai-approval-skip')) as HTMLButtonElement;
+		allowProject.textContent = localize('vibeAIChat.approvalAllowProject', "Always allow");
+		allowProject.type = 'button';
 		const disposables = this.conversationPlanDisposables(conversation);
 		disposables.add(DOM.addDisposableListener(run, DOM.EventType.CLICK, e => {
 			e.preventDefault();
@@ -3093,6 +3113,16 @@ export class VibeAIChatPane extends ViewPane {
 			e.preventDefault();
 			e.stopPropagation();
 			this.resolveApprovalFromCard(card, approval.id, false);
+		}));
+		disposables.add(DOM.addDisposableListener(allowTurn, DOM.EventType.CLICK, e => {
+			e.preventDefault();
+			e.stopPropagation();
+			this.resolveApprovalFromCard(card, approval.id, true, 'turn', this.currentWorkspaceRoot());
+		}));
+		disposables.add(DOM.addDisposableListener(allowProject, DOM.EventType.CLICK, e => {
+			e.preventDefault();
+			e.stopPropagation();
+			this.resolveApprovalFromCard(card, approval.id, true, 'project', this.currentWorkspaceRoot());
 		}));
 		// Phase 106: the gate BLOCKS the stream until the user decides —
 		// surface the Run / Skip buttons regardless of the reading
@@ -3155,16 +3185,16 @@ export class VibeAIChatPane extends ViewPane {
 	 * attempt) with its buttons disabled (no double submit); its
 	 * decided state rides the approval_resolved event.
 	 */
-	private resolveApprovalFromCard(card: HTMLElement, id: string, approved: boolean): void {
+	private resolveApprovalFromCard(card: HTMLElement, id: string, approved: boolean, scope?: 'once' | 'turn' | 'project', projectRoot?: string): void {
 		if (approved) {
 			card.remove();
-			void this.vibeAIService.resolveApproval(id, approved);
+			void this.vibeAIService.resolveApproval(id, approved, scope, projectRoot);
 			return;
 		}
 		card.querySelectorAll('button').forEach(button => {
 			(button as HTMLButtonElement).disabled = true;
 		});
-		void this.vibeAIService.resolveApproval(id, approved);
+		void this.vibeAIService.resolveApproval(id, approved, scope, projectRoot);
 	}
 
 	/**
@@ -3695,6 +3725,10 @@ export class VibeAIChatPane extends ViewPane {
 			// same way, so the overlay is the turn's net change.
 			const accumulated = state.turnChanges.find(entry => entry.filePath === change.filePath);
 			this.editorHighlighter?.highlight(accumulated ?? change, path => this.resolveWorkspacePath(path));
+			// Phase 159: the backend touched a file — sweep the IDE's fresh
+			// markers for it (debounced, LSP needs a moment to recompute) and
+			// push them to the running turn; deletes leave nothing to diagnose.
+			this.scheduleDiagnosticsSweep(conversation, change);
 		}
 		if (state.pendingWriteCardId === id) {
 			state.pendingWriteCardId = undefined;
@@ -3804,6 +3838,86 @@ export class VibeAIChatPane extends ViewPane {
 				"Steer not delivered — the turn already finished; press Enter to send as a new message"
 			), conversation);
 		});
+	}
+
+	// ===== Phase 159: IDE diagnostics feedback (Cursor lint-feedback parity) =====
+
+	/** Per-conversation sweep debounce timers (sessionId → timer). */
+	private diagnosticsSweepTimers = new Map<string, ReturnType<typeof setTimeout>>();
+	/** Per-conversation changed paths accumulated since the last sweep. */
+	private diagnosticsPendingPaths = new Map<string, Set<string>>();
+
+	/**
+	 * Phase 159: the backend just wrote/edited a file — schedule a
+	 * diagnostics sweep for it. The LSP recomputes only after the file
+	 * watcher reloads the model, so the sweep is debounced (1.2s, reset on
+	 * every new change); paths accumulate so a burst of writes sweeps once
+	 * with the whole batch.
+	 */
+	private scheduleDiagnosticsSweep(conversation: VibeAIConversation, change: IVibeAICodeChange): void {
+		if (change.action === 'delete' || !change.filePath) {
+			return;
+		}
+		let pending = this.diagnosticsPendingPaths.get(conversation.sessionId);
+		if (!pending) {
+			pending = new Set<string>();
+			this.diagnosticsPendingPaths.set(conversation.sessionId, pending);
+		}
+		pending.add(change.filePath);
+		const existing = this.diagnosticsSweepTimers.get(conversation.sessionId);
+		if (existing) {
+			clearTimeout(existing);
+		}
+		const timer = setTimeout(() => {
+			this.diagnosticsSweepTimers.delete(conversation.sessionId);
+			this.sweepDiagnostics(conversation);
+		}, 1200);
+		this.diagnosticsSweepTimers.set(conversation.sessionId, timer);
+	}
+
+	/**
+	 * Phase 159: collect the IDE's markers (errors/warnings only) for the
+	 * files the agent just changed and push them to the running turn — the
+	 * backend injects them as a user message at the next tool boundary
+	 * (<ide_diagnostics> block, Cursor lint-feedback parity). Fire-and-
+	 * forget: a finished turn's registry is already closed, so the push
+	 * lands queued 0 and resolves false silently. No findings → no push.
+	 */
+	private sweepDiagnostics(conversation: VibeAIConversation): void {
+		const sessionId = conversation.sessionId;
+		const paths = [...(this.diagnosticsPendingPaths.get(sessionId) ?? [])];
+		this.diagnosticsPendingPaths.delete(sessionId);
+		if (!paths.length) {
+			return;
+		}
+		const diagnostics: IVibeAIDiagnostic[] = [];
+		for (const path of paths) {
+			const uri = this.resolveWorkspacePath(path);
+			if (!uri) {
+				continue;
+			}
+			let count = 0;
+			for (const marker of this.markerService.read({ resource: uri })) {
+				if (count >= 8) {
+					break;
+				}
+				if (marker.severity !== MarkerSeverity.Error && marker.severity !== MarkerSeverity.Warning) {
+					continue;
+				}
+				diagnostics.push({
+					path,
+					severity: marker.severity === MarkerSeverity.Error ? 'error' : 'warning',
+					message: marker.message.slice(0, 200),
+					line: marker.startLineNumber,
+					source: marker.owner,
+				});
+				count++;
+			}
+		}
+		if (!diagnostics.length) {
+			return;
+		}
+		void this.vibeAIService.pushDiagnostics(sessionId, diagnostics);
 	}
 
 	/**

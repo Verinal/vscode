@@ -2349,6 +2349,7 @@ export function completedToolCallToSerialized(tc: ICompletedToolCall, subAgentIn
 			&& (tc.status !== ToolCallStatus.Completed || getToolFileEdits(tc).length === 0)
 			? getToolInputOutputDetails(tc, !isSuccess, getToolErrorString(tc), !!(toolSpecificData?.kind === 'input' && toolSpecificData.mcpAppData), connectionAuthority)
 			: undefined);
+	const summary = getToolSummary(tc, resourceUris);
 
 	return {
 		kind: 'toolInvocationSerialized',

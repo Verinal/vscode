@@ -24,6 +24,7 @@ import { ITelemetryService } from '../../telemetry/common/telemetry.js';
 import { NullTelemetryService } from '../../telemetry/common/telemetryUtils.js';
 import { UtilityProcess } from '../../utilityProcess/electron-main/utilityProcess.js';
 import { AgentHostStartError, IAgentHostConnection, IAgentHostShutdownRequest, IAgentHostStarter, IAgentHostStartRequest, isFatalAgentHostStartError, toFatalAgentHostStartError } from '../common/agent.js';
+import { AgentHostExitMarker, AgentHostProcessExitDiagnosticsCollector, IAgentHostProcessMemorySample } from '../common/agentHostProcessExit.js';
 import { AGENT_HOST_CLIENT_BYOK_LM_CHANNEL, NullAgentHostClientByokLmChannel } from '../common/agentHostClientByokLmChannel.js';
 import { AGENT_HOST_CLIENT_PROXY_CHANNEL, NullAgentHostClientProxyChannel } from '../common/agentHostClientProxyChannel.js';
 import { buildAgentHostTelemetryIdEnv, IAgentHostForwardedTelemetryIds } from '../common/agentHostTelemetryEnv.js';

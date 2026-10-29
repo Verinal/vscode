@@ -383,6 +383,50 @@ export class NativeHostMainService extends Disposable implements INativeHostMain
 		}
 	}
 
+	/**
+	 * VibeCoding fork: the title-bar pill's Agent Window (Cursor parity) —
+	 * a real dedicated window on the fork's neutral agent workspace, so its
+	 * layout state (hidden IDE parts, open chat tabs) never pollutes a
+	 * project folder's workspace storage while conversations live in
+	 * application storage. An existing agent window is focused, never
+	 * duplicated (Cursor's single Agent Window behavior).
+	 */
+	async openVibeAgentWindow(windowId: number | undefined): Promise<void> {
+		const workspaceUri = this.environmentMainService.vibeAgentWindowWorkspace;
+		const workspacePath = workspaceUri.fsPath;
+		try {
+			if (!(await Promises.exists(workspacePath))) {
+				await Promises.writeFile(workspacePath, JSON.stringify({ folders: [] }, null, '\t'));
+			}
+		} catch (error) {
+			this.logService.warn('[vibeAI] failed to prepare the agent window workspace', error);
+		}
+
+		for (const window of this.windowsMainService.getWindows()) {
+			// Phase 181 r6: also match standalone-launched agent windows —
+			// the launcher opens the neutral workspace without the flag; the
+			// renderer derives agent mode from the workspace file name.
+			const workspace = window.config?.workspace;
+			if (window.config?.vibeAgentWindow || (workspace && 'configPath' in workspace && workspace.configPath.path.toLowerCase().endsWith('/vibe-agent-window.code-workspace'))) {
+				window.focus();
+				return;
+			}
+		}
+
+		const windows = await this.windowsMainService.open({
+			context: OpenContext.API,
+			contextWindowId: windowId,
+			cli: this.environmentMainService.args,
+			urisToOpen: [{ workspaceUri }],
+			forceNewWindow: true,
+			noRecentEntry: true,
+			vibeAgentWindow: true,
+		});
+		if (windows.length > 0) {
+			windows[0].focus();
+		}
+	}
+
 	async syncSystemWideKeybindings(windowId: number | undefined, keybindings: INativeSystemWideKeybinding[]): Promise<INativeSystemWideKeybindingResult> {
 		if (typeof windowId !== 'number') {
 			return { failed: [] };

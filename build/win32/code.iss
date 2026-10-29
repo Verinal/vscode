@@ -121,7 +121,7 @@ Name: "{autodesktop}\{#NameLong}"; Filename: "{app}\{#ExeBasename}.exe"; Tasks: 
 Name: "{userappdata}\Microsoft\Internet Explorer\Quick Launch\{#NameLong}"; Filename: "{app}\{#ExeBasename}.exe"; Tasks: quicklaunchicon; AppUserModelID: "{#AppUserId}"; Check: ShouldUpdateShortcut(ExpandConstant('{userappdata}\Microsoft\Internet Explorer\Quick Launch\{#NameLong}.lnk'))
 
 [Run]
-Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoLogo -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File ""{app}\backend\scripts\setup_backend_env.ps1"""; StatusMsg: "Setting up Python environment and backend dependencies (first install may take a few minutes)..."; Flags: runhidden skipifdoesntexist
+Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoLogo -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File ""{app}\backend\scripts\setup_backend_env.ps1"""; StatusMsg: "Preparing backend (checking bundled embedding model, fallback download if missing)..."; Flags: runhidden skipifdoesntexist
 Filename: "{app}\{#ExeBasename}.exe"; Parameters: "{code:GetRelaunchArgs}"; Description: "{cm:LaunchProgram,{#NameLong}}"; Tasks: runcode; Flags: nowait postinstall; Check: ShouldRunAfterUpdate; AfterInstall: DeleteRelaunchArgsFile
 Filename: "{app}\{#ExeBasename}.exe"; Description: "{cm:LaunchProgram,{#NameLong}}"; Flags: nowait postinstall; Check: WizardNotSilent
 

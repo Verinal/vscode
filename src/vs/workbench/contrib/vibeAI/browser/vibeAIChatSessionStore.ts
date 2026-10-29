@@ -5,6 +5,7 @@
 
 import { IVibeAICodeChange, IVibeAIModelRouting, IVibeAIPlan, IVibeAIReadRange, IVibeAIMessage } from '../../../../platform/vibeAI/common/vibeAI.js';
 import { IStorageService, StorageScope, StorageTarget } from '../../../../platform/storage/common/storage.js';
+import { IWorkspaceContextService } from '../../../../platform/workspace/common/workspace.js';
 
 /**
  * One agent tool call of a persisted turn (Phase 45): everything the tool
@@ -235,6 +236,15 @@ export interface IVibeAIChatSession {
 	 * Optional — sessions saved before Phase 157 predate the field.
 	 */
 	readonly planPath?: string;
+	/**
+	 * Phase 177 (Agent Window, Cursor parity): the project folder the
+	 * conversation is bound to — sent as `workspaceRoot` on every request
+	 * so the backend rebinds its tools / RAG index / rules / skills even
+	 * when the conversation is continued from the Agent Window (whose
+	 * neutral workspace has no folder). Optional — sessions saved before
+	 * Phase 177 predate the field and fall back to the window's folder.
+	 */
+	readonly workspaceRoot?: string;
 }
 
 /**
@@ -399,16 +409,44 @@ export function searchConversationContent(
 }
 
 /**
- * Persists chat conversations in workspace state so the History action can
- * reload past conversations (Cursor-parity chat history).
+ * Persists chat conversations in application state (shared across every
+ * window and profile — Phase 177: the Agent Window and the IDE windows see
+ * the same conversation list, Cursor parity) so the History action can
+ * reload past conversations.
  */
 export class VibeAIChatSessionStore {
 
-	constructor(private readonly storageService: IStorageService) { }
+	constructor(
+		private readonly storageService: IStorageService,
+		private readonly contextService: IWorkspaceContextService,
+	) { }
 
 	list(): IVibeAIChatSession[] {
+		const sessions = this.readScoped(StorageScope.APPLICATION);
+		// Phase 177: sessions moved from workspace storage to application
+		// storage so the Agent Window sees the same conversation list as
+		// the IDE. Migrate the current workspace's bucket: entries not yet
+		// in the shared list join it labeled with the folder that opened
+		// them, then the source bucket is cleared so a later delete in the
+		// shared list can't be resurrected by the next merge.
+		const legacy = this.readScoped(StorageScope.WORKSPACE);
+		if (legacy.length > 0) {
+			const known = new Set(sessions.map(s => s.id));
+			const folder = this.contextService.getWorkspace().folders[0]?.uri.fsPath;
+			const migrated = legacy
+				.filter(s => !known.has(s.id))
+				.map(s => ({ ...s, workspaceRoot: s.workspaceRoot ?? folder }));
+			const merged = [...migrated, ...sessions].sort((a, b) => b.updatedAt - a.updatedAt).slice(0, MAX_SESSIONS);
+			this.write(merged);
+			this.storageService.remove(STORAGE_KEY, StorageScope.WORKSPACE);
+			return merged;
+		}
+		return sessions;
+	}
+
+	private readScoped(scope: StorageScope): IVibeAIChatSession[] {
 		try {
-			const raw = this.storageService.get(STORAGE_KEY, StorageScope.WORKSPACE);
+			const raw = this.storageService.get(STORAGE_KEY, scope);
 			const sessions = raw ? JSON.parse(raw) as IVibeAIChatSession[] : [];
 			return Array.isArray(sessions) ? sessions : [];
 		} catch {
@@ -421,7 +459,7 @@ export class VibeAIChatSessionStore {
 	 * conversation, updated in place). Call after every user turn and again
 	 * when the assistant answer finishes.
 	 */
-	save(sessionId: string, messages: IVibeAIMessage[], contextLimit?: number, turns?: IVibeAIPersistedTurn[], mode?: 'ask' | 'agent' | 'plan', side?: { kind?: 'main' | 'side'; parentSessionId?: string }): void {
+	save(sessionId: string, messages: IVibeAIMessage[], contextLimit?: number, turns?: IVibeAIPersistedTurn[], mode?: 'ask' | 'agent' | 'plan', side?: { kind?: 'main' | 'side'; parentSessionId?: string }, workspaceRoot?: string): void {
 		if (messages.length === 0) {
 			return;
 		}
@@ -488,6 +526,14 @@ export class VibeAIChatSessionStore {
 		// setPlanPath() (captured at plan_start / plan_done).
 		if (previous?.planPath) {
 			(session as { planPath?: string }).planPath = previous.planPath;
+		}
+		// Phase 177: the conversation's project folder sticks across saves —
+		// a conversation stays bound to the workspace it was created in, so
+		// continuing it from the Agent Window keeps the backend rebinding to
+		// the right project.
+		const sessionRoot = workspaceRoot ?? previous?.workspaceRoot;
+		if (sessionRoot !== undefined) {
+			(session as { workspaceRoot?: string }).workspaceRoot = sessionRoot;
 		}
 		sessions.unshift(session);
 		this.write(sessions.slice(0, MAX_SESSIONS));
@@ -582,6 +628,8 @@ export class VibeAIChatSessionStore {
 	}
 
 	clear(): void {
+		this.storageService.remove(STORAGE_KEY, StorageScope.APPLICATION);
+		// Legacy buckets (pre-Phase 177 workspace-scoped sessions) go too.
 		this.storageService.remove(STORAGE_KEY, StorageScope.WORKSPACE);
 		// Phase 79: cleared history leaves no open-tab ghosts behind.
 		this.storageService.remove(OPEN_STATE_KEY, StorageScope.WORKSPACE);
@@ -690,11 +738,56 @@ export class VibeAIChatSessionStore {
 			this.storageService.store(
 				STORAGE_KEY,
 				raw,
-				StorageScope.WORKSPACE,
+				StorageScope.APPLICATION,
 				StorageTarget.MACHINE,
 			);
 		} catch {
 			// Persistence is best-effort — never break the chat on storage errors.
 		}
+	}
+}
+
+/**
+ * Phase 180 (session roaming, Cursor parity): APPLICATION-scope storage
+ * key carrying a one-shot conversation handoff between surfaces — the
+ * IDE chat panel ⇄ the standalone agent window. Sessions already roam
+ * (they live in application storage with their project stamped on);
+ * this key is just the "open it THERE, now" signal: the sender writes
+ * it right before opening the target window, the receiver consumes
+ * (clears) it once on restore.
+ */
+export const VIBE_AI_HANDOFF_STORAGE_KEY = 'vibeAI.agentHandoff';
+
+/** Handoffs older than this are stale (a window never opened) — dropped. */
+export const VIBE_AI_HANDOFF_MAX_AGE_MS = 120_000;
+
+/** A one-shot conversation handoff between surfaces (see the storage key). */
+export interface IVibeAIChatHandoff {
+	/** Existing thread to open (agent window → IDE / IDE → agent window). */
+	readonly sessionId?: string;
+	/** Or: a fresh conversation seeded with this composer text (agent window → IDE). */
+	readonly newMessage?: string;
+	/** Project the conversation belongs to (roaming across windows). */
+	readonly workspaceRoot?: string;
+	/** Written at handoff time — receivers ignore stale entries. */
+	readonly ts: number;
+}
+
+/** Parses + validates a stored handoff payload (undefined = absent / broken). */
+export function parseVibeAIChatHandoff(raw: string | undefined): IVibeAIChatHandoff | undefined {
+	if (!raw) {
+		return undefined;
+	}
+	try {
+		const parsed = JSON.parse(raw) as IVibeAIChatHandoff | undefined;
+		if (!parsed || typeof parsed !== 'object' || typeof parsed.ts !== 'number') {
+			return undefined;
+		}
+		if (!parsed.sessionId && !parsed.newMessage) {
+			return undefined;
+		}
+		return parsed;
+	} catch {
+		return undefined;
 	}
 }

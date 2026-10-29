@@ -145,6 +145,9 @@ export interface INativeEnvironmentService extends IEnvironmentService {
 	extensionsDownloadLocation: URI;
 	builtinExtensionsPath: string;
 
+	// --- VibeCoding fork: the Agent Window's neutral workspace (title-bar pill, Cursor parity)
+	vibeAgentWindowWorkspace: URI;
+
 	// --- use in-memory Secret Storage
 	useInMemorySecretStorage?: boolean;
 

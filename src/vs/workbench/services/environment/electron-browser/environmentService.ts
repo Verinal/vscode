@@ -155,6 +155,22 @@ export class NativeWorkbenchEnvironmentService extends AbstractNativeEnvironment
 	get isSessionsWindow(): boolean { return !!this.configuration.isSessionsWindow; }
 
 	@memoize
+	get isVibeAgentWindow(): boolean {
+		if (this.configuration.vibeAgentWindow) {
+			return true;
+		}
+		// Phase 181 r5: the main-process flag only survives the original
+		// openVibeAgentWindow call — session restore and Open Recent reopen
+		// the neutral workspace without it, leaving a hybrid half-IDE
+		// window (hub editor + full chrome + Restricted Mode banner). The
+		// dedicated workspace file is the agent window's identity, so any
+		// window on it runs in agent mode regardless of how it was opened.
+		const workspace = this.configuration.workspace;
+		const configPath = workspace && 'configPath' in workspace ? workspace.configPath : undefined;
+		return !!configPath && configPath.path.toLowerCase().endsWith('/vibe-agent-window.code-workspace');
+	}
+
+	@memoize
 	get sessionTitle(): string | undefined {
 		const encodedSessionTitle = this.configuration['session-title-base64'];
 		return encodedSessionTitle ? decodeBase64(encodedSessionTitle).toString() : undefined;

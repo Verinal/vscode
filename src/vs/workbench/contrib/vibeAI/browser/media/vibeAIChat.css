@@ -1364,6 +1364,8 @@
 	border-radius: 10px;
 	background: var(--vscode-input-background);
 	padding: 8px 10px 6px;
+	/* Phase 171: the drop overlay's containing block — it fills this box. */
+	position: relative;
 	gap: 6px;
 	/* Phase 72: the toolbar's narrow-pane tiers query this box's width
 	   (both the main composer and the edit shell share this class). */
@@ -1376,11 +1378,50 @@
 	flex-shrink: 0;
 }
 
-/* Phase 105: drag-over highlight — dragging a file/folder over the
-   composer lights the border up; dropping attaches it as a chip. */
+/* Phase 171: drag-over state — dragging a file/folder over the composer
+   (a) lights the border up and (b) spreads a dashed accent veil across
+   the whole box with a hint line. The old border tint alone was too
+   subtle to notice mid-drag, so the overlay makes the landing zone
+   unmissable. The veil is pointer-events:none — the drop still lands. */
 .vibe-ai-input-container.vibe-ai-dragover {
 	border-color: var(--vscode-focusBorder, #0078d4);
-	background: color-mix(in srgb, var(--vscode-focusBorder, #0078d4) 6%, var(--vscode-input-background));
+}
+
+.vibe-ai-drop-overlay {
+	position: absolute;
+	inset: 0;
+	z-index: 6;
+	display: none;
+	align-items: center;
+	justify-content: center;
+	gap: 7px;
+	/* Inside the container's 1px border, its 10px radius reads as 9px. */
+	border-radius: 9px;
+	border: 1px dashed var(--vscode-focusBorder, #0078d4);
+	background: color-mix(in srgb, var(--vscode-focusBorder, #0078d4) 10%, var(--vscode-input-background));
+	color: var(--vscode-focusBorder, #0078d4);
+	font-size: 12px;
+	pointer-events: none;
+	animation: vibe-ai-drop-overlay-in 0.15s ease-out;
+}
+
+.vibe-ai-input-container.vibe-ai-dragover .vibe-ai-drop-overlay {
+	display: flex;
+}
+
+.vibe-ai-drop-overlay .codicon {
+	font-size: 15px;
+}
+
+@keyframes vibe-ai-drop-overlay-in {
+	from {
+		opacity: 0;
+		transform: scale(0.985);
+	}
+	to {
+		opacity: 1;
+		transform: scale(1);
+	}
 }
 
 /* Cursor parity: a new (empty) chat keeps the input box pinned at the
@@ -1443,17 +1484,34 @@
 	display: none;
 }
 
+/* Phase 171: attachment chips, redesigned from the flat badge gray to a
+   Cursor-style pill — the composer's own background + input border, a
+   colored file/folder icon and a circular remove affordance. */
 .vibe-ai-chip {
 	display: flex;
 	align-items: center;
-	gap: 4px;
+	gap: 5px;
 	font-size: 11px;
-	background: var(--vscode-badge-background, rgba(128, 128, 128, 0.25));
-	color: var(--vscode-badge-foreground, var(--vscode-foreground));
-	border-radius: 4px;
-	padding: 1px 4px 1px 6px;
+	line-height: 1.5;
+	background: var(--vscode-input-background);
+	color: var(--vscode-input-foreground);
+	border: 1px solid var(--vscode-input-border, rgba(128, 128, 128, 0.35));
+	border-radius: 6px;
+	padding: 2px 4px 2px 7px;
 	max-width: 220px;
 	user-select: none;
+	animation: vibe-ai-chip-in 0.14s ease-out;
+}
+
+@keyframes vibe-ai-chip-in {
+	from {
+		opacity: 0;
+		transform: translateY(2px);
+	}
+	to {
+		opacity: 1;
+		transform: translateY(0);
+	}
 }
 
 .vibe-ai-chip .codicon {
@@ -1461,10 +1519,30 @@
 	flex-shrink: 0;
 }
 
+.vibe-ai-chip .codicon-symbol-folder {
+	color: var(--vscode-charts-blue, #4fc1ff);
+}
+
+.vibe-ai-chip .codicon-symbol-file {
+	color: var(--vscode-descriptionForeground, #9d9d9d);
+}
+
 .vibe-ai-chip .vibe-ai-chip-name {
 	overflow: hidden;
 	text-overflow: ellipsis;
 	white-space: nowrap;
+}
+
+/* Phase 171: a chip whose read is still running — dashed border, muted
+   text and a spinner standing in for the file icon (content lands when
+   the read settles). */
+.vibe-ai-chip.vibe-ai-chip-loading {
+	border-style: dashed;
+	color: var(--vscode-descriptionForeground, #9d9d9d);
+}
+
+.vibe-ai-chip .vibe-ai-chip-spinner {
+	color: var(--vscode-focusBorder, #0078d4);
 }
 
 .vibe-ai-chip .vibe-ai-chip-remove {
@@ -1476,10 +1554,16 @@
 	color: inherit;
 	padding: 0;
 	font-size: 12px;
+	justify-content: center;
+	align-items: center;
+	width: 15px;
+	height: 15px;
+	border-radius: 4px;
 }
 
 .vibe-ai-chip .vibe-ai-chip-remove:hover {
 	opacity: 1;
+	background: var(--vscode-toolbar-hoverBackground, rgba(128, 128, 128, 0.2));
 }
 
 /* Phase 61: pasted-image chips in the composer's chips row — thumbnail
@@ -1499,6 +1583,23 @@
 	height: 44px;
 	object-fit: cover;
 	border-radius: 4px;
+}
+
+/* Phase 171: an image whose read is still running — a dashed tile with a
+   centered spinner, same footprint as a real thumbnail (it swaps in the
+   moment the decode lands). */
+.vibe-ai-chip.vibe-ai-image-chip.vibe-ai-image-loading {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	width: 48px;
+	height: 48px;
+	box-sizing: border-box;
+	border-style: dashed;
+}
+
+.vibe-ai-image-loading .vibe-ai-chip-spinner {
+	font-size: 14px;
 }
 
 /* Phase 139: the image chip's remove button floats as a small circular

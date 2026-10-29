@@ -36,6 +36,9 @@ export const TemporaryWorkspaceContext = new RawContextKey<boolean>('temporaryWo
 
 export const IsSessionsWindowContext = new RawContextKey<boolean>('isSessionsWindow', false, localize('isSessionsWindow', "Whether the current window is a agent sessions window."));
 
+/** VibeCoding fork: the window is the pill-opened Agent Window (Cursor parity). */
+export const IsVibeAgentWindowContext = new RawContextKey<boolean>('isVibeAgentWindow', false, localize('isVibeAgentWindow', "Whether the current window is a VibeAI agent window."));
+
 export const HasWebFileSystemAccess = new RawContextKey<boolean>('hasWebFileSystemAccess', false, true); // Support for FileSystemAccess web APIs (https://wicg.github.io/file-system-access)
 
 export const EmbedderIdentifierContext = new RawContextKey<string | undefined>('embedderIdentifier', undefined, localize('embedderIdentifier', 'The identifier of the embedder according to the product service, if one is defined'));

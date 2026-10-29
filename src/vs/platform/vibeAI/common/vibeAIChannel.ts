@@ -6,7 +6,7 @@
 import { Emitter, Event } from '../../../base/common/event.js';
 import { Disposable, DisposableStore } from '../../../base/common/lifecycle.js';
 import { IChannel, IServerChannel } from '../../../base/parts/ipc/common/ipc.js';
-import { IVibeAICustomizeCreateData, IVibeAICustomizeItem, IVibeAICustomizeResult, IVibeAIChatRequest, IVibeAICompletionRequest, IVibeAIContextUsage, IVibeAIContextUsageRequest, IVibeAIDiagnostic, IVibeAIExecutePlanRequest, IVibeAIInlineEditRequest, IVibeAIModelProvider, IVibeAIService, IVibeAISkill, IVibeAIStreamData, IVibeAISubagent, VibeAICustomizeKind, VibeAICustomizeScope } from './vibeAI.js';
+import { IVibeAIBackgroundAgent, IVibeAICustomizeCreateData, IVibeAICustomizeItem, IVibeAICustomizeResult, IVibeAIChatRequest, IVibeAICompletionRequest, IVibeAIContextUsage, IVibeAIContextUsageRequest, IVibeAIDiagnostic, IVibeAIDocumentExtract, IVibeAIExecutePlanRequest, IVibeAIInlineEditRequest, IVibeAIModelProvider, IVibeAIParallelRequest, IVibeAIParallelRun, IVibeAIService, IVibeAISkill, IVibeAIStreamData, IVibeAISubagent, VibeAICustomizeKind, VibeAICustomizeScope } from './vibeAI.js';
 
 /**
  * Main process side of the VibeAI service IPC. Registered on the
@@ -45,6 +45,22 @@ export class VibeAIChannel implements IServerChannel {
 			case 'executePlanStream': {
 				const { requestId, request } = arg as { requestId: string; request: IVibeAIExecutePlanRequest };
 				return this.service.executePlanStream(requestId, request);
+			}
+			case 'parallelStream': {
+				// Phase 179: N isolated worktree agents on one prompt.
+				const { requestId, request } = arg as { requestId: string; request: IVibeAIParallelRequest };
+				return this.service.parallelStream(requestId, request);
+			}
+			case 'listParallelRuns': {
+				return this.service.listParallelRuns(typeof arg === 'string' ? arg : undefined);
+			}
+			case 'mergeParallelRun': {
+				const { workspaceRoot, runId, index } = arg as { workspaceRoot?: string; runId: string; index: number };
+				return this.service.mergeParallelRun(workspaceRoot, runId, index);
+			}
+			case 'discardParallelRun': {
+				const { workspaceRoot, runId, index } = arg as { workspaceRoot?: string; runId: string; index?: number };
+				return this.service.discardParallelRun(workspaceRoot, runId, index);
 			}
 			case 'cancel': {
 				this.service.cancel(arg as string);
@@ -102,6 +118,11 @@ export class VibeAIChannel implements IServerChannel {
 				// input `/` completion menu (explicit /name dispatch).
 				return this.service.listSubagents(typeof arg === 'string' ? arg : undefined);
 			}
+			case 'listBackgroundAgents': {
+				// Phase 176: every session's background subagents (registry
+				// read-only snapshot) for the Agents Hub Background section.
+				return this.service.listBackgroundAgents();
+			}
 			case 'customizeList': {
 				// Phase 142: the Settings editor's Rules / Skills / MCP
 				// pages — one generic list call (dual-scope merged items).
@@ -124,6 +145,12 @@ export class VibeAIChannel implements IServerChannel {
 			case 'reloadMcp': {
 				// Phase 142: hot-reload after mcp.json changes.
 				return this.service.reloadMcp(typeof arg === 'string' ? arg : undefined);
+			}
+			case 'extractDocument': {
+				// Phase 171: document chip extraction (PDF / Word / Excel /
+				// PPT → text) for the chat composer's drop pipeline.
+				const { filename, contentBase64 } = arg as { filename: string; contentBase64: string };
+				return this.service.extractDocument({ filename, contentBase64 });
 			}
 		}
 
@@ -170,6 +197,24 @@ export class VibeAIClient extends Disposable implements IVibeAIService {
 
 	executePlanStream(requestId: string, request: IVibeAIExecutePlanRequest): Promise<void> {
 		return this.channel.call('executePlanStream', { requestId, request });
+	}
+
+	parallelStream(requestId: string, request: IVibeAIParallelRequest): Promise<void> {
+		// Phase 179: N isolated worktree agents on one prompt; events ride
+		// onStreamData stamped with `parallel` (runId / index / total).
+		return this.channel.call('parallelStream', { requestId, request });
+	}
+
+	listParallelRuns(workspaceRoot?: string): Promise<IVibeAIParallelRun[]> {
+		return this.channel.call<IVibeAIParallelRun[]>('listParallelRuns', workspaceRoot);
+	}
+
+	mergeParallelRun(workspaceRoot: string | undefined, runId: string, index: number): Promise<{ ok: boolean; error?: string }> {
+		return this.channel.call<{ ok: boolean; error?: string }>('mergeParallelRun', { workspaceRoot, runId, index });
+	}
+
+	discardParallelRun(workspaceRoot: string | undefined, runId: string, index?: number): Promise<{ ok: boolean; error?: string }> {
+		return this.channel.call<{ ok: boolean; error?: string }>('discardParallelRun', { workspaceRoot, runId, index });
 	}
 
 	cancel(requestId: string): void {
@@ -229,6 +274,11 @@ export class VibeAIClient extends Disposable implements IVibeAIService {
 		return this.channel.call<IVibeAISubagent[]>('listSubagents', workspaceRoot);
 	}
 
+	listBackgroundAgents(): Promise<IVibeAIBackgroundAgent[]> {
+		// Phase 176: Agents Hub Background section (registry snapshot).
+		return this.channel.call<IVibeAIBackgroundAgent[]>('listBackgroundAgents');
+	}
+
 	customizeList(kind: VibeAICustomizeKind, workspaceRoot?: string): Promise<IVibeAICustomizeItem[]> {
 		return this.channel.call<IVibeAICustomizeItem[]>('customizeList', { kind, workspaceRoot });
 	}
@@ -247,6 +297,10 @@ export class VibeAIClient extends Disposable implements IVibeAIService {
 
 	reloadMcp(workspaceRoot?: string): Promise<IVibeAICustomizeResult> {
 		return this.channel.call<IVibeAICustomizeResult>('reloadMcp', workspaceRoot);
+	}
+
+	extractDocument(request: { filename: string; contentBase64: string }): Promise<IVibeAIDocumentExtract> {
+		return this.channel.call<IVibeAIDocumentExtract>('extractDocument', request);
 	}
 }
 

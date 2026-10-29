@@ -281,6 +281,19 @@ export abstract class AbstractNativeEnvironmentService implements INativeEnviron
 		return joinPath(this.appSettingsHome, 'agent-sessions.code-workspace');
 	}
 
+	/**
+	 * VibeCoding fork: the neutral workspace every Agent Window (title-bar
+	 * pill, Cursor parity) opens on. A dedicated workspace file keeps the
+	 * window's UI-state storage (hidden IDE parts, open tabs) private to
+	 * agent windows instead of polluting the project folder's bucket, while
+	 * conversations themselves live in application storage. Created on
+	 * demand when the first agent window opens.
+	 */
+	@memoize
+	get vibeAgentWindowWorkspace(): URI {
+		return joinPath(this.appSettingsHome, 'vibe-agent-window.code-workspace');
+	}
+
 	get editSessionId(): string | undefined { return this.args['editSessionId']; }
 
 	get exportPolicyData(): string | undefined {

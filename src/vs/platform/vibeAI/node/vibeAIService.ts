@@ -8,7 +8,7 @@ import { Disposable } from '../../../base/common/lifecycle.js';
 import { timeout } from '../../../base/common/async.js';
 import { ILogService } from '../../log/common/log.js';
 import { IProductService } from '../../product/common/productService.js';
-import { IVibeAICustomizeCreateData, IVibeAICustomizeItem, IVibeAICustomizeResult, IVibeAIChatRequest, IVibeAICompletionRequest, IVibeAIContextUsage, IVibeAIContextUsageRequest, IVibeAIDiagnostic, IVibeAIExecutePlanRequest, IVibeAIInlineEditRequest, IVibeAIModelProvider, IVibeAIPlan, IVibeAIPlanStep, IVibeAIQuestion, IVibeAIService, IVibeAISkill, IVibeAIStreamData, IVibeAISubagent, VIBE_AI_DEFAULT_BACKEND_URL, VibeAICustomizeKind, VibeAICustomizeScope } from '../common/vibeAI.js';
+import { IVibeAIBackgroundAgent, IVibeAICustomizeCreateData, IVibeAICustomizeItem, IVibeAICustomizeResult, IVibeAIChatRequest, IVibeAICompletionRequest, IVibeAIContextUsage, IVibeAIContextUsageRequest, IVibeAIDiagnostic, IVibeAIDocumentExtract, IVibeAIExecutePlanRequest, IVibeAIInlineEditRequest, IVibeAIModelProvider, IVibeAIParallelRequest, IVibeAIParallelRun, IVibeAIPlan, IVibeAIPlanStep, IVibeAIQuestion, IVibeAIService, IVibeAISkill, IVibeAIStreamData, IVibeAISubagent, VIBE_AI_DEFAULT_BACKEND_URL, VibeAICustomizeKind, VibeAICustomizeScope } from '../common/vibeAI.js';
 import { ChildProcess, spawn } from 'child_process';
 import * as os from 'os';
 import { existsSync, rmSync, writeFileSync } from 'fs';
@@ -528,6 +528,65 @@ export class VibeAIService extends Disposable implements IVibeAIService {
 		return this.doStream(requestId, `${this.backendUrl}/api/chat/agent/execute`, request);
 	}
 
+	/**
+	 * Phase 179 (parallel agents, Cursor multi-agent parity): the same
+	 * prompt in one isolated git worktree per variant
+	 * (`POST /api/chat/agent/parallel`). Every SSE frame is a tagged event
+	 * (runId / agentIndex / agentTotal via the backend) — the parallel_*
+	 * lifecycle events plus each variant's pass-through agent events —
+	 * normalized into {@link IVibeAIStreamData.parallel} and reported via
+	 * {@link IVibeAIService.onStreamData}.
+	 */
+	async parallelStream(requestId: string, request: IVibeAIParallelRequest): Promise<void> {
+		const controller = new AbortController();
+		this.activeStreams.set(requestId, controller);
+		try {
+			const response = await fetch(`${this.backendUrl}/api/chat/agent/parallel`, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({
+					prompt: request.prompt,
+					variants: request.variants,
+					contextLimit: request.contextLimit,
+					permission_mode: request.permissionMode,
+					images: request.images,
+					project_root: request.workspaceRoot,
+				}),
+				signal: controller.signal
+			});
+			if (!response.ok || !response.body) {
+				// Same detail extraction as doStream: FastAPI errors carry a
+				// JSON `detail` (400 專案不是 git 工作區 / 沒有變體 / …).
+				let detail = '';
+				try {
+					const body = await response.json() as { detail?: unknown };
+					if (typeof body?.detail === 'string' && body.detail.length > 0) {
+						detail = body.detail;
+					}
+				} catch {
+					// Non-JSON error body — fall back to the status line.
+				}
+				const message = detail.length > 0 ? detail : `VibeAI backend request failed (HTTP ${response.status})`;
+				this.logService.warn(`[VibeAI] ${message}`);
+				this._onStreamData.fire({ requestId, type: 'error', message, retryable: false });
+				this._onStreamData.fire({ requestId, type: 'done' });
+				return;
+			}
+			await this.pumpSSE(requestId, response);
+			this._onStreamData.fire({ requestId, type: 'done' });
+		} catch (error) {
+			if (controller.signal.aborted) {
+				this._onStreamData.fire({ requestId, type: 'done' });
+			} else {
+				this.logService.error('[VibeAI] parallel stream failed', error);
+				this._onStreamData.fire({ requestId, type: 'error', message: String(error), retryable: true });
+				this._onStreamData.fire({ requestId, type: 'done' });
+			}
+		} finally {
+			this.activeStreams.delete(requestId);
+		}
+	}
+
 	cancel(requestId: string): void {
 		this.activeStreams.get(requestId)?.abort();
 	}
@@ -913,6 +972,128 @@ export class VibeAIService extends Disposable implements IVibeAIService {
 		}
 	}
 
+	async listBackgroundAgents(): Promise<IVibeAIBackgroundAgent[]> {
+		// `@router.get("/agent/background")` under prefix `/api/chat` —
+		// Phase 176: every session's background subagents (registry read-
+		// only snapshot) for the Agents Hub's Background section.
+		const controller = new AbortController();
+		const timeout = setTimeout(() => controller.abort(), 10000);
+		try {
+			const response = await fetch(`${this.backendUrl}/api/chat/agent/background`, {
+				signal: controller.signal
+			});
+			if (!response.ok) {
+				throw new Error(`VibeAI backend background agents request failed (HTTP ${response.status})`);
+			}
+			const data = await response.json() as { agents?: IVibeAIBackgroundAgent[] };
+			return Array.isArray(data.agents) ? data.agents : [];
+		} finally {
+			clearTimeout(timeout);
+		}
+	}
+
+	async listParallelRuns(workspaceRoot?: string): Promise<IVibeAIParallelRun[]> {
+		// `@router.get("/agent/parallel/list")` under prefix `/api/chat` —
+		// Phase 179: this workspace's parallel runs (worktree registry
+		// snapshot; survives backend restarts) for the Agents Hub's
+		// Parallel runs section.
+		const controller = new AbortController();
+		const timeout = setTimeout(() => controller.abort(), 10000);
+		try {
+			const query = workspaceRoot ? `?project_root=${encodeURIComponent(workspaceRoot)}` : '';
+			const response = await fetch(`${this.backendUrl}/api/chat/agent/parallel/list${query}`, {
+				signal: controller.signal
+			});
+			if (!response.ok) {
+				throw new Error(`VibeAI backend parallel runs request failed (HTTP ${response.status})`);
+			}
+			const data = await response.json() as { runs?: unknown[] };
+			return (Array.isArray(data.runs) ? data.runs : [])
+				.map(run => this.normalizeParallelRun(run))
+				.filter((run): run is IVibeAIParallelRun => run !== undefined);
+		} finally {
+			clearTimeout(timeout);
+		}
+	}
+
+	async mergeParallelRun(workspaceRoot: string | undefined, runId: string, index: number): Promise<{ ok: boolean; error?: string }> {
+		// `@router.post("/agent/parallel/merge")` — Phase 179: pick this
+		// variant (git merge --no-ff into the main workspace). Merge
+		// failure is a business outcome, not an HTTP error: the backend
+		// answers 200 {ok: false, error} and keeps the worktree.
+		const controller = new AbortController();
+		const timeout = setTimeout(() => controller.abort(), 30000);
+		try {
+			const response = await fetch(`${this.backendUrl}/api/chat/agent/parallel/merge`, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ project_root: workspaceRoot, run_id: runId, index }),
+				signal: controller.signal
+			});
+			const payload = await response.json().catch(() => undefined) as { ok?: boolean; error?: string } | undefined;
+			if (!response.ok) {
+				throw new Error((payload as { detail?: string })?.detail ?? `VibeAI parallel merge failed (HTTP ${response.status})`);
+			}
+			return { ok: payload?.ok === true, error: typeof payload?.error === 'string' ? payload.error : undefined };
+		} finally {
+			clearTimeout(timeout);
+		}
+	}
+
+	async discardParallelRun(workspaceRoot: string | undefined, runId: string, index?: number): Promise<{ ok: boolean; error?: string }> {
+		// `@router.post("/agent/parallel/discard")` — Phase 179: drop one
+		// variant (or the whole run when `index` is omitted): worktree +
+		// branch removal, registry entry updated / deleted.
+		const controller = new AbortController();
+		const timeout = setTimeout(() => controller.abort(), 30000);
+		try {
+			const response = await fetch(`${this.backendUrl}/api/chat/agent/parallel/discard`, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ project_root: workspaceRoot, run_id: runId, index }),
+				signal: controller.signal
+			});
+			const payload = await response.json().catch(() => undefined) as { ok?: boolean; error?: string } | undefined;
+			if (!response.ok) {
+				throw new Error((payload as { detail?: string })?.detail ?? `VibeAI parallel discard failed (HTTP ${response.status})`);
+			}
+			return { ok: payload?.ok === true, error: typeof payload?.error === 'string' ? payload.error : undefined };
+		} finally {
+			clearTimeout(timeout);
+		}
+	}
+
+	async extractDocument(request: { filename: string; contentBase64: string }): Promise<IVibeAIDocumentExtract> {
+		// `@router.post("/extract-document")` under prefix `/api/files` —
+		// Phase 171 document chips (PDF / Word / Excel / PPT → text). A
+		// big document can take a while to parse, hence the long timeout;
+		// error bodies carry a user-readable `message` (legacy format /
+		// encrypted / broken file), which is what the pane surfaces.
+		const controller = new AbortController();
+		const timeout = setTimeout(() => controller.abort(), 60000);
+		try {
+			const response = await fetch(`${this.backendUrl}/api/files/extract-document`, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({
+					filename: request.filename,
+					content_base64: request.contentBase64,
+				}),
+				signal: controller.signal
+			});
+			const payload = await response.json().catch(() => undefined) as { data?: IVibeAIDocumentExtract; message?: string } | undefined;
+			if (!response.ok) {
+				throw new Error(payload?.message ?? `VibeAI document extraction failed (HTTP ${response.status})`);
+			}
+			if (!payload?.data) {
+				throw new Error('VibeAI document extraction returned no data');
+			}
+			return payload.data;
+		} finally {
+			clearTimeout(timeout);
+		}
+	}
+
 	async customizeList(kind: VibeAICustomizeKind, workspaceRoot?: string): Promise<IVibeAICustomizeItem[]> {
 		// `@router.get("/{kind}")` under prefix `/api/customize` — the merged
 		// dual-scope list for the Settings → Rules / Skills / MCP pages
@@ -1056,6 +1237,11 @@ export class VibeAIService extends Disposable implements IVibeAIService {
 		// carries the Auto-routing fields) — narrow per field group.
 		const chat = request as IVibeAIChatRequest;
 		const execute = request as IVibeAIExecutePlanRequest;
+		// Phase 176: the conversation session id rides EVERY stream event
+		// (stamped in handleSSEFrame + the local error/done fires below) so
+		// the Agents Hub can show live per-session progress. The pane keeps
+		// routing by requestId — this is additive metadata.
+		const sessionId = chat.sessionId;
 		const controller = new AbortController();
 		this.activeStreams.set(requestId, controller);
 		try {
@@ -1137,36 +1323,16 @@ export class VibeAIService extends Disposable implements IVibeAIService {
 				// 4xx responses are actionable config errors (e.g. 400
 				// 沒有模型可用) where re-sending cannot help, so they
 				// keep no button.
-				this._onStreamData.fire({ requestId, type: 'error', message, retryable: response.status >= 500 });
-				this._onStreamData.fire({ requestId, type: 'done' });
+				this._onStreamData.fire({ requestId, sessionId, type: 'error', message, retryable: response.status >= 500 });
+				this._onStreamData.fire({ requestId, sessionId, type: 'done' });
 				return;
 			}
 
-			const reader = response.body.getReader();
-			const decoder = new TextDecoder('utf-8');
-			let buffer = '';
-			while (true) {
-				const { done, value } = await reader.read();
-				if (done) {
-					break;
-				}
-				buffer += decoder.decode(value, { stream: true });
-
-				let separatorIndex: number;
-				while ((separatorIndex = buffer.indexOf('\n\n')) >= 0) {
-					const frame = buffer.substring(0, separatorIndex);
-					buffer = buffer.substring(separatorIndex + 2);
-					this.handleSSEFrame(requestId, frame);
-				}
-			}
-			buffer += decoder.decode();
-			if (buffer.trim().length > 0) {
-				this.handleSSEFrame(requestId, buffer);
-			}
-			this._onStreamData.fire({ requestId, type: 'done' });
+			await this.pumpSSE(requestId, response, sessionId);
+			this._onStreamData.fire({ requestId, sessionId, type: 'done' });
 		} catch (error) {
 			if (controller.signal.aborted) {
-				this._onStreamData.fire({ requestId, type: 'done' });
+				this._onStreamData.fire({ requestId, sessionId, type: 'done' });
 			} else {
 				this.logService.error('[VibeAI] stream failed', error);
 				// Phase 154: transport-level interruptions (timeout, flaky
@@ -1177,15 +1343,48 @@ export class VibeAIService extends Disposable implements IVibeAIService {
 				// renders its Phase 134 Retry button and the turn can be
 				// re-sent instead of retyped (normalizeEvent keeps the
 				// backend's own SSE classification for in-band errors).
-				this._onStreamData.fire({ requestId, type: 'error', message: String(error), retryable: true });
-				this._onStreamData.fire({ requestId, type: 'done' });
+				this._onStreamData.fire({ requestId, sessionId, type: 'error', message: String(error), retryable: true });
+				this._onStreamData.fire({ requestId, sessionId, type: 'done' });
 			}
 		} finally {
 			this.activeStreams.delete(requestId);
 		}
 	}
 
-	private handleSSEFrame(requestId: string, frame: string): void {
+	/**
+	 * Drain an SSE response body, splitting on the `\n\n` frame separator
+	 * and feeding every frame to {@link handleSSEFrame}. Shared by
+	 * {@link doStream} and {@link parallelStream} (Phase 179) — the two
+	 * endpoints emit the same `data: {json}\n\n` framing.
+	 */
+	private async pumpSSE(requestId: string, response: Response, sessionId?: string): Promise<void> {
+		if (!response.body) {
+			return;
+		}
+		const reader = response.body.getReader();
+		const decoder = new TextDecoder('utf-8');
+		let buffer = '';
+		while (true) {
+			const { done, value } = await reader.read();
+			if (done) {
+				break;
+			}
+			buffer += decoder.decode(value, { stream: true });
+
+			let separatorIndex: number;
+			while ((separatorIndex = buffer.indexOf('\n\n')) >= 0) {
+				const frame = buffer.substring(0, separatorIndex);
+				buffer = buffer.substring(separatorIndex + 2);
+				this.handleSSEFrame(requestId, frame, sessionId);
+			}
+		}
+		buffer += decoder.decode();
+		if (buffer.trim().length > 0) {
+			this.handleSSEFrame(requestId, buffer, sessionId);
+		}
+	}
+
+	private handleSSEFrame(requestId: string, frame: string, sessionId?: string): void {
 		for (const line of frame.split('\n')) {
 			const trimmed = line.trim();
 			if (!trimmed.startsWith('data: ')) {
@@ -1200,7 +1399,9 @@ export class VibeAIService extends Disposable implements IVibeAIService {
 			try {
 				const event = JSON.parse(payload);
 				for (const data of this.normalizeEvent(requestId, event)) {
-					this._onStreamData.fire(data);
+					// Phase 176: stamp the conversation session id onto every
+					// event (Agents Hub live progress; pane routes by requestId).
+					this._onStreamData.fire(sessionId ? { ...data, sessionId } : data);
 				}
 			} catch {
 				this.logService.debug(`[VibeAI] failed to parse SSE payload: ${payload}`);
@@ -1245,6 +1446,20 @@ export class VibeAIService extends Disposable implements IVibeAIService {
 	}
 
 	private normalizeEvent(requestId: string, event: any): IVibeAIStreamData[] {
+		const result = this.normalizeTypedEvent(requestId, event);
+		// Phase 179: the parallel endpoint tags EVERY event with
+		// runId / agentIndex / agentTotal — stamp them onto the mapped
+		// data so consumers can route per variant. The typed parallel_*
+		// events already carry a richer `parallel` (their own case keeps
+		// it via the spread order).
+		if (typeof event?.runId === 'string' && typeof event?.agentIndex === 'number') {
+			const total = typeof event?.agentTotal === 'number' ? event.agentTotal : 0;
+			return result.map(data => ({ ...data, parallel: { runId: event.runId, index: event.agentIndex, total, ...(data.parallel ?? {}) } }));
+		}
+		return result;
+	}
+
+	private normalizeTypedEvent(requestId: string, event: any): IVibeAIStreamData[] {
 		// Backend error payload: { "error": string, "retryable"?: boolean }
 		if (typeof event?.error === 'string') {
 			return [{ requestId, type: 'error', message: event.error, retryable: event.retryable === true }];
@@ -1539,6 +1754,55 @@ export class VibeAIService extends Disposable implements IVibeAIService {
 					final: event.final === true,
 					raw: event
 				}];
+			case 'parallel_agent_start':
+				// Phase 179: one parallel variant kicked off in its own
+				// git worktree (its raw agent events follow, all stamped
+				// with the same parallel meta).
+				return [{
+					requestId,
+					type: 'parallel_agent_start',
+					parallel: {
+						...this.parallelMeta(event),
+						prompt: typeof event.prompt === 'string' ? event.prompt : undefined,
+						model: typeof event.model === 'string' ? event.model : undefined,
+					},
+					raw: event
+				}];
+			case 'parallel_agent_done':
+				// Phase 179: one variant settled (done | error). The
+				// worktree was auto-committed; the result describes the
+				// base..branch diff for the hub's variant card.
+				return [{
+					requestId,
+					type: 'parallel_agent_done',
+					parallel: {
+						...this.parallelMeta(event),
+						status: typeof event.status === 'string' ? event.status : undefined,
+						model: typeof event.model === 'string' ? event.model : undefined,
+						summary: typeof event.summary === 'string' ? event.summary : undefined,
+						error: typeof event.error === 'string' ? event.error : undefined,
+						changedFiles: Array.isArray(event.changed_files)
+							? event.changed_files.filter((f: unknown): f is string => typeof f === 'string')
+							: undefined,
+						diffStat: typeof event.diff_stat === 'string' ? event.diff_stat : undefined,
+						committed: event.committed === true ? true : event.committed === false ? false : undefined,
+					},
+					raw: event
+				}];
+			case 'parallel_done':
+				// Phase 179: every variant settled — the full sanitized run
+				// snapshot (same shape as GET /agent/parallel/list items).
+				return [{
+					requestId,
+					type: 'parallel_done',
+					parallel: {
+						runId: typeof event.runId === 'string' ? event.runId : '',
+						index: -1,
+						total: typeof event.agentTotal === 'number' ? event.agentTotal : 0,
+						runs: this.normalizeParallelRun(event.runs),
+					},
+					raw: event
+				}];
 			case 'done':
 				// Phase 113: steers queued but never injected (the turn
 				// ended without a tool boundary to drain them) ride the
@@ -1563,6 +1827,46 @@ export class VibeAIService extends Disposable implements IVibeAIService {
 			default:
 				return [{ requestId, type: 'unknown', raw: event }];
 		}
+	}
+
+	/** Phase 179: the runId/agentIndex/agentTotal stamp the backend puts on every parallel event. */
+	private parallelMeta(event: any): { runId: string; index: number; total: number } {
+		return {
+			runId: typeof event?.runId === 'string' ? event.runId : '',
+			index: typeof event?.agentIndex === 'number' ? event.agentIndex : 0,
+			total: typeof event?.agentTotal === 'number' ? event.agentTotal : 0,
+		};
+	}
+
+	/**
+	 * Phase 179: sanitize one backend parallel-run entry
+	 * (`{run_id, prompt, created_at, variants: [...]}`) into
+	 * {@link IVibeAIParallelRun}; anything malformed returns undefined.
+	 */
+	private normalizeParallelRun(run: any): IVibeAIParallelRun | undefined {
+		if (!run || typeof run !== 'object' || typeof run.run_id !== 'string' || !Array.isArray(run.variants)) {
+			return undefined;
+		}
+		const variants: IVibeAIParallelRun['variants'] = run.variants.map((v: any) => ({
+			index: typeof v?.index === 'number' ? v.index : 0,
+			status: typeof v?.status === 'string' ? v.status : 'unknown',
+			branch: typeof v?.branch === 'string' ? v.branch : undefined,
+			path: typeof v?.path === 'string' ? v.path : undefined,
+			model: typeof v?.model === 'string' ? v.model : undefined,
+			summary: typeof v?.summary === 'string' ? v.summary : undefined,
+			error: typeof v?.error === 'string' ? v.error : undefined,
+			changedFiles: Array.isArray(v?.changed_files)
+				? v.changed_files.filter((f: unknown): f is string => typeof f === 'string')
+				: undefined,
+			diffStat: typeof v?.diff_stat === 'string' ? v.diff_stat : undefined,
+			committed: v?.committed === true ? true : v?.committed === false ? false : undefined,
+		}));
+		return {
+			runId: run.run_id,
+			prompt: typeof run.prompt === 'string' ? run.prompt : '',
+			createdAt: typeof run.created_at === 'number' ? run.created_at : 0,
+			variants,
+		};
 	}
 }
 

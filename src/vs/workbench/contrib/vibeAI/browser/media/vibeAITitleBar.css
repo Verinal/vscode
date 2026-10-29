@@ -34,9 +34,3 @@
 	overflow: hidden;
 	text-overflow: ellipsis;
 }
-
-.vibe-ai-titlebar-pill-arrow {
-	font-size: 11px;
-	flex-shrink: 0;
-	opacity: 0.9;
-}

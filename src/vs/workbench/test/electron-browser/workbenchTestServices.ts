@@ -107,6 +107,8 @@ export class TestNativeHostService implements INativeHostService {
 
 	async openAgentsWindow(_options?: { folderUri?: UriComponents; sessionResource?: UriComponents }): Promise<void> { }
 
+	async openVibeAgentWindow(): Promise<void> { }
+
 	readonly onDidChangeAgentHostEditorState = Event.None;
 	async getAgentHostEditorState(): Promise<IAgentHostEditorState> { return { revision: 0, editorSessionCount: 0, sessions: [], lastShown: undefined, lastCopilotHarnessIntroductionSessionCount: undefined, invitation: undefined }; }
 	async updateAgentHostEditorState(): Promise<void> { }

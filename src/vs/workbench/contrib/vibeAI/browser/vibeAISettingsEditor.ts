@@ -17,6 +17,7 @@ import { INotificationService } from '../../../../platform/notification/common/n
 import { IStorageService, StorageScope } from '../../../../platform/storage/common/storage.js';
 import { ITelemetryService } from '../../../../platform/telemetry/common/telemetry.js';
 import { IThemeService } from '../../../../platform/theme/common/themeService.js';
+import { IWorkspaceContextService } from '../../../../platform/workspace/common/workspace.js';
 import { IVibeAICustomizeCreateData, IVibeAICustomizeItem, IVibeAIService, VibeAICustomizeKind, VibeAICustomizeScope } from '../../../../platform/vibeAI/common/vibeAI.js';
 import { EditorPane } from '../../../browser/parts/editor/editorPane.js';
 import { EditorInputCapabilities, IEditorOpenContext, IUntypedEditorInput } from '../../../common/editor.js';
@@ -175,6 +176,7 @@ export class VibeAISettingsEditorPane extends EditorPane {
 		@ICommandService private readonly commandService: ICommandService,
 		@IVibeAIService private readonly vibeAIService: IVibeAIService,
 		@INotificationService private readonly notificationService: INotificationService,
+		@IWorkspaceContextService private readonly contextService: IWorkspaceContextService,
 	) {
 		super(VibeAISettingsEditorPane.ID, group, telemetryService, themeService, storageService);
 		this.modelStore = new VibeAIModelStore(storageService, configurationService);
@@ -1231,7 +1233,8 @@ export class VibeAISettingsEditorPane extends EditorPane {
 		const errorEl = DOM.append(card, $('span.vibe-ai-settings-form-error'));
 		errorEl.style.display = 'none';
 
-		const scopeSelect = this.mkScopeSelect(card, 'project');
+		const hasFolder = !!this.contextService.getWorkspace().folders[0];
+		const scopeSelect = this.mkScopeSelect(card, hasFolder ? 'project' : 'global');
 		const nameInput = this.mkFormField(card,
 			localize('vibeAISettings.fieldCustomName', "Name"),
 			'',
@@ -1348,18 +1351,24 @@ export class VibeAISettingsEditorPane extends EditorPane {
 		}));
 	}
 
-	/** Scope select (project / global) for the customize add form. */
+	/** Scope select (project / global) for the customize add form (Cursor parity:
+	 * the project option is named after the open workspace root; without a
+	 * folder the project option is disabled and global is the only choice). */
 	private mkScopeSelect(card: HTMLElement, current: VibeAICustomizeScope): HTMLSelectElement {
 		const field = DOM.append(card, $('.vibe-ai-settings-field'));
 		DOM.append(field, $('label')).textContent = localize('vibeAISettings.fieldScope', "Scope");
 		const select = DOM.append(field, $('select.vibe-ai-settings-input')) as HTMLSelectElement;
-		for (const [value, label] of [
-			['project', localize('vibeAISettings.scopeProject', "Project (.vibe, this workspace)")],
-			['global', localize('vibeAISettings.scopeGlobal', "Global (~/.vibe, every workspace)")],
+		const folder = this.contextService.getWorkspace().folders[0];
+		for (const [value, label, disabled] of [
+			['project', folder
+				? localize('vibeAISettings.scopeProject', "Project ({0})", folder.name)
+				: localize('vibeAISettings.scopeProjectNoFolder', "Project (no folder open)"), !folder],
+			['global', localize('vibeAISettings.scopeGlobal', "Global (every workspace)"), false],
 		] as const) {
 			const option = DOM.append(select, $('option')) as HTMLOptionElement;
 			option.value = value;
 			option.textContent = label;
+			option.disabled = disabled;
 		}
 		select.value = current;
 		return select;

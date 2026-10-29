@@ -20,7 +20,6 @@ import { IAction } from '../../../../base/common/actions.js';
 import { BaseActionViewItem, IBaseActionViewItemOptions } from '../../../../base/browser/ui/actionbar/actionViewItems.js';
 import { IActionViewItemService } from '../../../../platform/actions/browser/actionViewItemService.js';
 import { ICommandService } from '../../../../platform/commands/common/commands.js';
-import { AgentsWindowOpenSource } from '../../../../platform/window/common/window.js';
 import { IStatusbarService, StatusbarAlignment } from '../../../services/statusbar/browser/statusbar.js';
 import { ICodeEditorService } from '../../../../editor/browser/services/codeEditorService.js';
 import { EditorContextKeys } from '../../../../editor/common/editorContextKeys.js';
@@ -29,13 +28,16 @@ import { IConfigurationService } from '../../../../platform/configuration/common
 import { Extensions as ConfigurationExtensions, IConfigurationRegistry } from '../../../../platform/configuration/common/configurationRegistry.js';
 import { Action2, MenuId, registerAction2 } from '../../../../platform/actions/common/actions.js';
 import { ContextKeyExpr, IContextKeyService } from '../../../../platform/contextkey/common/contextkey.js';
-import { IsAuxiliaryWindowContext, IsSessionsWindowContext } from '../../../common/contextkeys.js';
-import { OPEN_WORKSPACE_IN_AGENTS_WINDOW_COMMAND_ID } from '../../chat/common/constants.js';
+import { IsAuxiliaryWindowContext, IsSessionsWindowContext, IsVibeAgentWindowContext } from '../../../common/contextkeys.js';
 import { SyncDescriptor } from '../../../../platform/instantiation/common/descriptors.js';
 import { IInstantiationService, ServicesAccessor } from '../../../../platform/instantiation/common/instantiation.js';
 import { ILogService } from '../../../../platform/log/common/log.js';
 import { INotificationService } from '../../../../platform/notification/common/notification.js';
-import { IStorageService } from '../../../../platform/storage/common/storage.js';
+import { IWorkbenchEnvironmentService } from '../../../services/environment/common/environmentService.js';
+import { INativeHostService } from '../../../../platform/native/common/native.js';
+import { IStorageService, StorageScope, StorageTarget } from '../../../../platform/storage/common/storage.js';
+import { IWorkspaceContextService } from '../../../../platform/workspace/common/workspace.js';
+import { URI } from '../../../../base/common/uri.js';
 import { KeybindingWeight } from '../../../../platform/keybinding/common/keybindingsRegistry.js';
 import { Registry } from '../../../../platform/registry/common/platform.js';
 import { registerIcon } from '../../../../platform/theme/common/iconRegistry.js';
@@ -50,6 +52,7 @@ import {
 	ViewContainerLocation,
 } from '../../../common/views.js';
 import { IViewsService } from '../../../services/views/common/viewsService.js';
+import { IWorkbenchLayoutService, Parts } from '../../../services/layout/browser/layoutService.js';
 import { IVibeAIStats } from './vibeAIStats.js';
 import { VibeAIChatPane } from './vibeAIChatPane.js';
 import { VibeAISettingsEditorInput, VibeAISettingsEditorPane } from './vibeAISettingsEditor.js';
@@ -60,7 +63,10 @@ import { IEditorService } from '../../../services/editor/common/editorService.js
 import { VibeAIInlineCompletionProvider } from './vibeAIInlineCompletion.js';
 import { startVibeAIInlineEdit } from './vibeAIInlineEdit.js';
 import { VIBE_AI_NO_MODEL_MESSAGE, VibeAIModelStore } from './vibeAIModelStore.js';
+import { AGENT_WINDOW_PROJECT_STORAGE_KEY, VibeAIAgentsHubInput, VibeAIAgentsHubPane } from './vibeAIAgentsHub.js';
+import { VIBE_AI_HANDOFF_MAX_AGE_MS, VIBE_AI_HANDOFF_STORAGE_KEY, VibeAIChatSessionStore, parseVibeAIChatHandoff } from './vibeAIChatSessionStore.js';
 import './media/vibeAITitleBar.css';
+import './media/vibeAIAgentsHub.css';
 
 const CONTAINER_ID = 'workbench.view.vibeAI';
 const VIEW_ID = VibeAIChatPane.ID;
@@ -126,11 +132,13 @@ class VibeAIAutoOpenChatContribution extends Disposable implements IWorkbenchCon
 	) {
 		super();
 
-		// The Agents (sessions) window has its own chat surface and
-		// auxiliary windows are floating editor panes — the auto-open
-		// targets main editor windows only.
+		// The Agents (sessions) window has its own chat surface, auxiliary
+		// windows are floating editor panes, and the standalone agent window
+		// lands in the Agents hub instead (Phase 177) — none of them
+		// auto-open the chat sidebar view.
 		if (contextKeyService.getContextKeyValue<boolean>(IsSessionsWindowContext.key)
-			|| contextKeyService.getContextKeyValue<boolean>(IsAuxiliaryWindowContext.key)) {
+			|| contextKeyService.getContextKeyValue<boolean>(IsAuxiliaryWindowContext.key)
+			|| contextKeyService.getContextKeyValue<boolean>(IsVibeAgentWindowContext.key)) {
 			return;
 		}
 
@@ -465,7 +473,46 @@ Registry.as<IEditorFactoryRegistry>(EditorExtensions.EditorFactory).registerEdit
 	VibeAISettingsEditorInputSerializer
 );
 
-// ==================== Cursor parity: "Agents Window" title bar pill ====================
+// ==================== Agents Hub editor registration (Phase 176) ====================
+
+Registry.as<IEditorPaneRegistry>(EditorExtensions.EditorPane).registerEditorPane(
+	EditorPaneDescriptor.create(
+		VibeAIAgentsHubPane,
+		VibeAIAgentsHubPane.ID,
+		localize('vibeAIAgentsHubEditor', "VibeAI Agents Hub")
+	),
+	[
+		// Singleton input, same pattern as the settings editor above.
+		new SyncDescriptor(VibeAIAgentsHubInput as unknown as { new(): VibeAIAgentsHubInput })
+	]
+);
+
+class VibeAIAgentsHubInputSerializer implements IEditorSerializer {
+	canSerialize(editorInput: EditorInput): boolean {
+		return editorInput instanceof VibeAIAgentsHubInput;
+	}
+
+	serialize(input: VibeAIAgentsHubInput): string {
+		return '';
+	}
+
+	deserialize(instantiationService: IInstantiationService): VibeAIAgentsHubInput | undefined {
+		// Phase 181 r6: the hub is the agent window's whole UI — it must
+		// never restore as an editor tab inside a normal IDE window.
+		const environmentService = instantiationService.invokeFunction(accessor => accessor.get(IWorkbenchEnvironmentService));
+		if (!environmentService.isVibeAgentWindow) {
+			return undefined;
+		}
+		return VibeAIAgentsHubInput.getOrCreate();
+	}
+}
+
+Registry.as<IEditorFactoryRegistry>(EditorExtensions.EditorFactory).registerEditorSerializer(
+	VibeAIAgentsHubInput.ID,
+	VibeAIAgentsHubInputSerializer
+);
+
+// ==================== Cursor parity: "Agents" title bar pill ====================
 
 class VibeAIOpenAgentsWindowAction extends Action2 {
 	static readonly ID = 'vibeAI.openAgentsWindow';
@@ -473,31 +520,212 @@ class VibeAIOpenAgentsWindowAction extends Action2 {
 	constructor() {
 		super({
 			id: VibeAIOpenAgentsWindowAction.ID,
-			title: localize2('vibeAI.openAgentsWindow', "Agents Window"),
-			tooltip: localize('vibeAI.openAgentsWindowTooltip', "Open the Agents Window for the current workspace"),
+			title: localize2('vibeAI.openAgentsWindow', "Agents"),
+			tooltip: localize('vibeAI.openAgentsWindowTooltip', "Open the Agents hub — parallel agent sessions for this workspace"),
 			icon: Codicon.sparkle,
 			f1: false,
 			menu: [{
 				id: MenuId.TitleBar,
 				group: 'navigation',
 				order: 1,
-				when: IsAuxiliaryWindowContext.toNegated(),
+				// Hidden inside the agent window itself (that window lives in
+				// the hub) and in auxiliary windows.
+				when: ContextKeyExpr.and(IsAuxiliaryWindowContext.toNegated(), IsVibeAgentWindowContext.toNegated()),
 			}],
 		});
 	}
 
 	async run(accessor: ServicesAccessor): Promise<void> {
-		// Cursor-parity "Agents Window ↗": opens the Agents Window for the current
-		// workspace (same flow as the built-in title bar entry).
-		await accessor.get(ICommandService).executeCommand(OPEN_WORKSPACE_IN_AGENTS_WINDOW_COMMAND_ID, { source: AgentsWindowOpenSource.TitleBar });
+		const nativeHostService = accessor.get(INativeHostService);
+		const notificationService = accessor.get(INotificationService);
+		const storageService = accessor.get(IStorageService);
+		const contextService = accessor.get(IWorkspaceContextService);
+
+		// Phase 176 (Cursor parity): opens the fork's own Agents surface —
+		// the multi-session dashboard over the VibeCoding backend (not the
+		// upstream Agents Window, whose agent stack is Claude / Codex /
+		// Copilot CLI behind a GitHub sign-in gate, entirely separate from
+		// this fork's backend).
+		//
+		// Phase 177 (Cursor parity): it opens as a real standalone agent
+		// window — a dedicated neutral workspace whose renderer hides the
+		// IDE chrome and lands directly in the Agents hub. The current
+		// folder rides along through application storage, because the agent
+		// window's workspace context is neutral on purpose (opening the
+		// folder itself there would share workspace storage with this IDE
+		// window and its layout state).
+		const folder = contextService.getWorkspace().folders[0];
+		if (folder) {
+			storageService.store(AGENT_WINDOW_PROJECT_STORAGE_KEY, folder.uri.fsPath, StorageScope.APPLICATION, StorageTarget.MACHINE);
+		}
+		// Phase 181 r6: no in-window fallback — the Agents window is a
+		// separate app instance on its own neutral workspace (Cursor
+		// parity). Opening the hub as an editor tab inside the IDE would
+		// blur the two surfaces into one UI, exactly what must not happen.
+		try {
+			await nativeHostService.openVibeAgentWindow();
+		} catch (error) {
+			notificationService.error(localize('vibeAI.openAgentWindowFailed', "Opening the Agents window failed: {0}", String(error)));
+		}
 	}
 }
 
 registerAction2(VibeAIOpenAgentsWindowAction);
 
+// ==================== Agent window: "IDE ↗" jump (Phase 177) ====================
+
 /**
- * Renders the "Agents Window" title bar entry as a Cursor-style blue pill
- * with a label and a ↗ arrow.
+ * The agent window's "IDE ↗" button: opens the hub's resolved project
+ * folder in a normal IDE window (native openWindow reuses a window that
+ * already shows the folder, mirroring Cursor's IDE jump).
+ */
+class VibeAIAgentWindowOpenIdeAction extends Action2 {
+	static readonly ID = 'vibeAI.agentWindow.openIde';
+
+	constructor() {
+		super({
+			id: VibeAIAgentWindowOpenIdeAction.ID,
+			title: localize2('vibeAI.agentWindow.openIde', "Open in IDE"),
+			f1: false,
+		});
+	}
+
+	async run(accessor: ServicesAccessor, folderUri?: URI): Promise<void> {
+		const nativeHostService = accessor.get(INativeHostService);
+		await nativeHostService.openWindow(folderUri ? [{ folderUri }] : []);
+	}
+}
+
+registerAction2(VibeAIAgentWindowOpenIdeAction);
+
+// ==================== Agent window bootstrap (Phase 177) ====================
+
+/**
+ * Sets up the standalone agent window renderer: hide the IDE chrome
+ * (activity bar, sidebar, bottom panel — the status bar stays, it carries
+ * the VibeAI stats) and land the window directly in the Agents hub editor.
+ * The chat sidebar still opens on demand when a conversation is started
+ * from the hub composer or a thread row.
+ */
+class VibeAIAgentWindowBootstrapContribution extends Disposable implements IWorkbenchContribution {
+	static readonly ID = 'workbench.contrib.vibeAIAgentWindowBootstrap';
+
+	constructor(
+		@IContextKeyService contextKeyService: IContextKeyService,
+		@IWorkbenchLayoutService layoutService: IWorkbenchLayoutService,
+		@IEditorService editorService: IEditorService,
+		@ILogService logService: ILogService,
+	) {
+		super();
+
+		if (!contextKeyService.getContextKeyValue<boolean>(IsVibeAgentWindowContext.key)) {
+			return;
+		}
+
+		layoutService.setPartHidden(true, Parts.ACTIVITYBAR_PART);
+		layoutService.setPartHidden(true, Parts.SIDEBAR_PART);
+		layoutService.setPartHidden(true, Parts.PANEL_PART);
+		// Phase 181 (Cursor shell parity): the agent window has no status
+		// bar, no editor tab bar and no centered window title — the workbench
+		// reads like a standalone app (CSS side: media/vibeAIAgentsHub.css).
+		layoutService.setPartHidden(true, Parts.STATUSBAR_PART);
+		// Phase 181 r7 (user: 「右邊是不可能出現對話框的」): the right-hand
+		// chat panel is IDE-only — the agent window's single composer is the
+		// hub's center one. A restored auxiliary bar would resurrect the
+		// "New Agent" chat, so hide it like the other chrome.
+		layoutService.setPartHidden(true, Parts.AUXILIARYBAR_PART);
+		layoutService.getContainer(window).classList.add('vibe-agent-window');
+
+		editorService.openEditor(VibeAIAgentsHubInput.getOrCreate(), { pinned: true }).then(
+			() => {
+				logService.trace('[vibeAI] agent window landed in the Agents hub');
+				// Phase 181 r2: restored panels re-show themselves after the
+				// initial hide — re-assert once the workbench settled.
+				setTimeout(() => {
+					layoutService.setPartHidden(true, Parts.PANEL_PART);
+					layoutService.setPartHidden(true, Parts.AUXILIARYBAR_PART);
+				}, 1000);
+			},
+			err => logService.warn('[vibeAI] agent window hub open failed', err),
+		);
+	}
+}
+
+registerWorkbenchContribution2(VibeAIAgentWindowBootstrapContribution.ID, VibeAIAgentWindowBootstrapContribution, WorkbenchPhase.AfterRestored);
+
+/**
+ * Phase 180 (session roaming, Cursor parity): picks up a one-shot
+ * conversation handoff (`vibeAI.agentHandoff`) right after this window
+ * restored — the agent window (or another IDE surface) queued either an
+ * existing thread to open or composer text to send in a fresh
+ * conversation. Skipped in the agent window itself (its hub consumes
+ * thread handoffs itself, and seeded sends would loop back) and for
+ * handoffs aimed at a different project than the one this window opened.
+ */
+class VibeAIHandoffPickupContribution extends Disposable implements IWorkbenchContribution {
+	static readonly ID = 'workbench.contrib.vibeAIHandoffPickup';
+
+	constructor(
+		@IStorageService private readonly storageService: IStorageService,
+		@IWorkspaceContextService private readonly contextService: IWorkspaceContextService,
+		@IViewsService private readonly viewsService: IViewsService,
+		@IContextKeyService contextKeyService: IContextKeyService,
+	) {
+		super();
+
+		// The agent window's hub consumes thread handoffs itself (highlight
+		// in the sidebar) and has no chat view — and seeded sends must not
+		// loop back — so it leaves the key untouched here.
+		if (contextKeyService.getContextKeyValue<boolean>(IsVibeAgentWindowContext.key)) {
+			return;
+		}
+		const raw = this.storageService.get(VIBE_AI_HANDOFF_STORAGE_KEY, StorageScope.APPLICATION);
+		if (!raw) {
+			return;
+		}
+		// One-shot: consume immediately, whoever ends up acting on it.
+		this.storageService.remove(VIBE_AI_HANDOFF_STORAGE_KEY, StorageScope.APPLICATION);
+		const handoff = parseVibeAIChatHandoff(raw);
+		if (!handoff || Date.now() - handoff.ts > VIBE_AI_HANDOFF_MAX_AGE_MS) {
+			return;
+		}
+		const root = this.contextService.getWorkspace().folders[0]?.uri.fsPath;
+		if (handoff.workspaceRoot && root && handoff.workspaceRoot.toLowerCase() !== root.toLowerCase()) {
+			// Aimed at another project's window (the agent window opens the
+			// right one via `vibeAI.agentWindow.openIde`).
+			return;
+		}
+		// Let the workbench finish restoring before opening the chat view.
+		setTimeout(() => {
+			if (handoff.sessionId) {
+				const store = new VibeAIChatSessionStore(this.storageService, this.contextService);
+				const session = store.list().find(candidate => candidate.id === handoff.sessionId);
+				if (!session) {
+					return;
+				}
+				this.viewsService.openView(VibeAIChatPane.ID, false).then(view => {
+					if (view) {
+						(view as VibeAIChatPane).loadSession(session);
+					}
+				});
+			} else if (handoff.newMessage) {
+				this.viewsService.openView(VibeAIChatPane.ID, true).then(view => {
+					if (view) {
+						(view as VibeAIChatPane).sendFromHub(handoff.newMessage!, handoff.workspaceRoot ?? root);
+					}
+				});
+			}
+		}, 400);
+	}
+}
+
+registerWorkbenchContribution2(VibeAIHandoffPickupContribution.ID, VibeAIHandoffPickupContribution, WorkbenchPhase.AfterRestored);
+
+/**
+ * Renders the "Agents" title bar entry as a Cursor-style blue pill
+ * (Phase 177: opens the standalone agent window for the current workspace;
+ * falls back to the in-window Agents hub editor tab when window creation
+ * is unavailable).
  */
 class VibeAITitleBarPill extends BaseActionViewItem {
 
@@ -515,11 +743,7 @@ class VibeAITitleBarPill extends BaseActionViewItem {
 		container.setAttribute('tabindex', '0');
 
 		const label = DOM.append(container, $('span.vibe-ai-titlebar-pill-label'));
-		label.textContent = localize('vibeAI.openAgentsWindow', "Agents Window");
-
-		const arrow = DOM.append(container, $('span.vibe-ai-titlebar-pill-arrow'));
-		arrow.textContent = '↗';
-		arrow.setAttribute('aria-hidden', 'true');
+		label.textContent = localize('vibeAI.openAgentsWindow', "Agents");
 
 		this._register(DOM.addDisposableListener(container, DOM.EventType.CLICK, () => {
 			this.actionRunner?.run(this.action);

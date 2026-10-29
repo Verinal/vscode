@@ -84,6 +84,9 @@ interface IOpenBrowserWindowOptions {
 	readonly emptyWindowBackupInfo?: IEmptyWindowBackupInfo;
 	readonly forceProfile?: string;
 	readonly forceTempProfile?: boolean;
+
+	// VibeCoding fork: pill-opened Agent Window flag (Cursor parity).
+	readonly vibeAgentWindow?: boolean;
 }
 
 interface IPathResolveOptions {
@@ -820,7 +823,8 @@ export class WindowsMainService extends Disposable implements IWindowsMainServic
 			filesToOpen,
 			windowToUse,
 			forceProfile: openConfig.forceProfile,
-			forceTempProfile: openConfig.forceTempProfile
+			forceTempProfile: openConfig.forceTempProfile,
+			vibeAgentWindow: !!openConfig.vibeAgentWindow,
 		});
 	}
 
@@ -1598,6 +1602,9 @@ export class WindowsMainService extends Disposable implements IWindowsMainServic
 			cssModules: this.cssDevelopmentService.isEnabled ? await this.cssDevelopmentService.getCssModules() : undefined,
 
 			isSessionsWindow: isWorkspaceIdentifier(options.workspace) && isEqual(options.workspace.configPath, this.environmentMainService.agentSessionsWorkspace),
+
+			// VibeCoding fork: pill-opened Agent Window flag (Cursor parity).
+			vibeAgentWindow: !!options.vibeAgentWindow,
 		};
 
 		// New window

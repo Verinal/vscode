@@ -6,7 +6,7 @@
 import { Disposable } from '../../base/common/lifecycle.js';
 import { IContextKeyService, IContextKey, setConstant as setConstantContextKey } from '../../platform/contextkey/common/contextkey.js';
 import { IsMacContext, IsLinuxContext, IsWindowsContext, IsWebContext, IsMacNativeContext, IsDevelopmentContext, IsIOSContext, ProductQualityContext, IsMobileContext, IsChromeOSContext } from '../../platform/contextkey/common/contextkeys.js';
-import { SplitEditorsVertically, InEditorZenModeContext, AuxiliaryBarVisibleContext, SecondarySideBarVisibleContext, SideBarVisibleContext, PanelAlignmentContext, PanelMaximizedContext, PanelVisibleContext, EmbedderIdentifierContext, EditorTabsVisibleContext, IsMainEditorCenteredLayoutContext, MainEditorAreaVisibleContext, DirtyWorkingCopiesContext, EmptyWorkspaceSupportContext, EnterMultiRootWorkspaceSupportContext, HasWebFileSystemAccess, IsMainWindowFullscreenContext, OpenFolderWorkspaceSupportContext, RemoteNameContext, VirtualWorkspaceContext, WorkbenchStateContext, WorkspaceFolderCountContext, PanelPositionContext, TemporaryWorkspaceContext, TitleBarVisibleContext, TitleBarStyleContext, IsAuxiliaryWindowFocusedContext, ActiveEditorGroupEmptyContext, ActiveEditorGroupIndexContext, ActiveEditorGroupLastContext, ActiveEditorGroupLockedContext, MultipleEditorGroupsContext, EditorsVisibleContext, AuxiliaryBarMaximizedContext, InAutomationContext, IsSessionsWindowContext } from '../common/contextkeys.js';
+import { SplitEditorsVertically, InEditorZenModeContext, AuxiliaryBarVisibleContext, SecondarySideBarVisibleContext, SideBarVisibleContext, PanelAlignmentContext, PanelMaximizedContext, PanelVisibleContext, PanelPositionContext, EmbedderIdentifierContext, EditorTabsVisibleContext, IsMainEditorCenteredLayoutContext, MainEditorAreaVisibleContext, DirtyWorkingCopiesContext, EmptyWorkspaceSupportContext, EnterMultiRootWorkspaceSupportContext, HasWebFileSystemAccess, IsMainWindowFullscreenContext, OpenFolderWorkspaceSupportContext, RemoteNameContext, VirtualWorkspaceContext, WorkbenchStateContext, WorkspaceFolderCountContext, TemporaryWorkspaceContext, TitleBarVisibleContext, TitleBarStyleContext, IsAuxiliaryWindowFocusedContext, ActiveEditorGroupEmptyContext, ActiveEditorGroupIndexContext, ActiveEditorGroupLastContext, ActiveEditorGroupLockedContext, MultipleEditorGroupsContext, EditorsVisibleContext, AuxiliaryBarMaximizedContext, InAutomationContext, IsSessionsWindowContext, IsVibeAgentWindowContext } from '../common/contextkeys.js';
 import { preferredSideBySideGroupDirection, GroupDirection, IEditorGroupsService } from '../services/editor/common/editorGroupsService.js';
 import { IConfigurationService } from '../../platform/configuration/common/configuration.js';
 import { IWorkbenchEnvironmentService } from '../services/environment/common/environmentService.js';
@@ -96,6 +96,7 @@ export class WorkbenchContextKeysHandler extends Disposable {
 		this.temporaryWorkspaceContext = TemporaryWorkspaceContext.bindTo(this.contextKeyService);
 		this.isSessionsWindowContext = IsSessionsWindowContext.bindTo(this.contextKeyService);
 		this.isSessionsWindowContext.set(this.environmentService.isSessionsWindow);
+		IsVibeAgentWindowContext.bindTo(this.contextKeyService).set(this.environmentService.isVibeAgentWindow);
 		this.updateWorkspaceContextKeys();
 
 		// Capabilities

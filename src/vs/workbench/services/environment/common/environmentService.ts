@@ -36,6 +36,8 @@ export interface IWorkbenchEnvironmentService extends IEnvironmentService {
 	readonly skipWelcome: boolean;
 	readonly disableWorkspaceTrust: boolean;
 	readonly isSessionsWindow: boolean;
+	/** VibeCoding fork: the window is the pill-opened Agent Window (Cursor parity). */
+	readonly isVibeAgentWindow: boolean;
 	readonly webviewExternalEndpoint: string;
 
 	// --- Development

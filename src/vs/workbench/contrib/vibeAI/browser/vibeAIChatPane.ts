@@ -22,6 +22,7 @@ import { EditorMarkdownCodeBlockRenderer } from '../../../../editor/browser/widg
 import { ITerminalService } from '../../terminal/browser/terminal.js';
 import { ILanguageService } from '../../../../editor/common/languages/language.js';
 import { IClipboardService } from '../../../../platform/clipboard/common/clipboardService.js';
+import { ICommandService } from '../../../../platform/commands/common/commands.js';
 import { IConfigurationService } from '../../../../platform/configuration/common/configuration.js';
 import { IContextKeyService } from '../../../../platform/contextkey/common/contextkey.js';
 import { IContextMenuService } from '../../../../platform/contextview/browser/contextView.js';
@@ -36,11 +37,11 @@ import { IMarkerService, MarkerSeverity } from '../../../../platform/markers/com
 import { INotificationService } from '../../../../platform/notification/common/notification.js';
 import { IOpenerService } from '../../../../platform/opener/common/opener.js';
 import { IQuickInputService } from '../../../../platform/quickinput/common/quickInput.js';
-import { IStorageService } from '../../../../platform/storage/common/storage.js';
+import { IStorageService, StorageScope, StorageTarget } from '../../../../platform/storage/common/storage.js';
 import { IThemeService } from '../../../../platform/theme/common/themeService.js';
 import { IWorkspaceContextService } from '../../../../platform/workspace/common/workspace.js';
 import { IVibeAIChatRequest, IVibeAICodeChange, IVibeAIContextUsage, IVibeAIDiagnostic, IVibeAIExecutePlanRequest, IVibeAIFileContext, IVibeAIMessage, IVibeAIModelProvider, IVibeAIModelRouting, IVibeAIPlan, IVibeAISkill, IVibeAIStreamData, IVibeAIService, IVibeAISubagent } from '../../../../platform/vibeAI/common/vibeAI.js';
-import { VibeAIChatSessionStore, IVibeAIChatSession, IVibeAIChatScrollPos, IVibeAIChatSearchHit, IVibeAIPersistedToolCall, IVibeAIPersistedTurn, IVibeAIPersistedTurnSegment, IVibeAITurnTimelineNode, searchConversationContent } from './vibeAIChatSessionStore.js';
+import { VibeAIChatSessionStore, IVibeAIChatSession, IVibeAIChatHandoff, IVibeAIChatScrollPos, IVibeAIChatSearchHit, IVibeAIPersistedToolCall, IVibeAIPersistedTurn, IVibeAIPersistedTurnSegment, IVibeAITurnTimelineNode, VIBE_AI_HANDOFF_STORAGE_KEY, searchConversationContent } from './vibeAIChatSessionStore.js';
 import { IVibeAIModelConfig, VIBE_AI_NO_MODEL_MESSAGE, VibeAIModelStore } from './vibeAIModelStore.js';
 import { computeDiffLines, computeDiffStats } from './vibeAIDiff.js';
 import { VibeAIToolCard } from './vibeAIToolCard.js';
@@ -101,6 +102,29 @@ const FOLDER_LISTING_SKIP_DIRS = new Set(['.git', 'node_modules', '__pycache__',
 /** Phase 105: image file extensions dropped from the Explorer attach as image chips (same as paste). */
 const IMAGE_FILE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp']);
 /**
+ * Phase 171: a dropped FILE larger than this never attaches — the chip's
+ * content is clipped to FILE_CONTEXT_MAX_CHARS anyway, so reading beyond
+ * this is wasted IO (and multi-hundred-MB reads stall the composer while
+ * the spinner chip spins).
+ */
+const MAX_DROP_FILE_BYTES = 20 * 1024 * 1024;
+/**
+ * Phase 172: binary DOCUMENTS get a looser byte cap — bytes don't predict
+ * content volume for them (a drawing-set PDF is mostly vector/image data
+ * with little text), and the parse-time guard is the backend's page cap +
+ * the 60s extract timeout, not the byte count. Cursor parity: its web app
+ * allows 4MB/file, its IDE silently no-ops at ~8MB — both our caps and
+ * our "too large" notice are looser and explicit.
+ */
+const MAX_DROP_DOCUMENT_BYTES = 50 * 1024 * 1024;
+/**
+ * Phase 171: binary document extensions the BACKEND parses into text
+ * (POST /api/files/extract-document: pypdf / python-docx / openpyxl /
+ * python-pptx) — reading them as text would only yield garbage. Legacy
+ * .doc/.xls/.ppt are rejected server-side with a "save as" hint.
+ */
+const DOCUMENT_EXTRACT_EXTENSIONS = new Set(['.pdf', '.docx', '.xlsx', '.pptx']);
+/**
  * Phase 84.4: UI-side enforcement of the prompt's narration brevity rule.
  * A narration body folded into the Worked shell (closeTextRun intoWork)
  * longer than this renders its head + an ellipsis — a non-compliant model
@@ -111,9 +135,11 @@ const IMAGE_FILE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp',
 const NARRATION_MAX_CHARS = 150;
 /**
  * Phase 61: max images attached per message (Ctrl+V paste / drag-drop).
- * Cursor-parity generosity with a storage sanity cap.
+ * Cursor-parity generosity with a storage sanity cap. Phase 173: raised
+ * 6→8 so a fully-attached sparse PDF's rendered pages (backend caps at 8)
+ * fit alongside nothing else — the cap stays the ceiling for every path.
  */
-const MAX_ATTACHED_IMAGES = 6;
+const MAX_ATTACHED_IMAGES = 8;
 /**
  * Phase 61: pasted images downscale to this max edge (px) before
  * attaching — keeps the request payload and the persisted history sane
@@ -763,6 +789,15 @@ interface VibeAIConversation {
 	 * Absent = no agreed plan in this conversation.
 	 */
 	planPath?: string;
+	/**
+	 * Phase 177 (Agent Window, Cursor parity): the project folder this
+	 * conversation is bound to — sent as `workspaceRoot` on every request
+	 * so continuing a conversation from the Agent Window (whose neutral
+	 * workspace has no folder) still rebinds the backend to the right
+	 * project. Set at conversation creation and frozen; absent falls back
+	 * to the window's folder (pre-Phase-177 behavior).
+	 */
+	workspaceRoot?: string;
 }
 
 /**
@@ -773,6 +808,19 @@ interface VibeAIConversation {
  * parity: the edit box is identical to the input below and the
  * mode/model dropdowns stay in sync).
  */
+/**
+ * Phase 171: a dropped file's chip entry while its read runs — the pane
+ * pushes it into the attachments the moment the drop lands (spinner chip)
+ * and the read fills `content` in place. Finalization goes through the
+ * object identity (not a path lookup) so a tab switch mid-read can never
+ * land the content in the wrong conversation's array.
+ */
+interface VibeAIFileContextEntry {
+	path: string;
+	kind?: 'file' | 'folder';
+	content?: string;
+}
+
 interface VibeAIPromptEdit {
 	conversation: VibeAIConversation;
 	row: HTMLElement;
@@ -885,6 +933,14 @@ export class VibeAIChatPane extends ViewPane {
 	// Phase 61: images attached to the next message (data URLs — Ctrl+V
 	// paste / drag-drop). Mirrors the active conversation, cleared on send.
 	private attachedImages: string[] = [];
+	// Phase 171: attachment reads still in flight — the chips row shows
+	// them as dashed spinner chips the moment the drop lands (instant
+	// feedback: the drop never feels missed), content fills in when the
+	// read settles. Keyed by display path; images tracked as a promise set
+	// (the counter is the set's size). send() waits these out before it
+	// captures the attachments.
+	private readonly pendingFileReads = new Map<string, Promise<void>>();
+	private readonly pendingImageReads = new Set<Promise<void>>();
 
 	// --- Phase 47: Cursor-parity sent-prompt editing — the one open
 	//     in-place edit box (click a sent prompt → editable composer →
@@ -992,7 +1048,7 @@ export class VibeAIChatPane extends ViewPane {
 		@ICodeEditorService private readonly codeEditorService: ICodeEditorService,
 		@IEditorService private readonly editorService: IEditorService,
 		@ILanguageService private readonly languageService: ILanguageService,
-		@IStorageService storageService: IStorageService,
+		@IStorageService private readonly storageService: IStorageService,
 		@IMarkdownRendererService private readonly markdownRendererService: IMarkdownRendererService,
 		@IVibeAIService private readonly vibeAIService: IVibeAIService,
 		@ILogService private readonly logService: ILogService,
@@ -1000,7 +1056,8 @@ export class VibeAIChatPane extends ViewPane {
 		@IFileService private readonly fileService: IFileService,
 		@IClipboardService private readonly clipboardService: IClipboardService,
 		@ITerminalService private readonly terminalService: ITerminalService,
-		@IMarkerService private readonly markerService: IMarkerService
+		@IMarkerService private readonly markerService: IMarkerService,
+		@ICommandService private readonly commandService: ICommandService
 	) {
 		super(
 			options,
@@ -1038,7 +1095,7 @@ export class VibeAIChatPane extends ViewPane {
 		// instantiated here so ```mermaid fences can be routed around it.
 		this.editorCodeBlockRenderer = instantiationService.createInstance(EditorMarkdownCodeBlockRenderer);
 		this.mermaidRenderer = this._register(instantiationService.createInstance(VibeAIMermaidRenderer));
-		this.sessionStore = new VibeAIChatSessionStore(storageService);
+		this.sessionStore = new VibeAIChatSessionStore(storageService, this.workspaceContextService);
 		this.modelStore = new VibeAIModelStore(storageService, configurationService);
 		this.model = configurationService.getValue<string>('vibeAI.chat.model') || 'Auto';
 		// Phase 70: Optimize For bias of the Auto router (Cursor parity).
@@ -1097,6 +1154,19 @@ export class VibeAIChatPane extends ViewPane {
 		//     it stays pinned at the top as the tall composer — see
 		//     .vibe-ai-chat-view.empty)
 		const inputContainer = DOM.append(container, $('.vibe-ai-input-container'));
+
+		// --- Phase 171: drop overlay — a dashed accent veil across the
+		//     composer while a droppable drag hovers over it (the
+		//     dragover class toggles it; the veil is pointer-events:none
+		//     so the drop still lands on the composer). First child, but
+		//     absolutely positioned so it paints over the whole box.
+		const dropOverlay = DOM.append(inputContainer, $('.vibe-ai-drop-overlay'));
+		const dropOverlayIcon = DOM.append(dropOverlay, $('span.codicon.codicon-files'));
+		dropOverlayIcon.setAttribute('aria-hidden', 'true');
+		DOM.append(dropOverlay, $('span.vibe-ai-drop-overlay-label')).textContent = localize(
+			'vibeAIChat.dropOverlay',
+			"Release to attach as context"
+		);
 
 		this.chipsRow = DOM.append(inputContainer, $('.vibe-ai-input-chips'));
 		this.chipsRow.style.display = 'none';
@@ -1219,8 +1289,36 @@ export class VibeAIChatPane extends ViewPane {
 					}
 				}),
 				new Action('vibeAI.chat.tab.history', localize('vibeAIChat.history', "Chat History"), undefined, true, () => { this.showHistory(); }),
+				// Phase 180 (session roaming, Cursor parity): continue this
+				// thread in the standalone agent window (or from any IDE
+				// window — sessions live in application storage).
+				new Action('vibeAI.chat.tab.openAgentWindow', localize('vibeAIChat.openAgentWindow', "Open in Agent Window"), undefined, true, async () => { this.handOffToAgentWindow(); }),
 			],
 		});
+	}
+
+	/**
+	 * Phase 180 (session roaming): hands the active conversation to the
+	 * standalone agent window — persists the thread NOW (the receiving
+	 * window may read it immediately), stamps the one-shot handoff, and
+	 * opens the agent window. The hub highlights the thread on restore;
+	 * it has no inline thread view, so continuing there hands it right
+	 * back into an IDE window on the thread's project.
+	 */
+	private handOffToAgentWindow(): void {
+		const conversation = this.getActiveConversation();
+		if (!conversation) {
+			return;
+		}
+		this.sessionStore.save(conversation.sessionId, conversation.history, conversation.contextLimit, conversation.turns.map(turn => this.toPersistedTurn(turn)), conversation.mode, conversation.kind === 'side' ? { kind: 'side', parentSessionId: conversation.parentSessionId } : undefined, conversation.workspaceRoot);
+		this.sessionStore.setGoal(conversation.sessionId, conversation.goal, conversation.goalComplete === true);
+		const handoff: IVibeAIChatHandoff = {
+			sessionId: conversation.sessionId,
+			workspaceRoot: this.conversationWorkspaceRoot(conversation),
+			ts: Date.now(),
+		};
+		this.storageService.store(VIBE_AI_HANDOFF_STORAGE_KEY, JSON.stringify(handoff), StorageScope.APPLICATION, StorageTarget.MACHINE);
+		this.commandService.executeCommand('vibeAI.openAgentsWindow');
 	}
 
 	// ==================== conversation tabs (editor-tab parity) ====================
@@ -1230,7 +1328,7 @@ export class VibeAIChatPane extends ViewPane {
 	}
 
 	/** Creates a new conversation (own hidden thread) without switching to it. */
-	private createConversation(): VibeAIConversation {
+	private createConversation(seedWorkspaceRoot?: string): VibeAIConversation {
 		const container = $('.vibe-ai-chat-thread');
 		container.style.display = 'none';
 		const conversation: VibeAIConversation = {
@@ -1254,6 +1352,11 @@ export class VibeAIChatPane extends ViewPane {
 			turnRecordDisposables: new DisposableStore(),
 			turns: [],
 			contextUsageSeq: 0,
+			// Phase 177: the project folder is frozen at creation (the
+			// Agent Window seeds it with the project the hub targets; IDE
+			// windows freeze their own folder — same value send-time used
+			// to produce).
+			workspaceRoot: seedWorkspaceRoot ?? this.currentWorkspaceRoot(),
 		};
 		// The conversation's per-turn listeners die with the pane (and with
 		// the tab's ✕, which disposes the store before removing the tab).
@@ -1388,9 +1491,30 @@ export class VibeAIChatPane extends ViewPane {
 	 * "+" (editor-tab parity): always opens a new empty conversation tab —
 	 * unlimited empty conversations can coexist in the tab strip. Every
 	 * conversation stays open in its tab until deleted via its ✕.
+	 * Phase 176: public — the Agents Hub's "New Agent" button calls it
+	 * after focusing the chat view. Phase 177: the hub can seed the
+	 * conversation's project folder (Agent Window parity).
 	 */
-	private newConversation(): void {
-		this.setActiveConversation(this.createConversation().id);
+	newConversation(seedWorkspaceRoot?: string): void {
+		this.setActiveConversation(this.createConversation(seedWorkspaceRoot).id);
+	}
+
+	/**
+	 * Phase 176: the Agents Hub composer's send handoff — starts a fresh
+	 * conversation (mode inherited like every new tab), seeds the shared
+	 * composer input and runs the normal send pipeline, so /skills, /goal,
+	 * /side and steering behave exactly as if the user typed it in the
+	 * chat pane. The hub reveals this pane first (openView focus).
+	 * Phase 177: `workspaceRoot` binds the new conversation to the hub's
+	 * target project (Agent Window parity — the window itself has no
+	 * folder).
+	 */
+	async sendFromHub(text: string, workspaceRoot?: string): Promise<void> {
+		this.newConversation(workspaceRoot);
+		if (this.inputElement) {
+			this.inputElement.value = text;
+		}
+		await this.send();
 	}
 
 	/**
@@ -1590,7 +1714,7 @@ export class VibeAIChatPane extends ViewPane {
 		// send/stop/mic visibility logic read them.
 		const toolbar = this.buildInputToolbar(inputContainer, this.inputToolbarDisposables, {
 			sendTitle: localize('vibeAIChat.send', "Send (Enter)"),
-			onSend: () => this.send(),
+			onSend: () => void this.send(),
 		});
 		this.modeButton = toolbar.modeButton;
 		this.modeIcon = toolbar.modeIcon;
@@ -1779,7 +1903,7 @@ export class VibeAIChatPane extends ViewPane {
 				e.preventDefault();
 				// An empty input never sends.
 				if ((this.inputElement?.value.trim().length ?? 0) > 0) {
-					this.send();
+					void this.send();
 				}
 			}
 		}));
@@ -1823,22 +1947,7 @@ export class VibeAIChatPane extends ViewPane {
 		}));
 		this._register(DOM.addDisposableListener(container, 'drop', e => {
 			container.classList.remove('vibe-ai-dragover');
-			// OS image drag — image chips (same as the paste path).
-			const imageFiles = Array.from(e.dataTransfer?.files ?? []).filter(file => file.type.startsWith('image/'));
-			if (imageFiles.length > 0) {
-				e.preventDefault();
-				e.stopPropagation();
-				void this.attachImageFiles(imageFiles);
-				return;
-			}
-			const uris = this.extractDroppedUris(e);
-			if (uris.length > 0) {
-				e.preventDefault();
-				e.stopPropagation();
-				void this.attachDroppedResources(uris);
-				return;
-			}
-			// Anything else (e.g. a URL drag) keeps the native text insert.
+			void this.handleDrop(e);
 		}));
 		// Phase 48: mode/model clicks are wired inside buildInputToolbar —
 		// one wiring per toolbar instance (main input + edit box).
@@ -1869,7 +1978,8 @@ export class VibeAIChatPane extends ViewPane {
 		}
 		e.preventDefault();
 		e.stopPropagation();
-		void this.attachImageFiles(files);
+		// Phase 171: tracked — a slow decode shows spinner tiles first.
+		this.trackImageRead(this.attachImageFiles(files));
 	}
 
 	/**
@@ -1958,15 +2068,26 @@ export class VibeAIChatPane extends ViewPane {
 	}
 
 	/**
-	 * Phase 105: attaches dropped resources as context — a folder becomes
-	 * a chip whose content is the folder's bounded tree listing (the model
-	 * sees the structure without reading every file), an image file drops
-	 * like a paste (image chip, data URL), and any other file reads in
-	 * (clipped, same as attachActiveFile). Same-path entries skip (dedup).
+	 * Phase 105/170: attaches dropped resources as context — placeholder
+	 * chips land the moment the stat comes back (instant feedback: the
+	 * drop never feels missed), then the slow reads fill in behind a
+	 * spinner chip. A folder becomes a chip whose content is the folder's
+	 * bounded tree listing (the model sees the structure without reading
+	 * every file), an image file drops like a paste (image chip, data
+	 * URL), and any other file reads in (clipped, same as
+	 * attachActiveFile). Same-path entries skip (dedup).
 	 */
 	private async attachDroppedResources(uris: URI[]): Promise<void> {
-		let changed = false;
 		let rejectedImage = false;
+		// Phase 171: the drop attaches to the list that was live when it
+		// happened — a tab switch mid-stat/mid-read never reroutes the
+		// attachments into the other conversation (the live pane mirrors
+		// this list until the switch, so the spinner chips still show).
+		const target = this.attachedFiles;
+		const targetImages = this.attachedImages;
+		// Phase 1 — stat + placeholder chips (metadata only, fast). Each
+		// accepted entry starts its tracked read; the spinner chips below
+		// resolve as the reads settle (readDroppedFile / readDroppedImage).
 		for (const uri of uris) {
 			if (!this.fileService.hasProvider(uri)) {
 				continue; // e.g. an http(s) URL — keeps the native paste
@@ -1975,36 +2096,28 @@ export class VibeAIChatPane extends ViewPane {
 				const stat = await this.fileService.stat(uri);
 				const displayPath = this.formatDroppedPath(uri);
 				if (stat.isDirectory) {
-					if (this.attachedFiles.some(file => file.path === displayPath)) {
+					if (target.some(file => file.path === displayPath)) {
 						continue;
 					}
-					this.attachedFiles.push({
-						path: displayPath,
-						kind: 'folder',
-						content: await this.buildFolderListing(uri),
-					});
-					changed = true;
+					const entry: VibeAIFileContextEntry = { path: displayPath, kind: 'folder', content: '' };
+					target.push(entry);
+					this.trackFileRead(displayPath, this.readDroppedFile({ uri, kind: 'folder', entry, images: targetImages }));
 				} else if (IMAGE_FILE_EXTENSIONS.has(extname(uri).toLowerCase())) {
-					if (this.attachedImages.length >= MAX_ATTACHED_IMAGES) {
+					if (targetImages.length + this.pendingImageReads.size >= MAX_ATTACHED_IMAGES) {
 						rejectedImage = true;
 						continue;
 					}
-					const content = await this.fileService.readFile(uri);
-					this.attachedImages.push(`data:${getMediaMime(uri.path) ?? 'image/png'};base64,${encodeBase64(content.value)}`);
-					changed = true;
+					this.trackImageRead(this.readDroppedImage(uri, targetImages));
 				} else {
-					if (this.attachedFiles.some(file => file.path === displayPath)) {
+					if (target.some(file => file.path === displayPath)) {
 						continue;
 					}
-					const content = await this.fileService.readFile(uri);
-					const text = content.value.toString();
-					this.attachedFiles.push({
-						path: displayPath,
-						kind: 'file',
-						content: text.length > FILE_CONTEXT_MAX_CHARS ? text.substring(0, FILE_CONTEXT_MAX_CHARS) : text,
-					});
-					changed = true;
+					const entry: VibeAIFileContextEntry = { path: displayPath, kind: 'file', content: '' };
+					target.push(entry);
+					this.trackFileRead(displayPath, this.readDroppedFile({ uri, kind: 'file', size: stat.size, entry, images: targetImages }));
 				}
+				this.renderChips();
+				this.updateInputActions();
 			} catch (err) {
 				this.logService.warn('[VibeAI] failed to attach the dropped resource', err);
 				this.notificationService.error(localize('vibeAIChat.dropReadFailed', "Failed to attach the dropped file — it may not be readable."));
@@ -2017,10 +2130,187 @@ export class VibeAIChatPane extends ViewPane {
 				MAX_ATTACHED_IMAGES
 			));
 		}
-		if (changed) {
+	}
+
+	/**
+	 * Phase 171: the composer's drop — OS image drags attach through the
+	 * tracked image pipeline (spinner tiles while the bytes decode), URIs
+	 * go through the two-phase resource attach (placeholder chips land on
+	 * the drop; content fills in behind a spinner), and anything else
+	 * (e.g. a URL drag) keeps the native text insert.
+	 */
+	private async handleDrop(e: DragEvent): Promise<void> {
+		// OS image drag — image chips (same as the paste path).
+		const imageFiles = Array.from(e.dataTransfer?.files ?? []).filter(file => file.type.startsWith('image/'));
+		if (imageFiles.length > 0) {
+			e.preventDefault();
+			e.stopPropagation();
+			this.trackImageRead(this.attachImageFiles(imageFiles));
+			return;
+		}
+		const uris = this.extractDroppedUris(e);
+		if (uris.length > 0) {
+			e.preventDefault();
+			e.stopPropagation();
+			await this.attachDroppedResources(uris);
+		}
+	}
+
+	/**
+	 * Phase 171: tracks an in-flight file read so the chip shows its
+	 * spinner while it runs and send() waits it out before capturing. The
+	 * entry's removal is identity-guarded (a removed-then-redropped path's
+	 * fresh read is never torn down by the old read's settle).
+	 */
+	private trackFileRead(displayPath: string, work: Promise<void>): void {
+		const tracked = work.finally(() => {
+			if (this.pendingFileReads.get(displayPath) === tracked) {
+				this.pendingFileReads.delete(displayPath);
+			}
+		});
+		this.pendingFileReads.set(displayPath, tracked);
+	}
+
+	/** Phase 171: tracked variant for image reads (a promise set — the count is its size). */
+	private trackImageRead(work: Promise<void>): void {
+		const tracked = work.finally(() => {
+			if (this.pendingImageReads.delete(tracked)) {
+				this.renderChips();
+				this.updateInputActions();
+			}
+		});
+		this.pendingImageReads.add(tracked);
+		// The spinner tile paints immediately, not on settle — the drop is
+		// visible while the bytes are still being read.
+		this.renderChips();
+		this.updateInputActions();
+	}
+
+	/**
+	 * Phase 171: a placeholder chip's read — a folder builds its bounded
+	 * tree listing, a file reads clipped (oversize and binary files are
+	 * rejected with a notice instead of reading megabytes for nothing).
+	 * Settles the chip on both paths: content fills in, or the placeholder
+	 * comes off with an error.
+	 */
+	private async readDroppedFile(job: { uri: URI; kind: 'file' | 'folder'; size?: number; entry: VibeAIFileContextEntry; images: string[] }): Promise<void> {
+		try {
+			let content: string;
+			if (job.kind === 'folder') {
+				content = await this.buildFolderListing(job.uri);
+			} else {
+				// Phase 172: documents get the looser byte cap (bytes don't
+				// predict text volume for binary documents; see the constant).
+				const isDocument = DOCUMENT_EXTRACT_EXTENSIONS.has(extname(job.uri).toLowerCase());
+				const maxBytes = isDocument ? MAX_DROP_DOCUMENT_BYTES : MAX_DROP_FILE_BYTES;
+				if ((job.size ?? 0) > maxBytes) {
+					this.dropPlaceholderFile(job.entry);
+					this.notificationService.warn(localize(
+						'vibeAIChat.dropFileTooLarge',
+						"\"{0}\" is too large to attach as context (limit {1} MB).",
+						job.entry.path,
+						Math.floor(maxBytes / (1024 * 1024))
+					));
+					return;
+				}
+				// Phase 171: binary documents (PDF / Word / Excel / PPT) go
+				// to the backend's parser — reading them as text would only
+				// yield garbage. The chip keeps spinning while the parse
+				// runs; the extracted text (with its [meta] header) lands
+				// as the chip content, errors surface with the backend's
+				// message (legacy format / encrypted / broken file).
+				if (isDocument) {
+					const read = await this.fileService.readFile(job.uri);
+					try {
+						const result = await this.vibeAIService.extractDocument({
+							filename: job.entry.path,
+							contentBase64: encodeBase64(read.value),
+						});
+						// Phase 173: sparse-text PDFs (scans / drawing sets) come
+						// back with rendered page images — attach them through the
+						// image pipeline so the vision model sees the actual pages
+						// (the text chip keeps the [meta] note saying pages were
+						// converted). Capped by MAX_ATTACHED_IMAGES like any image.
+						for (const pageImage of result.pageImages ?? []) {
+							if (job.images.length >= MAX_ATTACHED_IMAGES) {
+								break;
+							}
+							job.images.push(pageImage.dataUrl);
+						}
+						// Phase 174: content is backend-composed and chip-ready
+						// (≤ FILE_CONTEXT_MAX_CHARS: [meta] + full text, or — when
+						// it won't fit — outline + opening + the read_document
+						// hint with the doc_id INSIDE the budget, since the
+						// backend re-clips chip content to 6000). Attach as-is.
+						this.finalizeDroppedFile(job.entry, result.content);
+					} catch (err) {
+						this.dropPlaceholderFile(job.entry);
+						this.logService.warn('[VibeAI] failed to extract the dropped document', err);
+						const message = err instanceof Error && err.message ? err.message : localize('vibeAIChat.dropParseFailed', "Failed to parse this document.");
+						this.notificationService.warn(message);
+					}
+					return;
+				}
+				const read = await this.fileService.readFile(job.uri);
+				const text = read.value.toString();
+				if (text.includes('\u0000')) {
+					this.dropPlaceholderFile(job.entry);
+					this.notificationService.warn(localize(
+						'vibeAIChat.dropBinaryFile',
+						"\"{0}\" is binary — it can't be attached as text context.",
+						job.entry.path
+					));
+					return;
+				}
+				content = text.length > FILE_CONTEXT_MAX_CHARS ? text.substring(0, FILE_CONTEXT_MAX_CHARS) : text;
+			}
+			this.finalizeDroppedFile(job.entry, content);
+		} catch (err) {
+			this.dropPlaceholderFile(job.entry);
+			this.logService.warn('[VibeAI] failed to attach the dropped resource', err);
+			this.notificationService.error(localize('vibeAIChat.dropReadFailed', "Failed to attach the dropped file — it may not be readable."));
+		}
+	}
+
+	/** Phase 171: a dropped image's read — data URL in, spinner tile off. */
+	private async readDroppedImage(uri: URI, targetImages: string[] = this.attachedImages): Promise<void> {
+		try {
+			const content = await this.fileService.readFile(uri);
+			targetImages.push(`data:${getMediaMime(uri.path) ?? 'image/png'};base64,${encodeBase64(content.value)}`);
+		} catch (err) {
+			this.logService.warn('[VibeAI] failed to attach the dropped resource', err);
+			this.notificationService.error(localize('vibeAIChat.dropReadFailed', "Failed to attach the dropped file — it may not be readable."));
+		} finally {
 			this.renderChips();
 			this.updateInputActions();
 		}
+	}
+
+	/**
+	 * Phase 171: fills a placeholder chip's content once its read lands —
+	 * written through the entry's object identity, so a tab switch mid-read
+	 * lands the content in the entry's own conversation (the live pane just
+	 * re-renders it on return), and a chip removed mid-read stays gone (its
+	 * detached object is written but never rendered).
+	 */
+	private finalizeDroppedFile(entry: VibeAIFileContextEntry, content: string): void {
+		this.pendingFileReads.delete(entry.path);
+		entry.content = content;
+		this.renderChips();
+		this.updateInputActions();
+	}
+
+	/** Phase 171: takes a placeholder chip off (read failed / rejected). */
+	private dropPlaceholderFile(entry: VibeAIFileContextEntry): void {
+		this.pendingFileReads.delete(entry.path);
+		this.attachedFiles = this.attachedFiles.filter(file => file !== entry);
+		// The read may have started on another tab (dropped, then switched
+		// mid-read) — sweep the conversation mirrors so the stale chip goes.
+		for (const conversation of this.conversations) {
+			conversation.attachedFiles = conversation.attachedFiles.filter(file => file !== entry);
+		}
+		this.renderChips();
+		this.updateInputActions();
 	}
 
 	/**
@@ -2182,7 +2472,7 @@ export class VibeAIChatPane extends ViewPane {
 		));
 	}
 
-	private send(): void {
+	private async send(): Promise<void> {
 		if (!this.inputElement) {
 			return;
 		}
@@ -2256,6 +2546,14 @@ export class VibeAIChatPane extends ViewPane {
 		this.skillListLoaded = false;
 		// Phase 41: sending closes the Context Usage panel (Cursor parity).
 		this.toggleContextPanel(false);
+		// Phase 171: a drop still reading (a spinner chip) settles before
+		// the capture below — the file lands on THIS message instead of
+		// silently missing it. The wait is the read's own duration (local
+		// disk, usually ms).
+		if (this.pendingFileReads.size > 0 || this.pendingImageReads.size > 0) {
+			await Promise.allSettled([...this.pendingFileReads.values(), ...this.pendingImageReads.values()]);
+			this.renderChips();
+		}
 		// Phase 61: images attach to the user message (data URLs) and the
 		// chips clear — the request's history carries them to the backend.
 		const images = this.attachedImages.length > 0 ? [...this.attachedImages] : undefined;
@@ -2626,8 +2924,9 @@ export class VibeAIChatPane extends ViewPane {
 			// Phase 147: the editor's opened folder — the backend rebinds
 			// its tools / RAG index / rules / skills to it. Empty = no
 			// folder open (the backend refuses tool calls instead of
-			// silently binding its own source root).
-			workspaceRoot: this.currentWorkspaceRoot(),
+			// silently binding its own source root). Phase 177: a
+			// conversation-bound project folder wins (Agent Window).
+			workspaceRoot: this.conversationWorkspaceRoot(conversation),
 			...(this.model === 'Auto'
 				? {
 					model: 'auto',
@@ -3117,12 +3416,12 @@ export class VibeAIChatPane extends ViewPane {
 		disposables.add(DOM.addDisposableListener(allowTurn, DOM.EventType.CLICK, e => {
 			e.preventDefault();
 			e.stopPropagation();
-			this.resolveApprovalFromCard(card, approval.id, true, 'turn', this.currentWorkspaceRoot());
+			this.resolveApprovalFromCard(card, approval.id, true, 'turn', this.conversationWorkspaceRoot(conversation));
 		}));
 		disposables.add(DOM.addDisposableListener(allowProject, DOM.EventType.CLICK, e => {
 			e.preventDefault();
 			e.stopPropagation();
-			this.resolveApprovalFromCard(card, approval.id, true, 'project', this.currentWorkspaceRoot());
+			this.resolveApprovalFromCard(card, approval.id, true, 'project', this.conversationWorkspaceRoot(conversation));
 		}));
 		// Phase 106: the gate BLOCKS the stream until the user decides —
 		// surface the Run / Skip buttons regardless of the reading
@@ -3452,8 +3751,9 @@ export class VibeAIChatPane extends ViewPane {
 			// plan-file record in sync; the inline plan object still wins.
 			...(conversation.planPath ? { planFile: conversation.planPath } : {}),
 			// Phase 147: the editor's opened folder (same semantics as the
-			// chat request's workspaceRoot).
-			workspaceRoot: this.currentWorkspaceRoot(),
+			// chat request's workspaceRoot). Phase 177: conversation-bound
+			// folder wins (Agent Window).
+			workspaceRoot: this.conversationWorkspaceRoot(conversation),
 			...(conversation.attachedFiles.length > 0 ? { context: { files: conversation.attachedFiles } } : {}),
 		};
 	}
@@ -3780,7 +4080,11 @@ export class VibeAIChatPane extends ViewPane {
 		try {
 			let instance = this.terminalService.activeInstance;
 			if (!instance || instance.exitCode !== undefined) {
-				const cwd = this.workspaceContextService.getWorkspace().folders[0]?.uri;
+				// Phase 177: the terminal follows the active conversation's
+				// project folder (Agent Window parity — the window itself
+				// has no folder); falls back to the window's folder.
+				const rootPath = this.activeWorkspaceRoot();
+				const cwd = rootPath ? URI.file(rootPath) : this.workspaceContextService.getWorkspace().folders[0]?.uri;
 				instance = await this.terminalService.createAndFocusTerminal({ cwd });
 			} else {
 				instance.focus();
@@ -4285,7 +4589,7 @@ export class VibeAIChatPane extends ViewPane {
 		if (change.oldContent === undefined || change.oldContent === null) {
 			return false;
 		}
-		const ok = await this.vibeAIService.restoreFile(change.filePath, change.oldContent, this.currentWorkspaceRoot());
+		const ok = await this.vibeAIService.restoreFile(change.filePath, change.oldContent, this.activeWorkspaceRoot());
 		if (ok) {
 			// Phase 95: the restored file no longer shows a pending change —
 			// its red/green overlay clears with the revert (the on-disk
@@ -4322,7 +4626,7 @@ export class VibeAIChatPane extends ViewPane {
 				} else if (change.action === 'create' || change.oldContent === undefined || change.oldContent === null) {
 					// The file did not exist before this turn — discarding
 					// means deleting it again from disk.
-					ok = await this.vibeAIService.deleteFile(change.filePath, this.currentWorkspaceRoot());
+					ok = await this.vibeAIService.deleteFile(change.filePath, this.activeWorkspaceRoot());
 					if (ok) {
 						// Phase 95: the deleted file's overlay clears with
 						// the revert and its keep-bar stays up in the
@@ -4717,7 +5021,7 @@ export class VibeAIChatPane extends ViewPane {
 		this.renderDockedFilesSummary();
 		// Persist the truncated state immediately so a reload (or the
 		// resend's save) never resurrects the discarded turns.
-		this.sessionStore.save(conversation.sessionId, conversation.history, conversation.contextLimit, conversation.turns.map(turn => this.toPersistedTurn(turn)), conversation.mode, conversation.kind === 'side' ? { kind: 'side', parentSessionId: conversation.parentSessionId } : undefined);
+		this.sessionStore.save(conversation.sessionId, conversation.history, conversation.contextLimit, conversation.turns.map(turn => this.toPersistedTurn(turn)), conversation.mode, conversation.kind === 'side' ? { kind: 'side', parentSessionId: conversation.parentSessionId } : undefined, conversation.workspaceRoot);
 		// Phase 120: re-apply the session goal after the save (setGoal is
 		// the goal's authoritative writer — the save's stick covers stored
 		// goals, this re-applies the live state, e.g. a goal set mid-turn).
@@ -5289,11 +5593,76 @@ export class VibeAIChatPane extends ViewPane {
 		// Phase 149: the settled summary carries the step counts (Cursor
 		// parity) — "Worked for 53s · Read 5 files · Searched 2 times".
 		this.appendWorkedCountsSuffix(state.workLabel, state.workSteps, state.toolCards);
-		// Phase 140: settle folds again — the answer completed, so the
-		// activity collapses to its summary row (the user re-opens it with
-		// the native <details> toggle; the next send's foldWorkShell sweep
-		// remains as the backstop for manually re-expanded shells).
-		state.workShell.open = false;
+		// Phase 172: the fold is a scroll event — capture the thread's
+		// anchor BEFORE the collapse (the mutation changes scrollHeight and
+		// would invalidate every check; same rule as the render paths'
+		// pre-mutation reads), fold, then restore the anchor.
+		const workShell = state.workShell;
+		this.preserveScrollAcrossFold(conversation, workShell, state.workSteps, () => {
+			// Phase 140: settle folds again — the answer completed, so the
+			// activity collapses to its summary row (the user re-opens it
+			// with the native <details> toggle; the next send's foldWorkShell
+			// sweep remains as the backstop for manually re-expanded shells).
+			workShell.open = false;
+		});
+	}
+
+	/**
+	 * Phase 172: keeps the thread's scroll anchor across a Worked fold.
+	 * The collapse removes the whole activity block from the layout in one
+	 * step while scrollTop stays numerically valid — a thread pinned at
+	 * the bottom clamps to the new bottom, but any other position lands
+	 * one fold-height earlier (the previous turn's content), and the
+	 * answer streaming below stops chasing once a late clamp event finds
+	 * the viewport off-bottom and flips followThreadBottom. The anchor is
+	 * read before `fold()` runs, the restore lands after it. Three rules:
+	 *
+	 * 1. Pinned at the fold (the follow flag, or within its threshold —
+	 *    the OR heals a flag a mid-turn clamp race already flipped while
+	 *    the position stayed at the bottom): re-land the bottom
+	 *    immediately, on the next frame and after the heights settle
+	 *    (scrollToLatestTurn's three-pass pattern — late growth: async
+	 *    code-block swaps, the turn footer), every pass only while the
+	 *    chase is still on (a user scroll-up between passes cancels the
+	 *    rest).
+	 * 2. Reading elsewhere with the fold entirely above the viewport:
+	 *    compensate the scrollTop by the removed height so the reading
+	 *    anchor stays on the same content.
+	 * 3. Anything else (the fold crosses the viewport): native behavior.
+	 */
+	private preserveScrollAcrossFold(conversation: VibeAIConversation, shell: HTMLElement, steps: HTMLElement | undefined, fold: () => void): void {
+		const holder = this.messagesContainer;
+		if (!holder) {
+			fold();
+			return;
+		}
+		const pinned = this.followThreadBottom
+			|| holder.scrollTop + holder.clientHeight >= holder.scrollHeight - FOLLOW_LATEST_THRESHOLD_PX;
+		let removedHeight = 0;
+		if (!pinned && steps) {
+			const holderRect = holder.getBoundingClientRect();
+			const shellRect = shell.getBoundingClientRect();
+			if (shellRect.bottom <= holderRect.top + 1) {
+				removedHeight = steps.offsetHeight;
+			}
+		}
+		fold();
+		if (pinned) {
+			const win = DOM.getWindow(holder);
+			this.scrollBottom(conversation, true);
+			win.requestAnimationFrame(() => {
+				if (!this._store.isDisposed && this.followThreadBottom) {
+					this.scrollBottom(conversation, true);
+				}
+			});
+			win.setTimeout(() => {
+				if (!this._store.isDisposed && this.followThreadBottom) {
+					this.scrollBottom(conversation, true);
+				}
+			}, RESTORE_SCROLL_SETTLE_MS);
+		} else if (removedHeight > 0) {
+			holder.scrollTop = Math.max(0, holder.scrollTop - removedHeight);
+		}
 	}
 
 	/**
@@ -5854,6 +6223,12 @@ export class VibeAIChatPane extends ViewPane {
 			this.renderDockedFilesSummary(state.turnChanges, aligned ? conversation.turns.length - 1 : -1);
 		}
 
+		// Phase 172: the folds above plus the footer just added grew and
+		// shrank the thread after the last render — a following tab
+		// re-pins so the turn ENDS on the newest content (chase-only:
+		// scrollBottom skips a reading position and background tabs).
+		this.scrollBottom(conversation);
+
 		// Tear the turn's live state down — each conversation finishes
 		// independently of other tabs' streams. `turnChanges`/`turnStartedAt`
 		// stay on the state so a late Discard/Review click still works.
@@ -5871,7 +6246,7 @@ export class VibeAIChatPane extends ViewPane {
 		// the per-turn artifacts go along so history restores losslessly.
 		// Best-effort: a persistence failure must never break the chat UI.
 		try {
-			this.sessionStore.save(conversation.sessionId, conversation.history, conversation.contextLimit, conversation.turns.map(turn => this.toPersistedTurn(turn)), conversation.mode, conversation.kind === 'side' ? { kind: 'side', parentSessionId: conversation.parentSessionId } : undefined);
+			this.sessionStore.save(conversation.sessionId, conversation.history, conversation.contextLimit, conversation.turns.map(turn => this.toPersistedTurn(turn)), conversation.mode, conversation.kind === 'side' ? { kind: 'side', parentSessionId: conversation.parentSessionId } : undefined, conversation.workspaceRoot);
 			// Phase 120: re-apply the session goal after the save (setGoal
 			// is the goal's authoritative writer — the save's stick covers
 			// stored goals, this re-applies the live state, e.g. a goal
@@ -6152,7 +6527,7 @@ export class VibeAIChatPane extends ViewPane {
 			));
 		}
 		// Keep the persisted turns in sync so the rollback survives reloads.
-		this.sessionStore.save(conversation.sessionId, conversation.history, conversation.contextLimit, conversation.turns.map(turn => this.toPersistedTurn(turn)), conversation.mode, conversation.kind === 'side' ? { kind: 'side', parentSessionId: conversation.parentSessionId } : undefined);
+		this.sessionStore.save(conversation.sessionId, conversation.history, conversation.contextLimit, conversation.turns.map(turn => this.toPersistedTurn(turn)), conversation.mode, conversation.kind === 'side' ? { kind: 'side', parentSessionId: conversation.parentSessionId } : undefined, conversation.workspaceRoot);
 		// Phase 120: re-apply the session goal after the save (setGoal is
 		// the goal's authoritative writer — the save's stick covers stored
 		// goals, this re-applies the live state, e.g. a goal set mid-turn).
@@ -6684,7 +7059,7 @@ export class VibeAIChatPane extends ViewPane {
 	/** Phase 95: best-effort persistence of a conversation's turn records. */
 	private persistTurns(conversation: VibeAIConversation): void {
 		try {
-			this.sessionStore.save(conversation.sessionId, conversation.history, conversation.contextLimit, conversation.turns.map(turn => this.toPersistedTurn(turn)), conversation.mode, conversation.kind === 'side' ? { kind: 'side', parentSessionId: conversation.parentSessionId } : undefined);
+			this.sessionStore.save(conversation.sessionId, conversation.history, conversation.contextLimit, conversation.turns.map(turn => this.toPersistedTurn(turn)), conversation.mode, conversation.kind === 'side' ? { kind: 'side', parentSessionId: conversation.parentSessionId } : undefined, conversation.workspaceRoot);
 			// Phase 120: re-apply the session goal after the save (setGoal
 			// is the goal's authoritative writer — the save's stick covers
 			// stored goals, this re-applies the live state, e.g. a goal
@@ -7043,7 +7418,7 @@ export class VibeAIChatPane extends ViewPane {
 		}
 		listeners.clear();
 		DOM.clearNode(rowEl);
-		rowEl.style.display = (this.attachedFiles.length > 0 || this.attachedImages.length > 0) ? 'flex' : 'none';
+		rowEl.style.display = (this.attachedFiles.length > 0 || this.attachedImages.length > 0 || this.pendingImageReads.size > 0) ? 'flex' : 'none';
 		// Phase 61: pasted-image chips — thumbnail + remove.
 		this.attachedImages.forEach((dataUrl, index) => {
 			const chip = DOM.append(rowEl, $('.vibe-ai-chip.vibe-ai-image-chip'));
@@ -7058,18 +7433,32 @@ export class VibeAIChatPane extends ViewPane {
 				this.updateInputActions();
 			}));
 		});
+		// Phase 171: images still decoding render as dashed spinner tiles —
+		// the thumbnails replace them as each read settles.
+		for (let i = 0; i < this.pendingImageReads.size; i++) {
+			const chip = DOM.append(rowEl, $('.vibe-ai-chip.vibe-ai-image-chip.vibe-ai-image-loading'));
+			DOM.append(chip, $('span.codicon.codicon-loading.codicon-modifier-spin.vibe-ai-chip-spinner'));
+		}
 		for (const file of this.attachedFiles) {
-			const chip = DOM.append(rowEl, $('.vibe-ai-chip'));
+			// Phase 171: a read still in flight renders the chip with a
+			// spinner in place of the file icon; the content lands when it
+			// settles (finalizeDroppedFile) or the chip comes off with an
+			// error (dropPlaceholderFile).
+			const pending = this.pendingFileReads.has(file.path);
+			const chip = DOM.append(rowEl, $('.vibe-ai-chip' + (pending ? '.vibe-ai-chip-loading' : '')));
 			// Phase 105: dropped folders render the folder icon.
-			const icon = DOM.append(chip, $('span.codicon' + (file.kind === 'folder' ? '.codicon-symbol-folder' : '.codicon-symbol-file')));
+			const icon = DOM.append(chip, $('span.codicon' + (pending
+				? '.codicon-loading.codicon-modifier-spin.vibe-ai-chip-spinner'
+				: (file.kind === 'folder' ? '.codicon-symbol-folder' : '.codicon-symbol-file'))));
 			icon.setAttribute('aria-hidden', 'true');
 			const name = DOM.append(chip, $('span.vibe-ai-chip-name'));
 			name.textContent = file.path;
-			name.title = file.path;
+			name.title = pending ? localize('vibeAIChat.chipReading', "Reading…") : file.path;
 			const remove = DOM.append(chip, $('button.codicon.codicon-close.vibe-ai-chip-remove')) as HTMLButtonElement;
 			remove.title = localize('vibeAIChat.chipRemove', "Remove from context");
 			listeners.add(DOM.addDisposableListener(remove, DOM.EventType.CLICK, () => {
 				this.attachedFiles = this.attachedFiles.filter(f => f.path !== file.path);
+				this.pendingFileReads.delete(file.path);
 				this.renderChips();
 			}));
 		}
@@ -7280,6 +7669,29 @@ export class VibeAIChatPane extends ViewPane {
 		return this.workspaceContextService.getWorkspace().folders[0]?.uri.fsPath ?? '';
 	}
 
+	/**
+	 * Phase 177: the workspace root a conversation's requests carry — the
+	 * conversation's own project folder when it has one (Agent Window
+	 * parity: continue a project-A conversation from a folder-less window
+	 * and the backend still rebinds to project A), the window's folder
+	 * otherwise.
+	 */
+	private conversationWorkspaceRoot(conversation: VibeAIConversation): string {
+		return conversation.workspaceRoot ?? this.currentWorkspaceRoot();
+	}
+
+	/**
+	 * Phase 177: workspace root for actions outside a request payload
+	 * (checkpoint rollback, skills menu, the agent terminal) — the active
+	 * conversation's project folder when present, the window's folder
+	 * otherwise (Agent Window parity: the actions keep targeting the
+	 * project the conversation belongs to).
+	 */
+	private activeWorkspaceRoot(): string {
+		const active = this.getActiveConversation();
+		return active ? this.conversationWorkspaceRoot(active) : this.currentWorkspaceRoot();
+	}
+
 	private async refreshContextUsage(target?: VibeAIConversation): Promise<void> {
 		const conversation = target ?? this.getActiveConversation();
 		if (!conversation) {
@@ -7315,7 +7727,8 @@ export class VibeAIChatPane extends ViewPane {
 				...(this.mode === 'agent' && conversation.planPath ? { planFile: conversation.planPath } : {}),
 				// Phase 147: estimate against the opened folder (rules /
 				// skills / MCP are workspace-scoped) — estimate ≡ sent.
-				workspaceRoot: this.currentWorkspaceRoot(),
+				// Phase 177: conversation-bound folder wins (Agent Window).
+				workspaceRoot: this.conversationWorkspaceRoot(conversation),
 			});
 			// The ring updates regardless of the panel state.
 			if (seq !== conversation.contextUsageSeq) {
@@ -7375,7 +7788,7 @@ export class VibeAIChatPane extends ViewPane {
 		if (!this.skillListLoaded) {
 			this.skillListLoaded = true;
 			try {
-				this.skillList = await this.vibeAIService.listSkills(this.currentWorkspaceRoot());
+				this.skillList = await this.vibeAIService.listSkills(this.activeWorkspaceRoot());
 			} catch (err) {
 				this.skillListLoaded = false;
 				this.logService.debug('[VibeAI] skills request failed', err);
@@ -7385,7 +7798,7 @@ export class VibeAIChatPane extends ViewPane {
 			// (Agent mode only — /name dispatch is an agent-mode command);
 			// same lazy-load + refresh-after-send lifecycle as the skills.
 			this.subagentList = this.mode === 'agent'
-				? await this.vibeAIService.listSubagents(this.currentWorkspaceRoot()).catch(err => {
+				? await this.vibeAIService.listSubagents(this.activeWorkspaceRoot()).catch(err => {
 					this.logService.debug('[VibeAI] subagents request failed', err);
 					return [];
 				})
@@ -8218,6 +8631,10 @@ export class VibeAIChatPane extends ViewPane {
 		// keeps carrying it as planFile on agent turns (Cursor plan-as-file
 		// parity survives restarts).
 		conversation.planPath = session.planPath;
+		// Phase 177: the conversation's project folder rides along — the
+		// restored tab keeps sending the session's workspaceRoot even from
+		// the Agent Window (whose own workspace has no folder).
+		conversation.workspaceRoot = session.workspaceRoot;
 		// Phase 101: the tab's recorded scroll position rides along —
 		// scrollToLatestTurn lands the thread there (the very bottom when
 		// none / pinned at it) instead of always the latest turn.

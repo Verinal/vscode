@@ -116,6 +116,12 @@ export interface IOpenConfiguration extends IBaseOpenConfiguration {
 	readonly remoteAuthority?: string;
 	readonly forceProfile?: string;
 	readonly forceTempProfile?: boolean;
+	/**
+	 * VibeCoding fork: open the window as the dedicated Agent Window
+	 * (title-bar pill, Cursor parity) — flagged into the window
+	 * configuration so the renderer can enter the agent layout.
+	 */
+	readonly vibeAgentWindow?: boolean;
 }
 
 export interface IOpenEmptyConfiguration extends IBaseOpenConfiguration { }

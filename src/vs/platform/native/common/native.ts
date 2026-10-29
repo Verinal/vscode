@@ -281,6 +281,13 @@ export interface ICommonNativeHostService {
 
 	openAgentsWindow(options?: IOpenAgentsWindowOptions): Promise<void>;
 
+	/**
+	 * VibeCoding fork: opens (or focuses) the dedicated Agent Window
+	 * (Cursor-parity title-bar pill) — a full-workbench window on the
+	 * neutral agent workspace, flagged `vibeAgentWindow`.
+	 */
+	openVibeAgentWindow(): Promise<void>;
+
 	getAgentHostEditorState(legacyEditorSessionCount: number): Promise<IAgentHostEditorState>;
 	updateAgentHostEditorState(update: AgentHostEditorUpdate): Promise<void>;
 	claimAgentsWindowInvitation(resource: UriComponents, developerMode: boolean): Promise<IAgentsWindowInvitation | undefined>;

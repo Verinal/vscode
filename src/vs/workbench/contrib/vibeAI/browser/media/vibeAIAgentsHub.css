@@ -1,0 +1,1006 @@
+/*---------------------------------------------------------------------------------------------
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *--------------------------------------------------------------------------------------------*/
+
+/* ==================== VibeAI Agents Hub — Cursor Agents page layout ==================== */
+/* Two columns like Cursor's Agents window: a left rail (actions + project threads) and a
+   main canvas (project top bar + centered composer + background strip). */
+
+.vibe-ai-agents-hub {
+	display: flex;
+	width: 100%;
+	height: 100%;
+	overflow: hidden;
+	background: var(--vscode-editor-background);
+	color: var(--vscode-editor-foreground);
+	box-sizing: border-box;
+	position: relative;
+}
+
+/* user request: no blue focus boxes anywhere in the hub — the global
+   workbench textarea/button focus outline must not bleed through */
+.vibe-ai-agents-hub *:focus,
+.vibe-ai-agents-hub *:focus-visible {
+	outline: none !important;
+}
+
+/* --- anchored dropdown menu (Cursor-style, Phase 181 r3) ---------------- */
+
+.vibe-ai-agents-menu {
+	position: absolute;
+	z-index: 1000;
+	min-width: 240px;
+	max-width: 320px;
+	max-height: 340px;
+	overflow-y: auto;
+	background: var(--vscode-editorWidget-background, var(--vscode-sideBar-background));
+	border: 1px solid var(--vscode-editorWidget-border, rgba(128, 128, 128, 0.3));
+	border-radius: 8px;
+	box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35);
+	padding: 4px;
+	box-sizing: border-box;
+}
+
+.vibe-ai-agents-menu-search {
+	width: 100%;
+	border: none;
+	border-bottom: 1px solid var(--vscode-editorWidget-border, transparent);
+	background: transparent;
+	color: var(--vscode-input-foreground);
+	font-family: var(--vscode-editor-font-family);
+	font-size: 12px;
+	padding: 5px 6px;
+	margin-bottom: 4px;
+	box-sizing: border-box;
+}
+
+.vibe-ai-agents-menu-label {
+	font-size: 10px;
+	font-weight: 600;
+	opacity: 0.7;
+	padding: 4px 6px 2px;
+	letter-spacing: 0.4px;
+}
+
+.vibe-ai-agents-menu-row {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	padding: 4px 8px;
+	border-radius: 4px;
+	cursor: pointer;
+	font-size: 12px;
+	color: var(--vscode-sideBar-foreground);
+	white-space: nowrap;
+	overflow: hidden;
+}
+
+.vibe-ai-agents-menu-row:hover {
+	background: var(--vscode-toolbar-hoverBackground);
+}
+
+.vibe-ai-agents-menu-row .codicon {
+	flex-shrink: 0;
+	font-size: 12px;
+}
+
+.vibe-ai-agents-menu-row .codicon-check {
+	margin-left: auto;
+	color: var(--vscode-sideBar-foreground);
+}
+
+.vibe-ai-agents-menu-sep {
+	height: 1px;
+	background: var(--vscode-editorWidget-border, rgba(128, 128, 128, 0.25));
+	margin: 4px 2px;
+}
+
+/* --- left rail ------------------------------------------------------- */
+
+.vibe-ai-agents-side {
+	display: flex;
+	flex-direction: column;
+	flex-shrink: 0;
+	width: 260px;
+	overflow-y: auto;
+	background: var(--vscode-sideBar-background);
+	border-right: 1px solid var(--vscode-sideBar-border, transparent);
+	box-sizing: border-box;
+	padding: 10px 8px 0;
+}
+
+.vibe-ai-agents-actions,
+.vibe-ai-agents-foot {
+	display: flex;
+	flex-direction: column;
+	gap: 1px;
+	flex-shrink: 0;
+}
+
+.vibe-ai-agents-foot {
+	margin-top: auto;
+	padding: 8px 0;
+	border-top: 1px solid var(--vscode-sideBar-border, transparent);
+}
+
+.vibe-ai-agents-row {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	height: 26px;
+	padding: 0 8px;
+	border-radius: 4px;
+	cursor: pointer;
+	font-size: 12px;
+	color: var(--vscode-sideBar-foreground);
+	white-space: nowrap;
+}
+
+.vibe-ai-agents-row:hover {
+	background: var(--vscode-list-hoverBackground, rgba(128, 128, 128, 0.12));
+}
+
+.vibe-ai-agents-row.disabled {
+	opacity: 0.45;
+	cursor: default;
+}
+
+.vibe-ai-agents-row-label {
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+/* --- projects section + thread list ---------------------------------- */
+
+.vibe-ai-agents-projects {
+	flex-shrink: 0;
+	margin-top: 16px;
+	padding: 0 4px;
+}
+
+.vibe-ai-agents-section-label {
+	font-size: 11px;
+	font-weight: 600;
+	letter-spacing: 0.4px;
+	opacity: 0.75;
+	margin-bottom: 6px;
+}
+
+.vibe-ai-agents-project {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	height: 24px;
+	padding: 0 8px;
+	font-size: 12px;
+	color: var(--vscode-sideBar-foreground);
+	overflow: hidden;
+	white-space: nowrap;
+}
+
+.vibe-ai-agents-project-name {
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+.vibe-ai-agents-sessions {
+	flex: 1 1 auto;
+	display: flex;
+	flex-direction: column;
+	gap: 1px;
+	margin-top: 6px;
+	padding: 0 4px 12px;
+}
+
+.vibe-ai-agents-empty {
+	padding: 8px;
+	font-size: 12px;
+	opacity: 0.65;
+	line-height: 1.5;
+}
+
+.vibe-ai-agents-thread {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	min-height: 26px;
+	padding: 3px 8px;
+	border-radius: 4px;
+	cursor: pointer;
+	font-size: 12px;
+	color: var(--vscode-sideBar-foreground);
+}
+
+.vibe-ai-agents-thread:hover {
+	background: var(--vscode-list-hoverBackground, rgba(128, 128, 128, 0.12));
+}
+
+.vibe-ai-agents-thread.live {
+	color: var(--vscode-focusBorder, var(--vscode-sideBar-foreground));
+}
+
+/* Phase 180: a thread an IDE window just handed over (highlighted once) */
+.vibe-ai-agents-thread.handoff {
+	background: var(--vscode-list-focusBackground, rgba(90, 140, 255, 0.18));
+	color: var(--vscode-focusBorder, var(--vscode-sideBar-foreground));
+}
+
+.vibe-ai-agents-pin {
+	font-size: 12px;
+	flex-shrink: 0;
+	opacity: 0.8;
+}
+
+.vibe-ai-agents-thread-title {
+	flex: 1 1 auto;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.vibe-ai-agents-thread-meta {
+	display: flex;
+	align-items: center;
+	gap: 4px;
+	flex-shrink: 0;
+	font-size: 11px;
+	opacity: 0.7;
+	white-space: nowrap;
+}
+
+/* --- main canvas ------------------------------------------------------ */
+
+.vibe-ai-agents-main {
+	flex: 1 1 auto;
+	display: flex;
+	flex-direction: column;
+	min-width: 0;
+	overflow: hidden;
+}
+
+.vibe-ai-agents-topbar {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	flex-shrink: 0;
+	height: 36px;
+	padding: 0 16px;
+	font-size: 12px;
+}
+
+.vibe-ai-agents-topbar-project {
+	font-weight: 600;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.vibe-ai-agents-env {
+	display: flex;
+	align-items: center;
+	gap: 5px;
+	padding: 2px 8px;
+	border-radius: 10px;
+	font-size: 11px;
+	border: 1px solid var(--vscode-editorWidget-border, transparent);
+	opacity: 0.85;
+	white-space: nowrap;
+}
+
+/* --- centered composer ------------------------------------------------ */
+
+.vibe-ai-agents-center {
+	flex: 1 1 auto;
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	justify-content: center;
+	gap: 12px;
+	padding: 24px;
+	overflow-y: auto;
+	box-sizing: border-box;
+}
+
+.vibe-ai-agents-composer {
+	display: flex;
+	flex-direction: column;
+	width: min(560px, 100%);
+	border: 1px solid var(--vscode-input-border, var(--vscode-editorWidget-border, transparent));
+	border-radius: 12px;
+	background: var(--vscode-input-background);
+	box-shadow: 0 1px 6px rgba(0, 0, 0, 0.12);
+	overflow: hidden;
+}
+
+.vibe-ai-agents-composer-input {
+	flex: 1 1 auto;
+	resize: none;
+	border: none;
+	outline: none;
+	background: transparent;
+	color: var(--vscode-input-foreground);
+	font-family: var(--vscode-editor-font-family);
+	font-size: 13px;
+	line-height: 1.5;
+	padding: 12px 14px 4px;
+	box-sizing: border-box;
+}
+
+.vibe-ai-agents-composer-input::placeholder {
+	color: var(--vscode-input-placeholderForeground);
+}
+
+.vibe-ai-agents-composer-bar {
+	display: flex;
+	align-items: center;
+	justify-content: flex-end;
+	gap: 10px;
+	padding: 6px 10px 8px;
+}
+
+.vibe-ai-agents-model {
+	font-size: 11px;
+	opacity: 0.75;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	max-width: 200px;
+}
+
+.vibe-ai-agents-send {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	width: 24px;
+	height: 24px;
+	border: none;
+	border-radius: 50%;
+	background: var(--vscode-button-background);
+	color: var(--vscode-button-foreground);
+	cursor: pointer;
+	font-size: 14px;
+	flex-shrink: 0;
+}
+
+.vibe-ai-agents-send:hover {
+	background: var(--vscode-button-hoverBackground);
+}
+
+/* --- background agents strip ------------------------------------------ */
+
+.vibe-ai-agents-bg {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+	width: min(560px, 100%);
+}
+
+.vibe-ai-agents-bg-title {
+	font-size: 11px;
+	font-weight: 600;
+	letter-spacing: 0.4px;
+	opacity: 0.75;
+}
+
+.vibe-ai-agents-bg-card {
+	display: flex;
+	flex-direction: column;
+	gap: 2px;
+	padding: 8px 12px;
+	border: 1px solid var(--vscode-editorWidget-border, transparent);
+	border-radius: 8px;
+	background: var(--vscode-editorWidget-background);
+	font-size: 12px;
+}
+
+.vibe-ai-agents-bg-card-title {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	font-weight: 600;
+}
+
+.vibe-ai-agents-bg-name {
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.vibe-ai-agents-bg-badge {
+	margin-left: auto;
+	padding: 1px 8px;
+	border-radius: 8px;
+	font-size: 10px;
+	font-weight: 600;
+	background: var(--vscode-badge-background);
+	color: var(--vscode-badge-foreground);
+	text-transform: uppercase;
+}
+
+.vibe-ai-agents-bg-badge.done {
+	background: rgba(103, 178, 91, 0.25);
+}
+
+.vibe-ai-agents-bg-badge.error {
+	background: rgba(226, 90, 90, 0.25);
+}
+
+.vibe-ai-agents-bg-desc {
+	opacity: 0.8;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+/* --- shared icon states ------------------------------------------------ */
+
+.vibe-ai-agents-spin {
+	animation: vibe-ai-agents-spin 1.4s linear infinite;
+}
+
+@keyframes vibe-ai-agents-spin {
+	to {
+		transform: rotate(360deg);
+	}
+}
+
+.vibe-ai-agents-ok {
+	color: var(--vscode-testing-iconPassed, #67b25b);
+}
+
+.vibe-ai-agents-fail {
+	color: var(--vscode-testing-iconFailed, #e25a5a);
+}
+
+.vibe-ai-agents-icon-btn {
+	display: none;
+	border: none;
+	background: transparent;
+	color: var(--vscode-sideBar-foreground);
+	cursor: pointer;
+	font-size: 12px;
+	padding: 2px;
+	flex-shrink: 0;
+	opacity: 0.7;
+}
+
+.vibe-ai-agents-thread:hover .vibe-ai-agents-icon-btn {
+	display: block;
+}
+
+.vibe-ai-agents-icon-btn:hover {
+	opacity: 1;
+}
+
+/* --- agent window (Phase 177) ----------------------------------------- */
+
+.vibe-ai-agents-thread-project {
+	opacity: 0.85;
+	color: var(--vscode-descriptionForeground);
+}
+
+.vibe-ai-agents-ide {
+	display: flex;
+	align-items: center;
+	gap: 5px;
+	border: 1px solid var(--vscode-editorWidget-border, transparent);
+	border-radius: 10px;
+	background: transparent;
+	color: var(--vscode-sideBar-foreground);
+	font-size: 11px;
+	padding: 2px 8px;
+	cursor: pointer;
+	white-space: nowrap;
+	margin-left: auto;
+}
+
+.vibe-ai-agents-ide:hover {
+	background: var(--vscode-toolbar-hoverBackground);
+}
+
+/* --- parallel runs (Phase 179, Cursor multi-agent) --------------------- */
+
+/* composer mic: voice input (Phase 181 r4 — replaces the ×N parallel toggle) */
+.vibe-ai-agents-mic {
+	border: none;
+	background: transparent;
+	color: var(--vscode-sideBar-foreground);
+	font-size: 14px;
+	padding: 2px 4px;
+	cursor: pointer;
+	flex-shrink: 0;
+}
+
+.vibe-ai-agents-mic:hover {
+	background: var(--vscode-toolbar-hoverBackground);
+	border-radius: 4px;
+}
+
+.vibe-ai-agents-mic.active {
+	color: var(--vscode-focusBorder);
+}
+
+/* runs section under the composer (mirrors the background strip) */
+.vibe-ai-agents-par {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+	width: min(560px, 100%);
+}
+
+.vibe-ai-agents-par-title {
+	font-size: 11px;
+	font-weight: 600;
+	letter-spacing: 0.4px;
+	opacity: 0.75;
+}
+
+.vibe-ai-agents-par-card {
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+	padding: 8px 12px;
+	border: 1px solid var(--vscode-editorWidget-border, transparent);
+	border-radius: 8px;
+	background: var(--vscode-editorWidget-background);
+	font-size: 12px;
+}
+
+.vibe-ai-agents-par-head {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	font-weight: 600;
+	min-width: 0;
+}
+
+.vibe-ai-agents-par-prompt {
+	flex: 1 1 auto;
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.vibe-ai-agents-par-variant {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	min-width: 0;
+	opacity: 0.92;
+}
+
+.vibe-ai-agents-par-model {
+	flex-shrink: 0;
+	font-weight: 600;
+	white-space: nowrap;
+}
+
+.vibe-ai-agents-par-desc {
+	flex: 1 1 auto;
+	min-width: 0;
+	opacity: 0.8;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.vibe-ai-agents-par-btn {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	border: none;
+	background: transparent;
+	color: inherit;
+	cursor: pointer;
+	font-size: 12px;
+	padding: 2px;
+	flex-shrink: 0;
+	opacity: 0.7;
+}
+
+.vibe-ai-agents-par-btn:hover {
+	opacity: 1;
+	background: var(--vscode-toolbar-hoverBackground);
+	border-radius: 4px;
+}
+
+.vibe-ai-agents-par-merge {
+	color: var(--vscode-focusBorder);
+}
+
+/* --- agent window app shell (Phase 181, Cursor parity) ----------------- */
+
+/* No editor tab bar, no centered window title — the workbench reads like
+   a standalone app (the class is stamped on the workbench root by the
+   agent-window bootstrap contribution). */
+.monaco-workbench.vibe-agent-window .tabs-and-actions-container {
+	display: none !important;
+}
+
+.monaco-workbench.vibe-agent-window .titlebar .window-title {
+	display: none !important;
+}
+
+/* the fork's status bar (Vibe Tab / stats entries) has no place here */
+.monaco-workbench.vibe-agent-window .part.statusbar {
+	display: none !important;
+}
+
+/* Phase 181 r7: the right-hand chat panel is IDE-only — a restored
+   auxiliary bar would resurrect the "New Agent" chat in the agent window. */
+.monaco-workbench.vibe-agent-window .part.auxiliarybar {
+	display: none !important;
+}
+
+/* --- rail header + search + collapse (Phase 181 r2) --------------------- */
+
+.vibe-ai-agents-side-head {
+	display: flex;
+	align-items: center;
+	gap: 2px;
+	flex-shrink: 0;
+	padding: 0 2px 6px;
+}
+
+.vibe-ai-agents-head-btn {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	border: none;
+	background: transparent;
+	color: var(--vscode-sideBar-foreground);
+	cursor: pointer;
+	font-size: 14px;
+	padding: 4px;
+	border-radius: 4px;
+	opacity: 0.8;
+}
+
+.vibe-ai-agents-head-btn:hover {
+	background: var(--vscode-toolbar-hoverBackground);
+	opacity: 1;
+}
+
+.vibe-ai-agents-filter {
+	flex-shrink: 0;
+	border: 1px solid var(--vscode-input-border, var(--vscode-editorWidget-border, transparent));
+	border-radius: 4px;
+	background: var(--vscode-input-background);
+	color: var(--vscode-input-foreground);
+	font-family: var(--vscode-editor-font-family);
+	font-size: 12px;
+	padding: 4px 8px;
+	margin-bottom: 6px;
+	outline: none;
+	box-sizing: border-box;
+}
+
+.vibe-ai-agents-hub.rail-collapsed .vibe-ai-agents-side {
+	display: none;
+}
+
+.vibe-ai-agents-rail-expand {
+	display: none;
+	margin-right: auto;
+}
+
+.vibe-ai-agents-hub.rail-collapsed .vibe-ai-agents-rail-expand {
+	display: flex;
+}
+
+/* Repositories header row: label + hover icons (Cursor parity) */
+.vibe-ai-agents-repos-head {
+	display: flex;
+	align-items: center;
+	margin-bottom: 4px;
+}
+
+.vibe-ai-agents-repos-head .vibe-ai-agents-section-label {
+	flex: 1 1 auto;
+	margin-bottom: 0;
+}
+
+.vibe-ai-agents-repos-head .vibe-ai-agents-icon-btn {
+	display: block;
+}
+
+/* thread rows: status dot before the title (Cursor parity) */
+.vibe-ai-agents-thread::before {
+	content: '';
+	width: 6px;
+	height: 6px;
+	border-radius: 50%;
+	background: var(--vscode-descriptionForeground);
+	opacity: 0.55;
+	flex-shrink: 0;
+	margin-left: 2px;
+}
+
+.vibe-ai-agents-thread .vibe-ai-agents-pin {
+	margin-left: 0;
+}
+
+/* --- sidebar: New Project + Repositories (Phase 181) -------------------- */
+
+.vibe-ai-agents-new-project {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	height: 24px;
+	padding: 0 8px;
+	border-radius: 4px;
+	cursor: pointer;
+	font-size: 12px;
+	color: var(--vscode-sideBar-foreground);
+	white-space: nowrap;
+}
+
+.vibe-ai-agents-new-project:hover {
+	background: var(--vscode-list-hoverBackground, rgba(128, 128, 128, 0.12));
+}
+
+.vibe-ai-agents-repos-label {
+	margin-top: 10px;
+}
+
+.vibe-ai-agents-repos {
+	display: flex;
+	flex-direction: column;
+	gap: 1px;
+}
+
+.vibe-ai-agents-repo {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	height: 24px;
+	padding: 0 8px;
+	border-radius: 4px;
+	cursor: pointer;
+	font-size: 12px;
+	color: var(--vscode-sideBar-foreground);
+	overflow: hidden;
+	white-space: nowrap;
+}
+
+.vibe-ai-agents-repo:hover {
+	background: var(--vscode-list-hoverBackground, rgba(128, 128, 128, 0.12));
+}
+
+.vibe-ai-agents-repo.active {
+	background: var(--vscode-list-activeSelectionBackground, rgba(90, 140, 255, 0.18));
+	color: var(--vscode-list-activeSelectionForeground, var(--vscode-sideBar-foreground));
+}
+
+.vibe-ai-agents-repo .codicon {
+	flex-shrink: 0;
+	font-size: 12px;
+}
+
+.vibe-ai-agents-repo-name {
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+/* --- sidebar footer: account row (Phase 181) ---------------------------- */
+
+.vibe-ai-agents-user {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	height: 28px;
+	padding: 0 6px;
+	font-size: 12px;
+	color: var(--vscode-sideBar-foreground);
+}
+
+.vibe-ai-agents-avatar {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	width: 20px;
+	height: 20px;
+	border-radius: 50%;
+	background: var(--vscode-button-background);
+	color: var(--vscode-button-foreground);
+	font-size: 10px;
+	font-weight: 700;
+	flex-shrink: 0;
+}
+
+.vibe-ai-agents-user-name {
+	flex: 1 1 auto;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+/* the gear is a persistent control here, not a hover-only row action */
+.vibe-ai-agents-user .vibe-ai-agents-icon-btn {
+	display: block;
+}
+
+/* --- composer: context chips + add / model buttons (Phase 181) ---------- */
+
+.vibe-ai-agents-chips {
+	display: flex;
+	align-items: center;
+	gap: 4px;
+	width: min(560px, 100%);
+	padding: 0 2px 8px;
+	flex-wrap: wrap;
+}
+
+.vibe-ai-agents-chip {
+	display: flex;
+	align-items: center;
+	gap: 5px;
+	padding: 2px 6px;
+	border-radius: 8px;
+	font-size: 11px;
+	border: none;
+	background: transparent;
+	color: var(--vscode-sideBar-foreground);
+	white-space: nowrap;
+	max-width: 200px;
+	box-sizing: border-box;
+}
+
+.vibe-ai-agents-chip-static {
+	opacity: 0.85;
+	cursor: default;
+}
+
+button.vibe-ai-agents-chip {
+	cursor: pointer;
+}
+
+button.vibe-ai-agents-chip:hover {
+	background: var(--vscode-toolbar-hoverBackground);
+}
+
+.vibe-ai-agents-chip-caret {
+	font-size: 10px;
+	opacity: 0.7;
+	flex-shrink: 0;
+}
+
+.vibe-ai-agents-chip .vibe-ai-agents-project-name {
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+.vibe-ai-agents-add {
+	border: none;
+	background: transparent;
+	color: var(--vscode-sideBar-foreground);
+	cursor: pointer;
+	font-size: 15px;
+	padding: 2px;
+	flex-shrink: 0;
+	opacity: 0.75;
+	margin-right: auto;
+}
+
+.vibe-ai-agents-add:hover {
+	opacity: 1;
+	background: var(--vscode-toolbar-hoverBackground);
+	border-radius: 4px;
+}
+
+button.vibe-ai-agents-model {
+	display: flex;
+	align-items: center;
+	gap: 4px;
+	border: none;
+	background: transparent;
+	color: var(--vscode-sideBar-foreground);
+	cursor: pointer;
+	font-size: 11px;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	max-width: 220px;
+	padding: 2px 4px;
+	border-radius: 4px;
+	flex-shrink: 0;
+}
+
+button.vibe-ai-agents-model:hover {
+	background: var(--vscode-toolbar-hoverBackground);
+}
+
+button.vibe-ai-agents-model .codicon {
+	font-size: 10px;
+	opacity: 0.7;
+	flex-shrink: 0;
+}
+
+/* --- center transcript (Phase 181 r8): expanded thread ------------------- */
+
+.vibe-ai-agents-chat {
+	display: flex;
+	flex-direction: column;
+	flex: 1 1 auto;
+	min-height: 0;
+	width: min(760px, 100%);
+	margin: 0 auto;
+}
+
+.vibe-ai-agents-chat-head {
+	display: flex;
+	align-items: center;
+	gap: 4px;
+	padding: 2px 0 10px;
+}
+
+.vibe-ai-agents-chat-title {
+	flex: 0 1 auto;
+	font-size: 12px;
+	color: var(--vscode-sideBar-foreground);
+	background: var(--vscode-editorWidget-background, rgba(128, 128, 128, 0.08));
+	border-radius: 8px;
+	padding: 4px 10px;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.vibe-ai-agents-chat-body {
+	flex: 1;
+	min-height: 0;
+	overflow-y: auto;
+	display: flex;
+	flex-direction: column;
+	gap: 10px;
+	padding: 4px 2px 12px;
+}
+
+.vibe-ai-agents-chat-msg {
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+}
+
+.vibe-ai-agents-chat-msg.user {
+	align-self: stretch;
+	align-items: stretch;
+}
+
+.vibe-ai-agents-chat-meta {
+	display: flex;
+	align-items: center;
+	gap: 4px;
+}
+
+.vibe-ai-agents-chat-role {
+	font-size: 11px;
+	color: var(--vscode-descriptionForeground);
+}
+
+/* agent turns: document-style markdown, no bubble (Cursor thread view) */
+.vibe-ai-agents-chat-text {
+	font-size: 13px;
+	line-height: 1.6;
+	word-break: break-word;
+}
+
+.vibe-ai-agents-chat-msg.user .vibe-ai-agents-chat-text {
+	background: var(--vscode-editorWidget-background, rgba(128, 128, 128, 0.08));
+	border-radius: 10px;
+	padding: 10px 14px;
+	white-space: pre-wrap;
+}
+
+/* the thread expanded in the center (r8) */
+.vibe-ai-agents-thread.active {
+	background: var(--vscode-toolbar-hoverBackground);
+}
+
+/* r9: the expanded composer card must not shrink under the transcript */
+.vibe-ai-agents-composer,
+.vibe-ai-agents-chips {
+	flex-shrink: 0;
+}

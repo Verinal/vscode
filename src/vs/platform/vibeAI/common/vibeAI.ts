@@ -325,6 +325,25 @@ export interface IVibeAISubagent {
 }
 
 /**
+ * Phase 176: one background subagent of the backend registry (Phase 128,
+ * Cursor-parity background agents) as listed by the Agents Hub's Background
+ * section (`GET /api/chat/agent/background` — a read-only snapshot_all of
+ * every session's records; lifecycle stays owned by the agent loop).
+ */
+export interface IVibeAIBackgroundAgent {
+	/** The conversation session id the agent was dispatched from. */
+	readonly sessionId: string;
+	readonly agentId: string;
+	readonly name: string;
+	readonly title: string;
+	readonly index: number;
+	readonly total: number;
+	readonly status: 'running' | 'done' | 'error' | string;
+	readonly summary?: string;
+	readonly error?: string;
+}
+
+/**
  * Phase 142: the Settings editor's Customize kinds (Cursor parity: Rules /
  * Skills / MCP pages). `VibeAICustomizeScope` picks the layer — project
  * (<workspace>/.vibe) or global (~/.vibe, overridable via VIBE_HOME).
@@ -521,10 +540,17 @@ export interface IVibeAIDiagnostic {
 	readonly source?: string;
 }
 
-export type VibeAIStreamEventType = 'text' | 'thinking' | 'tool_start' | 'tool_result' | 'file_delta' | 'round_end' | 'context_compressed' | 'output_truncated' | 'limit_reached' | 'model_routed' | 'plan' | 'plan_start' | 'plan_step_start' | 'plan_step_done' | 'plan_done' | 'agent_questions' | 'approval_request' | 'approval_resolved' | 'steered' | 'diagnostics' | 'done' | 'goal_complete' | 'turn_state' | 'error' | 'retry' | 'unknown';
+export type VibeAIStreamEventType = 'text' | 'thinking' | 'tool_start' | 'tool_result' | 'file_delta' | 'round_end' | 'context_compressed' | 'output_truncated' | 'limit_reached' | 'model_routed' | 'plan' | 'plan_start' | 'plan_step_start' | 'plan_step_done' | 'plan_done' | 'agent_questions' | 'approval_request' | 'approval_resolved' | 'steered' | 'diagnostics' | 'done' | 'goal_complete' | 'turn_state' | 'parallel_agent_start' | 'parallel_agent_done' | 'parallel_done' | 'error' | 'retry' | 'unknown';
 
 export interface IVibeAIStreamData {
 	readonly requestId: string;
+	/**
+	 * Phase 176: the conversation session id the owning request carried —
+	 * stamped by the main-process service onto EVERY event of that stream
+	 * (the pane keeps routing by requestId; the Agents Hub reads this to
+	 * show live per-session progress without touching the pane).
+	 */
+	readonly sessionId?: string;
 	readonly type: VibeAIStreamEventType;
 	readonly text?: string;
 	readonly tool?: {
@@ -702,7 +728,128 @@ export interface IVibeAIStreamData {
 	 * follow this round's text (intermediate narration boundary).
 	 */
 	readonly final?: boolean;
+	/**
+	 * Phase 179 (`parallel_*` + every pass-through event of a parallel
+	 * run): the parallel-run metadata the backend stamps on ALL events of
+	 * `POST /api/chat/agent/parallel` — runId identifies the run,
+	 * index/total the variant within it. The Agents Hub routes on this
+	 * (the chat pane keeps routing by requestId and never matches a
+	 * parallel stream). `parallel_agent_start` / `parallel_agent_done`
+	 * carry the variant's live status; `parallel_done` additionally
+	 * carries the authoritative `runs` snapshot (list-endpoint shape).
+	 * Pass-through variant events (thinking / text / tool_*) only carry
+	 * runId / index / total.
+	 */
+	readonly parallel?: {
+		readonly runId: string;
+		readonly index: number;
+		readonly total: number;
+		/** parallel_agent_start: the shared prompt (live-run adoption). */
+		readonly prompt?: string;
+		/** parallel_agent_done: the variant's terminal status. */
+		readonly status?: string;
+		/** The variant's model display label (provider.model). */
+		readonly model?: string;
+		/** parallel_agent_done: the variant's final answer tail. */
+		readonly summary?: string;
+		readonly error?: string;
+		/** parallel_agent_done: git diff --name-status base..branch lines. */
+		readonly changedFiles?: string[];
+		/** parallel_agent_done: git diff --shortstat base..branch text. */
+		readonly diffStat?: string;
+		/** parallel_agent_done: whether the run-end auto-commit created a commit. */
+		readonly committed?: boolean;
+		/** parallel_done: the authoritative run snapshot from the registry. */
+		readonly runs?: IVibeAIParallelRun;
+	};
 	readonly raw?: unknown;
+}
+
+/**
+ * Phase 171: the result of the backend's document extraction — a binary
+ * document (PDF / Word / Excel / PowerPoint) dragged into the chat turned
+ * into the text a context chip carries. `content` is the composed chip
+ * payload (`[meta]` header + body); `text` is the bare extraction.
+ * Phase 172: `docId` keys the full extraction on the backend (the
+ * agent's read_document tool pages through it); `totalChars` is the
+ * extracted text's length, for the chip's truncation note.
+ * Phase 174: `content` is backend-COMPOSED for documents — full text, or
+ * when it won't fit the 6000-char chip budget an outline plus the opening
+ * plus the read_document hint (the pane attaches it as-is). Phase 173:
+ * sparse-text PDFs (scans / drawing sets) also carry `pageImages` —
+ * rendered pages the pane attaches through the image pipeline for the
+ * vision model.
+ */
+export interface IVibeAIDocumentExtract {
+	readonly filename: string;
+	readonly kind: 'pdf' | 'docx' | 'xlsx' | 'pptx';
+	readonly meta: string;
+	readonly text: string;
+	readonly truncated: boolean;
+	readonly content: string;
+	readonly docId?: string;
+	readonly totalChars?: number;
+	readonly pageImages?: { page: number; dataUrl: string }[];
+}
+
+/**
+ * Phase 179 (parallel agents, Cursor multi-agent parity): one variant of a
+ * parallel run — same prompt, isolated git worktree + branch, one full
+ * agent loop. The frontend pre-splits the Auto pool (variant i takes
+ * pool[i % len]) or repeats the selected model's provider.
+ */
+export interface IVibeAIParallelVariant {
+	readonly provider: IVibeAIModelProvider;
+	readonly label?: string;
+}
+
+/**
+ * Phase 179: the parallel-run request (`POST /api/chat/agent/parallel`).
+ * The backend creates one worktree per variant (branch
+ * `vibe/parallel/<runId>-w<i>`), streams every variant's agent events back
+ * tagged with runId / agentIndex, and auto-commits each worktree when its
+ * variant finishes.
+ */
+export interface IVibeAIParallelRequest {
+	readonly prompt: string;
+	readonly variants: IVibeAIParallelVariant[];
+	readonly workspaceRoot?: string;
+	readonly contextLimit?: number;
+	readonly permissionMode?: string;
+	readonly images?: string[];
+}
+
+/**
+ * Phase 179: one variant's result as the registry reports it (list
+ * endpoint / parallel_done snapshot / hub card state). status ∈
+ * running | done | error | merged | skipped.
+ */
+export interface IVibeAIParallelVariantResult {
+	readonly index: number;
+	readonly status: string;
+	readonly branch?: string;
+	readonly path?: string;
+	readonly model?: string;
+	readonly summary?: string;
+	readonly error?: string;
+	/** git diff --name-status base..branch lines (A/M/D + path). */
+	readonly changedFiles?: string[];
+	/** git diff --shortstat base..branch text ("3 files changed, ..."). */
+	readonly diffStat?: string;
+	/** Whether the run-end auto-commit actually created a commit. */
+	readonly committed?: boolean;
+}
+
+/**
+ * Phase 179: one parallel run as listed by the backend registry
+ * (`GET /api/chat/agent/parallel/list` — persisted in a temp-dir JSON so
+ * runs survive backend restarts).
+ */
+export interface IVibeAIParallelRun {
+	readonly runId: string;
+	readonly prompt: string;
+	readonly createdAt: number;
+	readonly variants: IVibeAIParallelVariantResult[];
 }
 
 export interface IVibeAIService {
@@ -750,6 +897,42 @@ export interface IVibeAIService {
 	 * done) are reported via {@link IVibeAIService.onStreamData}.
 	 */
 	executePlanStream(requestId: string, request: IVibeAIExecutePlanRequest): Promise<void>;
+
+	/**
+	 * Starts a parallel run (Phase 179, Cursor multi-agent parity:
+	 * `POST /api/chat/agent/parallel`) — the same prompt in one isolated
+	 * git worktree per variant. Every event (variant agent events +
+	 * parallel_agent_start / parallel_agent_done / parallel_done) carries
+	 * {@link IVibeAIStreamData.parallel} and flows through
+	 * {@link IVibeAIService.onStreamData}; the Agents Hub renders and
+	 * manages the run (merge / discard per variant).
+	 */
+	parallelStream(requestId: string, request: IVibeAIParallelRequest): Promise<void>;
+
+	/**
+	 * Phase 179: lists this project's parallel runs from the backend
+	 * registry (`GET /api/chat/agent/parallel/list`) for the Agents Hub's
+	 * Parallel runs section. Rejects when the backend is unreachable; the
+	 * caller renders an empty/failed section.
+	 */
+	listParallelRuns(workspaceRoot?: string): Promise<IVibeAIParallelRun[]>;
+
+	/**
+	 * Phase 179: picks one variant of a parallel run
+	 * (`POST /api/chat/agent/parallel/merge`) — `git merge --no-ff` of the
+	 * variant branch into the main working tree; on success the variant's
+	 * worktree + branch are cleaned up. Resolves `{ ok, error?, merged? }`
+	 * (merge conflicts resolve ok:false with the reason — a normal
+	 * business path, not an HTTP error).
+	 */
+	mergeParallelRun(workspaceRoot: string | undefined, runId: string, index: number): Promise<{ ok: boolean; error?: string; merged?: boolean }>;
+
+	/**
+	 * Phase 179: discards one variant (or, without index, the whole run) —
+	 * removes its worktree + branch and updates the registry
+	 * (`POST /api/chat/agent/parallel/discard`).
+	 */
+	discardParallelRun(workspaceRoot: string | undefined, runId: string, index?: number): Promise<{ ok: boolean; error?: string; removed?: number }>;
 
 	/**
 	 * Aborts a running stream previously started with the given request id.
@@ -870,6 +1053,25 @@ export interface IVibeAIService {
 	 * given the opened folder's agents are listed (Phase 107).
 	 */
 	listSubagents(workspaceRoot?: string): Promise<IVibeAISubagent[]>;
+
+	/**
+	 * Phase 176: lists every session's background subagents from the
+	 * backend registry (`GET /api/chat/agent/background` — read-only
+	 * snapshot; Agents Hub Background section). Rejects when the backend
+	 * is unreachable; the caller renders an empty/failed section.
+	 */
+	listBackgroundAgents(): Promise<IVibeAIBackgroundAgent[]>;
+
+	/**
+	 * Phase 171: extracts plain text from a binary document (PDF / Word /
+	 * Excel / PowerPoint) dropped into the chat (`POST
+	 * /api/files/extract-document`) — the backend parses with pypdf /
+	 * python-docx / openpyxl / python-pptx and the returned `content`
+	 * becomes the context chip's payload. Rejects with a user-readable
+	 * message on legacy formats (.doc/.xls/.ppt), encrypted or broken
+	 * files.
+	 */
+	extractDocument(request: { filename: string; contentBase64: string }): Promise<IVibeAIDocumentExtract>;
 
 	/**
 	 * Phase 142: lists the merged dual-scope customize items for the

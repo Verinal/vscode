@@ -6,7 +6,7 @@
 import { IMainProcessService } from '../../ipc/common/mainProcessService.js';
 import { InstantiationType, registerSingleton } from '../../instantiation/common/extensions.js';
 import { IWorkspaceContextService } from '../../workspace/common/workspace.js';
-import { IVibeAICustomizeCreateData, IVibeAICustomizeItem, IVibeAICustomizeResult, IVibeAIChatRequest, IVibeAIContextUsage, IVibeAIContextUsageRequest, IVibeAIExecutePlanRequest, IVibeAIService, IVibeAISkill, IVibeAISubagent, VibeAICustomizeKind, VibeAICustomizeScope } from '../common/vibeAI.js';
+import { IVibeAICustomizeCreateData, IVibeAICustomizeItem, IVibeAICustomizeResult, IVibeAIChatRequest, IVibeAIContextUsage, IVibeAIContextUsageRequest, IVibeAIExecutePlanRequest, IVibeAIParallelRequest, IVibeAIParallelRun, IVibeAIService, IVibeAISkill, IVibeAISubagent, VibeAICustomizeKind, VibeAICustomizeScope } from '../common/vibeAI.js';
 import { VibeAIClient } from '../common/vibeAIChannel.js';
 
 /**
@@ -49,6 +49,24 @@ export class VibeAIClientService extends VibeAIClient {
 
 	override executePlanStream(requestId: string, request: IVibeAIExecutePlanRequest): Promise<void> {
 		return super.executePlanStream(requestId, { ...request, workspaceRoot: request.workspaceRoot ?? this.workspaceRoot });
+	}
+
+	override parallelStream(requestId: string, request: IVibeAIParallelRequest): Promise<void> {
+		// Phase 179: worktree isolation only makes sense against the
+		// editor's opened folder — stamp it like every other agent call.
+		return super.parallelStream(requestId, { ...request, workspaceRoot: request.workspaceRoot ?? this.workspaceRoot });
+	}
+
+	override listParallelRuns(workspaceRoot?: string): Promise<IVibeAIParallelRun[]> {
+		return super.listParallelRuns(workspaceRoot ?? this.workspaceRoot);
+	}
+
+	override mergeParallelRun(workspaceRoot: string | undefined, runId: string, index: number): Promise<{ ok: boolean; error?: string; merged?: boolean }> {
+		return super.mergeParallelRun(workspaceRoot ?? this.workspaceRoot, runId, index);
+	}
+
+	override discardParallelRun(workspaceRoot: string | undefined, runId: string, index?: number): Promise<{ ok: boolean; error?: string; removed?: number }> {
+		return super.discardParallelRun(workspaceRoot ?? this.workspaceRoot, runId, index);
 	}
 
 	override contextUsage(request: IVibeAIContextUsageRequest): Promise<IVibeAIContextUsage> {

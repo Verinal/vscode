@@ -564,6 +564,14 @@ export interface INativeWindowConfiguration extends IWindowConfiguration, Native
 	policiesData?: IStringDictionary<{ definition: PolicyDefinition; value: PolicyValue }>;
 
 	isSessionsWindow?: boolean;
+
+	/**
+	 * VibeCoding fork: the window is the dedicated Agent Window opened by
+	 * the title-bar pill (Cursor parity). Unlike `isSessionsWindow` it runs
+	 * the full workbench renderer on the fork's own neutral agent workspace,
+	 * keeps the default profile and hosts the VibeAI agents hub.
+	 */
+	vibeAgentWindow?: boolean;
 }
 
 /**

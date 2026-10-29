@@ -277,6 +277,9 @@ export class BrowserWorkbenchEnvironmentService implements IBrowserWorkbenchEnvi
 	get isSessionsWindow(): boolean { return this.payload?.get('isSessionsWindow') === 'true'; }
 
 	@memoize
+	get isVibeAgentWindow(): boolean { return this.payload?.get('vibeAgentWindow') === 'true'; }
+
+	@memoize
 	get sessionTitle(): string | undefined { return this.payload?.get('sessionTitle'); }
 
 	@memoize

@@ -510,6 +510,12 @@ export class WorkspaceTrustManagementService extends Disposable implements IWork
 	}
 
 	isWorkspaceTrusted(): boolean {
+		// VibeCoding fork (Phase 181): the standalone agent window opens a
+		// neutral placeholder workspace — it must never sit in Restricted
+		// Mode (Cursor's agent window has no workspace-trust concept).
+		if (this.environmentService.isVibeAgentWindow) {
+			return true;
+		}
 		return this._isTrusted;
 	}
 

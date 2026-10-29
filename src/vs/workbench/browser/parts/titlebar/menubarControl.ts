@@ -138,6 +138,19 @@ export abstract class MenubarControl extends Disposable {
 				this.topLevelTitles[mainMenuAction.item.title.original] = mainMenuAction.item.title.mnemonicTitle ?? mainMenuAction.item.title.value;
 			}
 		}
+
+		// VibeCoding fork (Phase 181): the standalone agent window shows
+		// Cursor's minimal menubar (File / Edit / View / Help) instead of
+		// the full IDE menu set.
+		if (this.environmentService.isVibeAgentWindow) {
+			const keep = new Set(['File', 'Edit', 'View', 'Help']);
+			for (const title of Object.keys(this.topLevelTitles)) {
+				if (!keep.has(title)) {
+					delete this.menus[title];
+					delete this.topLevelTitles[title];
+				}
+			}
+		}
 	}
 
 	protected updateMenubar(): void {

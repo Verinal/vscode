@@ -3,27 +3,37 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { negotiateProtocolVersion } from './state/protocol/version/negotiation.js';
-import { PROTOCOL_VERSION } from './state/protocol/version/registry.js';
+import { getErrorMessage } from '../../../base/common/errors.js';
+import { compareProtocolVersions, negotiateProtocolVersion, PROTOCOL_VERSION, SUPPORTED_PROTOCOL_VERSIONS } from './state/protocol/version/registry.js';
+import { JsonRpcErrorCodes, ProtocolError } from './state/sessionProtocol.js';
 
-// These releases share a wire contract despite crossing SemVer compatibility boundaries.
-const compatibleProtocolVersions: readonly string[] = ['1.0.0', '0.10.0', '0.9.0'];
+const legacyCompatibleProtocolVersion = '0.10.0';
 
-export function negotiateAgentHostProtocolVersion(offered: readonly string[], current = PROTOCOL_VERSION): string | undefined {
-	if (compatibleProtocolVersions.includes(current)) {
-		const compatible = compatibleProtocolVersions.find(version => offered.includes(version));
-		if (compatible) {
-			return compatible;
-		}
+export function negotiateAgentHostProtocolVersion(offered: readonly string[]): string | undefined {
+	try {
+		const negotiated = negotiateProtocolVersion(offered);
+		// VS Code's 0.10.0 release shares the wire contract of the upstream baselines.
+		return offered.includes(legacyCompatibleProtocolVersion)
+			&& (negotiated === undefined || compareProtocolVersions(legacyCompatibleProtocolVersion, negotiated) > 0)
+			? legacyCompatibleProtocolVersion
+			: negotiated;
+	} catch (error) {
+		throw new ProtocolError(JsonRpcErrorCodes.InvalidParams, getErrorMessage(error));
 	}
-	return negotiateProtocolVersion(offered, current);
 }
 
-export function getAgentHostSupportedProtocolVersions(current = PROTOCOL_VERSION): string[] {
-	if (compatibleProtocolVersions.includes(current)) {
-		return [...compatibleProtocolVersions];
-	}
-	const [major, minor] = current.split('.');
-	const minimum = `${major}.${major === '0' ? minor : '0'}.0`;
-	return minimum === current ? [current] : [`>=${minimum} <=${current}`];
+export function getAgentHostSupportedProtocolVersions(): string[] {
+	return [...SUPPORTED_PROTOCOL_VERSIONS, legacyCompatibleProtocolVersion].sort((a, b) => compareProtocolVersions(b, a));
+}
+
+/**
+ * The protocol versions a client offers in `initialize`, most-preferred first.
+ * With chats of one session using different agents enabled, the client also
+ * offers the current {@link PROTOCOL_VERSION} first, which hosts require
+ * before advertising `multipleChatProviders`; otherwise the offer is exactly
+ * {@link getAgentHostSupportedProtocolVersions}.
+ */
+export function getAgentHostClientProtocolVersions(multipleChatProviders: boolean): string[] {
+	const supported = getAgentHostSupportedProtocolVersions();
+	return multipleChatProviders && !supported.includes(PROTOCOL_VERSION) ? [PROTOCOL_VERSION, ...supported] : supported;
 }

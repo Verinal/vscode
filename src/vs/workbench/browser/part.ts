@@ -18,6 +18,7 @@ import { IDisposable, toDisposable } from '../../base/common/lifecycle.js';
 export interface IPartOptions {
 	readonly hasTitle?: boolean;
 	readonly borderWidth?: () => number;
+	readonly titleHeight?: () => number | undefined;
 }
 
 export interface ILayoutContentResult {

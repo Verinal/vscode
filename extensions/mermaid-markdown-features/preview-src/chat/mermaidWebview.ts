@@ -4,6 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 import mermaid, { MermaidConfig } from 'mermaid';
 import { buildMermaidConfig, createMermaidErrorElement, loadExtensionConfig, markVsCodeContextAsError } from '../shared';
+import { placeSubgraphTitlesIn } from '../shared/subgraphTitles';
 import { VsCodeMermaidThemeTracker } from '../shared/vsCodeTheme';
 import { VsCodeApi } from './vscodeApi';
 

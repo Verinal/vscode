@@ -62,8 +62,8 @@ suite('Workbench parts', () => {
 
 	class MyPart2 extends SimplePart {
 
-		constructor(layoutService = new TestLayoutService()) {
-			super('myPart2', { hasTitle: true }, new TestThemeService(), disposables.add(new TestStorageService()), layoutService);
+		constructor(layoutService = new TestLayoutService(), titleHeight?: () => number | undefined) {
+			super('myPart2', { hasTitle: true, titleHeight }, new TestThemeService(), disposables.add(new TestStorageService()), layoutService);
 		}
 
 		protected override createTitleArea(parent: HTMLElement): HTMLElement {
@@ -222,6 +222,31 @@ suite('Workbench parts', () => {
 				titleSize: Dimension.None,
 				contentSize: new Dimension(100, 136),
 				footerSize: new Dimension(100, 32),
+			},
+		});
+	});
+
+	test('Part Layout supports a custom title height', () => {
+		let titleHeight: number | undefined = 28;
+		const part = disposables.add(new MyPart2(new TestLayoutService(), () => titleHeight));
+		part.create(fixture);
+
+		const customLayout = part.testLayoutContents(100, 200);
+		titleHeight = undefined;
+		const defaultLayout = part.testLayoutContents(100, 200);
+
+		assert.deepStrictEqual({ customLayout, defaultLayout }, {
+			customLayout: {
+				headerSize: Dimension.None,
+				titleSize: new Dimension(100, 28),
+				contentSize: new Dimension(100, 172),
+				footerSize: Dimension.None,
+			},
+			defaultLayout: {
+				headerSize: Dimension.None,
+				titleSize: new Dimension(100, 35),
+				contentSize: new Dimension(100, 165),
+				footerSize: Dimension.None,
 			},
 		});
 	});

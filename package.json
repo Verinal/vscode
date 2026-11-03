@@ -309,7 +309,7 @@
     "utf-8-validate@5.0.10": true,
     "windows-foreground-love@0.6.1": true,
     "@parcel/watcher@2.5.6": true,
-    "@playwright/browser-chromium@1.61.1": true,
+    "@playwright/browser-chromium@1.61.1": false,
     "@vscode/fs-copyfile@2.0.0": true,
     "@vscode/native-watchdog@1.4.6": true,
     "@vscode/ripgrep@1.17.1": true,

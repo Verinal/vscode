@@ -8,10 +8,11 @@ import { Disposable } from '../../../base/common/lifecycle.js';
 import { timeout } from '../../../base/common/async.js';
 import { ILogService } from '../../log/common/log.js';
 import { IProductService } from '../../product/common/productService.js';
-import { IVibeAIBackgroundAgent, IVibeAICustomizeCreateData, IVibeAICustomizeItem, IVibeAICustomizeResult, IVibeAIChatRequest, IVibeAICompletionRequest, IVibeAIContextUsage, IVibeAIContextUsageRequest, IVibeAIDiagnostic, IVibeAIDocumentExtract, IVibeAIExecutePlanRequest, IVibeAIInlineEditRequest, IVibeAIModelProvider, IVibeAIParallelRequest, IVibeAIParallelRun, IVibeAIPlan, IVibeAIPlanStep, IVibeAIQuestion, IVibeAIService, IVibeAISkill, IVibeAIStreamData, IVibeAISubagent, VIBE_AI_DEFAULT_BACKEND_URL, VibeAICustomizeKind, VibeAICustomizeScope } from '../common/vibeAI.js';
+import { IVibeAIAutomation, IVibeAIAutomationCreateData, IVibeAIAutomationPatch, IVibeAIBackgroundAgent, IVibeAICustomizeCreateData, IVibeAICustomizeItem, IVibeAICustomizeResult, IVibeAIChatRequest, IVibeAIChatTitleRequest, IVibeAICompletionRequest, IVibeAIContextUsage, IVibeAIContextUsageRequest, IVibeAIDiagnostic, IVibeAIDocumentExtract, IVibeAIExecutePlanRequest, IVibeAIInlineEditRequest, IVibeAIModelProvider, IVibeAIParallelRequest, IVibeAIParallelRun, IVibeAIPlan, IVibeAIPlanStep, IVibeAIQuestion, IVibeAIService, IVibeAISkill, IVibeAIStreamData, IVibeAISubagent, IVibeAITurnChanges, VIBE_AI_DEFAULT_BACKEND_URL, VibeAICustomizeKind, VibeAICustomizeScope } from '../common/vibeAI.js';
 import { ChildProcess, spawn } from 'child_process';
 import * as os from 'os';
 import { existsSync, rmSync, writeFileSync } from 'fs';
+import { createServer } from 'net';
 import { FileAccess } from '../../../base/common/network.js';
 import { dirname, isAbsolute, join, normalize } from '../../../base/common/path.js';
 
@@ -39,6 +40,63 @@ export function resolveBackendRootPath(configured: string, appRoot: string, exec
 	// Nothing found: return the app-root candidate so the caller's
 	// "backend root not found" warning names a concrete path.
 	return normalize(candidates[0]);
+}
+
+/**
+ * Phase 182: probe whether a TCP listener can bind `host:port` right now.
+ * The spawn contract needs this BEFORE handing the port to the backend —
+ * a port held by another process (or a Windows excludedportrange reserve,
+ * which connect-probes wrongly report as "free") makes the backend exit
+ * during startup. Bind-probing is the only honest test.
+ */
+export function isPortBindable(host: string, port: number): Promise<boolean> {
+	return new Promise(resolve => {
+		const server = createServer();
+		let settled = false;
+		const done = (value: boolean) => {
+			if (!settled) {
+				settled = true;
+				resolve(value);
+			}
+		};
+		server.once('error', () => done(false));
+		server.once('listening', () => server.close(() => done(true)));
+		server.listen(port, host);
+	});
+}
+
+/**
+ * Phase 182: pick the port the backend should spawn on. `preferredPort`
+ * wins when it is bindable (keeps the product.json / .env contract);
+ * otherwise an OS-assigned ephemeral port is claimed once and released
+ * (the backend rebinds it right after — the tiny race window is the
+ * accepted cost). The ephemeral assignment also sidesteps Windows
+ * excludedportrange reserves, which the OS never hands out automatically.
+ * Resolves 0 when even the ephemeral bind fails — the caller falls back
+ * to the configured port and the failure surfaces via the usual spawn
+ * reporting.
+ */
+export async function findFreePort(host: string, preferredPort?: number): Promise<number> {
+	if (typeof preferredPort === 'number' && preferredPort > 0 && await isPortBindable(host, preferredPort)) {
+		return preferredPort;
+	}
+	return new Promise(resolve => {
+		const server = createServer();
+		let settled = false;
+		const done = (port: number) => {
+			if (!settled) {
+				settled = true;
+				resolve(port);
+			}
+		};
+		server.once('error', () => done(0));
+		server.once('listening', () => {
+			const address = server.address();
+			const port = typeof address === 'object' && address !== null ? address.port : 0;
+			server.close(() => done(port));
+		});
+		server.listen(0, host);
+	});
 }
 
 /**
@@ -96,6 +154,11 @@ export class VibeAIService extends Disposable implements IVibeAIService {
 	// its local AI backend as a child of its process tree (spawn/reuse, killed on quit).
 	private backendChild: ChildProcess | null = null;
 
+	// Phase 182: the URL the spawned backend actually listens on — set when
+	// the configured port was busy at spawn time (free-port fallback); every
+	// request and health check rides it until the app restarts.
+	private activeBackendUrl: string | null = null;
+
 	constructor(
 		@IProductService private readonly productService: IProductService,
 		@ILogService private readonly logService: ILogService
@@ -106,7 +169,10 @@ export class VibeAIService extends Disposable implements IVibeAIService {
 	}
 
 	get backendUrl(): string {
-		return this.productService.vibeAI?.backendUrl ?? process.env['VIBE_BACKEND_URL'] ?? VIBE_AI_DEFAULT_BACKEND_URL;
+		// Phase 182: when the configured port was busy at spawn time the
+		// backend landed on a free port instead — everything (health checks,
+		// SSE streams, REST) rides the pinned URL until the app restarts.
+		return this.activeBackendUrl ?? this.productService.vibeAI?.backendUrl ?? process.env['VIBE_BACKEND_URL'] ?? VIBE_AI_DEFAULT_BACKEND_URL;
 	}
 
 	/**
@@ -131,6 +197,11 @@ export class VibeAIService extends Disposable implements IVibeAIService {
 	 * local uvicorn instance is spawned from `backendRoot` as a child of this
 	 * process and killed again on app quit ("follows the editor's lifecycle").
 	 * Set `VIBE_BACKEND_SPAWN=0` to skip spawning (editor without backend).
+	 * Phase 182: the configured port is only a preference — when it is
+	 * already held by another process the backend spawns on a free port
+	 * instead and `backendUrl` follows it for this session; hard failures
+	 * (root missing, spawn error, startup exit, slow readiness) surface a
+	 * popup outside dev (VSCODE_DEV) instead of dying log-only.
 	 */
 	private async _ensureBackend(): Promise<void> {
 		if (process.env['VIBE_BACKEND_SPAWN'] === '0') {
@@ -148,19 +219,40 @@ export class VibeAIService extends Disposable implements IVibeAIService {
 		// Nuitka-compiled exe (zero Python provisioning); a dev checkout
 		// keeps the venv + `python -m uvicorn` spawn (--reload workflows).
 		if (!root || (!existsSync(backendExe) && !existsSync(join(root, 'app', 'main.py')))) {
-			this.logService.warn(`[VibeAI] backend root not found (${root || 'unset'}), not spawning backend`);
+			// Phase 182: surfaced (popup outside dev) — in the packaged product
+			// this means a broken installation, which used to die log-only.
+			this.reportBackendFailure(`後端程式缺失（${root || '路徑未設定'}），AI 功能無法啟動，請重新安裝軟件。`);
 			return;
 		}
 
 		let host = '127.0.0.1';
 		let port = '80';
+		let baseUrl: URL;
 		try {
-			const url = new URL(this.backendUrl);
-			host = url.hostname || host;
-			port = url.port || port;
+			baseUrl = new URL(this.backendUrl);
+			host = baseUrl.hostname || host;
+			port = baseUrl.port || port;
 		} catch (error) {
 			this.logService.warn(`[VibeAI] invalid backend URL (${this.backendUrl}), not spawning backend`, error);
 			return;
+		}
+
+		// Phase 182: the configured port is a preference, not a requirement —
+		// on machines where anything else already holds it (the default 8642
+		// was chosen in Phase 194 to dodge common dev-stack defaults like
+		// FastAPI/Django's 8000, but no port is collision-free), the spawned
+		// backend died during startup (the launcher's
+		// bind pre-check exits 1; uvicorn swallows the bind error) and the AI
+		// pane stayed dead with only a log line. Probe-bind the preferred
+		// port first; on collision spawn on an OS-assigned free port instead
+		// and pin `activeBackendUrl` so every request (and the readiness poll
+		// below) follows the port the backend actually landed on.
+		const preferredPort = Number(port) || 0;
+		const freePort = await findFreePort(host, preferredPort);
+		if (freePort > 0 && freePort !== preferredPort) {
+			this.logService.warn(`[VibeAI] port ${preferredPort} is already in use, spawning the backend on free port ${freePort} instead`);
+			port = String(freePort);
+			this.activeBackendUrl = `${baseUrl.protocol}//${baseUrl.hostname}:${freePort}`;
 		}
 
 		let command: string;
@@ -191,7 +283,9 @@ export class VibeAIService extends Disposable implements IVibeAIService {
 		child.stdout?.on('data', (chunk: Buffer) => this.logService.debug(`[VibeAI backend] ${String(chunk).trim()}`));
 		child.stderr?.on('data', (chunk: Buffer) => this.logService.debug(`[VibeAI backend] ${String(chunk).trim()}`));
 		child.on('error', error => {
-			this.logService.error('[VibeAI] backend spawn failed', error);
+			// Phase 182: surfaced (popup outside dev) — the classic silent
+			// killer here is antivirus quarantining the unsigned backend exe.
+			this.reportBackendFailure(`後端啟動失敗（${String(error)}）——可能被防毒軟體攔截，請將 VulcanBackend 加入信任後重新啟動軟件。`);
 			if (this.backendChild === child) {
 				this.backendChild = null;
 			}
@@ -208,15 +302,22 @@ export class VibeAIService extends Disposable implements IVibeAIService {
 		for (let attempt = 0; attempt < 120; attempt++) {
 			await timeout(500);
 			if (child.exitCode !== null) {
-				this.logService.error(`[VibeAI] backend exited during startup (code ${child.exitCode})`);
+				// Phase 182: surfaced (popup outside dev) — the classic silent
+				// killer here was a port collision (or AV interference).
+				this.reportBackendFailure(`後端程序啟動即退出（code ${child.exitCode}）——常見原因：連接埠被其他程式占用或防毒軟體攔截。`);
 				return;
+			}
+			if (this.backendChild !== child) {
+				return; // spawn error already reported by the 'error' handler
 			}
 			if (await this.healthCheck()) {
 				this.logService.info(`[VibeAI] local backend ready at ${this.backendUrl} (pid ${child.pid})`);
 				return;
 			}
 		}
-		this.logService.warn('[VibeAI] backend did not become healthy within 60s');
+		// Phase 182: surfaced (popup outside dev) — slow AV scans of the
+		// backend tree can push the first startup past the readiness window.
+		this.reportBackendFailure('後端未能在 60 秒內就緒（首次啟動可能被防毒掃描拖慢），請稍候或重新啟動軟件。');
 	}
 
 	/**
@@ -253,7 +354,9 @@ export class VibeAIService extends Disposable implements IVibeAIService {
 	 * python path broke) as well as a half-finished first install.
 	 */
 	private async venvImportsCleanly(venvPython: string): Promise<boolean> {
-		return this.processSucceeds(venvPython, ['-c', 'import fastapi, uvicorn']);
+		// 30s cap: the probe is `import fastapi, uvicorn` - normally ~1-3s,
+		// but a wedged console spawn must not hang the Restart path (Phase 197).
+		return this.processSucceeds(venvPython, ['-c', 'import fastapi, uvicorn'], 30_000);
 	}
 
 	/**
@@ -289,7 +392,7 @@ export class VibeAIService extends Disposable implements IVibeAIService {
 	 * existsSync/where check is not enough.
 	 */
 	private async isPythonAtLeast310(pythonPath: string): Promise<boolean> {
-		return this.processSucceeds(pythonPath, ['-c', 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)']);
+		return this.processSucceeds(pythonPath, ['-c', 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)'], 15_000);
 	}
 
 	/**
@@ -406,6 +509,20 @@ export class VibeAIService extends Disposable implements IVibeAIService {
 	}
 
 	/**
+	 * Phase 182: surface a hard backend-launch failure. In the packaged
+	 * product these conditions used to be log-only, so a colleague testing
+	 * an installer build saw a silently dead AI pane with no hint why; the
+	 * popup names the concrete failure instead. Dev (VSCODE_DEV set by the
+	 * launcher bats) keeps log-only — no modal noise while iterating.
+	 */
+	private reportBackendFailure(message: string): void {
+		this.logService.error(`[VibeAI] ${message}`);
+		if (!process.env['VSCODE_DEV']) {
+			this.showBackendPopup(message, true);
+		}
+	}
+
+	/**
 	 * First-run progress popups. Chinese text is safe here (unlike in batch
 	 * files): the string reaches PowerShell as native UTF-16 on the command
 	 * line, no codepage is involved.
@@ -420,18 +537,32 @@ export class VibeAIService extends Disposable implements IVibeAIService {
 		});
 	}
 
-	private async processSucceeds(command: string, args: string[]): Promise<boolean> {
+	private async processSucceeds(command: string, args: string[], timeoutMs?: number): Promise<boolean> {
 		return new Promise(resolve => {
 			let settled = false;
+			let timer: ReturnType<typeof setTimeout> | undefined;
 			const done = (value: boolean) => {
 				if (!settled) {
 					settled = true;
+					if (timer) {
+						clearTimeout(timer);
+					}
 					resolve(value);
 				}
 			};
 			const child = spawn(command, args, { windowsHide: true, stdio: 'ignore' });
 			child.on('error', () => done(false));
 			child.on('close', code => done(code === 0));
+			// Phase 197: probes with no deadline made restartBackend hang
+			// forever when a console spawn wedged (observed on a machine
+			// right after a ptyHost crash storm). Callers doing long work
+			// (winget/pip installs) simply omit the timeout.
+			if (typeof timeoutMs === 'number') {
+				timer = setTimeout(() => {
+					try { child.kill(); } catch { /* already gone */ }
+					done(false);
+				}, timeoutMs);
+			}
 		});
 	}
 
@@ -461,9 +592,13 @@ export class VibeAIService extends Disposable implements IVibeAIService {
 	private async captureProcessOutput(command: string, args: string[]): Promise<string | null> {
 		return new Promise(resolve => {
 			let settled = false;
+			let guard: ReturnType<typeof setTimeout> | undefined;
 			const done = (value: string | null) => {
 				if (!settled) {
 					settled = true;
+					if (guard) {
+						clearTimeout(guard);
+					}
 					resolve(value);
 				}
 			};
@@ -474,6 +609,12 @@ export class VibeAIService extends Disposable implements IVibeAIService {
 			// 'close' (not 'exit'): stdio may still hold buffered output when
 			// the process dies, and the reg-query parse needs every line.
 			child.on('close', code => done(code === 0 ? output : null));
+			// Phase 197: `where` / `reg query` must never outlive 15s - a
+			// wedged spawn used to hang the whole bring-up chain with no log.
+			guard = setTimeout(() => {
+				try { child.kill(); } catch { /* already gone */ }
+				done(null);
+			}, 15_000);
 		});
 	}
 
@@ -481,6 +622,7 @@ export class VibeAIService extends Disposable implements IVibeAIService {
 		if (this.backendChild?.pid) {
 			// Tree-kill: uvicorn may own grandchildren, and child.kill() on
 			// Windows only takes down the direct process.
+			this.logService.info(`[VibeAI] app quitting: killing backend process tree (pid ${this.backendChild.pid})`);
 			spawn('taskkill', ['/PID', String(this.backendChild.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' });
 			this.backendChild = null;
 		}
@@ -499,6 +641,103 @@ export class VibeAIService extends Disposable implements IVibeAIService {
 		} finally {
 			clearTimeout(timeout);
 		}
+	}
+
+	/**
+	 * Phase 196: Settings → General "Restart". Kills the backend this
+	 * window spawned (dispose() tree-kill semantics — uvicorn may own
+	 * grandchildren), waits briefly for the OS to release the port so the
+	 * respawn can take the preferred one, clears the pinned session URL,
+	 * then re-runs the spawn path. An external backend this window does
+	 * not own is never killed: _ensureBackend health-checks it first and
+	 * re-uses it (a hung external on the preferred port simply loses the
+	 * port race and our own spawns on a free one instead). Resolves
+	 * whether the backend is reachable afterwards.
+	 */
+	async restartBackend(): Promise<boolean> {
+		// Phase 197: every stage logs. The first cut of this method hung
+		// silently before the spawn step on a machine with wedged console
+		// spawns and the Settings button spun "..." forever with zero trace
+		// in main.log — now every step is visible.
+		this.logService.info('[VibeAI] restartBackend: stopping the spawned backend (if any)');
+		const child = this.backendChild;
+		if (child?.pid) {
+			this.backendChild = null;
+			// taskkill /T must fell the WHOLE tree - the venv python.exe is
+			// only a launcher: the real uvicorn is its base-python child, and
+			// a survivor keeps the "old backend" half-alive. Verify the kill
+			// landed (the 'close' event) and retry once before moving on.
+			for (let attempt = 1; attempt <= 2; attempt++) {
+				spawn('taskkill', ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' });
+				const gone = await new Promise<boolean>(resolve => {
+					const timer = setTimeout(() => resolve(false), 2000);
+					child.once('close', () => {
+						clearTimeout(timer);
+						resolve(true);
+					});
+				});
+				if (gone) {
+					break;
+				}
+				this.logService.warn(`[VibeAI] restartBackend: backend pid ${child.pid} still alive after taskkill (attempt ${attempt})`);
+			}
+		}
+		this.activeBackendUrl = null;
+		// Phase 198: Restart means "a fresh backend on the configured port",
+		// not just re-spawning our own child. The port can be held by
+		// processes this window does not own - a backend orphaned by a
+		// crashed previous session (alive but deaf: it fails the health
+		// check, so _ensureBackend would fall back to a random port and the
+		// zombie lingers forever) or a manual run. Sweep them all first.
+		let preferredPort = 0;
+		try {
+			preferredPort = Number(new URL(this.backendUrl).port) || 0;
+		} catch { /* invalid URL - nothing to sweep */ }
+		if (preferredPort > 0) {
+			await this.killPortListeners(preferredPort);
+		}
+		this.logService.info('[VibeAI] restartBackend: bringing the backend back up');
+		await this._ensureBackend();
+		const ok = await this.healthCheck();
+		this.logService.info(`[VibeAI] restartBackend: backend ${ok ? 'is reachable again' : 'still unreachable (see earlier logs)'}`);
+		return ok;
+	}
+
+	/**
+	 * Phase 198: kill every process LISTENING on the given port (tree-kill).
+	 * This deliberately includes backends this window does not own - the
+	 * Restart button's contract is "make the configured port serve a fresh
+	 * backend", and a leftover on that port is by definition a stale
+	 * Vulcan backend (the port is product-reserved since Phase 194), not an
+	 * unrelated service. Kill errors are logged and skipped: the pid may
+	 * have exited a moment ago, and an unkillable one merely sends the new
+	 * backend to a free port via the Phase 182 fallback.
+	 */
+	private async killPortListeners(port: number): Promise<void> {
+		const output = await this.captureProcessOutput('netstat', ['-ano']);
+		if (!output) {
+			this.logService.warn('[VibeAI] restartBackend: netstat failed, skipping the port sweep');
+			return;
+		}
+		const pids = new Set<string>();
+		for (const line of output.split(/\r?\n/)) {
+			const cols = line.trim().split(/\s+/);
+			// TCP  <local>  <foreign>  LISTENING  <pid>
+			if (cols.length >= 5 && cols[3] === 'LISTENING' && cols[1].endsWith(`:${port}`) && /^\d+$/.test(cols[4])) {
+				pids.add(cols[4]);
+			}
+		}
+		if (pids.size === 0) {
+			this.logService.info(`[VibeAI] restartBackend: port ${port} has no leftover listener`);
+			return;
+		}
+		for (const pid of pids) {
+			this.logService.warn(`[VibeAI] restartBackend: killing leftover listener on port ${port} (pid ${pid})`);
+			spawn('taskkill', ['/PID', pid, '/T', '/F'], { windowsHide: true, stdio: 'ignore' });
+		}
+		// Grace period so the OS releases the sockets and the fresh backend
+		// reclaims the preferred port instead of falling to a random one.
+		await timeout(500);
 	}
 
 	async chatStream(requestId: string, request: IVibeAIChatRequest): Promise<void> {
@@ -725,6 +964,36 @@ export class VibeAIService extends Disposable implements IVibeAIService {
 		}
 	}
 
+	async getTurnChanges(sessionId: string, turnId: string, workspaceRoot?: string): Promise<IVibeAITurnChanges | null> {
+		// Phase 247: the chat router's GET /api/chat/agent/turn-changes —
+		// reconstructs a turn's code_change ledger from the persisted turn
+		// transcript (.vibe/turns/<session>/<turn>.jsonl). Null on any
+		// failure (transcript gone, backend down, timeout): the rollback
+		// keeps the locally captured changes (behavior no worse than
+		// before the reconciliation existed).
+		const controller = new AbortController();
+		const timeout = setTimeout(() => controller.abort(), 10000);
+		const params = new URLSearchParams({ session_id: sessionId, turn_id: turnId });
+		if (workspaceRoot) {
+			params.set('project_root', workspaceRoot);
+		}
+		try {
+			const response = await fetch(`${this.backendUrl}/api/chat/agent/turn-changes?${params.toString()}`, {
+				method: 'GET',
+				signal: controller.signal
+			});
+			if (!response.ok) {
+				return null;
+			}
+			return await response.json() as IVibeAITurnChanges;
+		} catch (error) {
+			this.logService.error('[VibeAI] fetch turn changes failed', error);
+			return null;
+		} finally {
+			clearTimeout(timeout);
+		}
+	}
+
 	async resolveApproval(id: string, approved: boolean, scope?: 'once' | 'turn' | 'project', projectRoot?: string): Promise<boolean> {
 		// Phase 92: resolves the command approval gate the agent loop waits
 		// on (Run / Skip card). Unknown/already-decided ids resolve to false
@@ -780,6 +1049,33 @@ export class VibeAIService extends Disposable implements IVibeAIService {
 			return data.success === true;
 		} catch (error) {
 			this.logService.error('[VibeAI] steer failed', error);
+			return false;
+		} finally {
+			clearTimeout(timeout);
+		}
+	}
+
+	async resolveAgentQuestion(id: string, answer: string): Promise<boolean> {
+		// Phase 237: resolves the blocking question gate the agent turn
+		// parks on (the question card's Send). Unknown/already-answered
+		// ids resolve to false (idempotent) — the caller falls back to
+		// steer() so a restored old card or a lost gate keeps working.
+		const controller = new AbortController();
+		const timeout = setTimeout(() => controller.abort(), 10000);
+		try {
+			const response = await fetch(`${this.backendUrl}/api/chat/agent/questions/resolve`, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ id, answer }),
+				signal: controller.signal
+			});
+			if (!response.ok) {
+				return false;
+			}
+			const data = await response.json() as { resolved?: boolean };
+			return data.resolved === true;
+		} catch (error) {
+			this.logService.error('[VibeAI] resolve agent question failed', error);
 			return false;
 		} finally {
 			clearTimeout(timeout);
@@ -851,6 +1147,40 @@ export class VibeAIService extends Disposable implements IVibeAIService {
 		}
 	}
 
+	async chatTitle(request: IVibeAIChatTitleRequest): Promise<string | null> {
+		// `@router.post("/title")` under prefix `/api/chat` — no trailing
+		// slash. Fire-and-forget from the pane (Phase 227): a slow or
+		// failed summary just keeps the raw first-question title, hence
+		// the short timeout and the silent null.
+		const controller = new AbortController();
+		const timeout = setTimeout(() => controller.abort(), 20000);
+		try {
+			const response = await fetch(`${this.backendUrl}/api/chat/title`, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({
+					question: request.question,
+					model: request.model,
+					provider: request.provider,
+					autoPool: request.autoPool,
+					autoMode: request.autoMode,
+				}),
+				signal: controller.signal
+			});
+			if (!response.ok) {
+				this.logService.debug(`[VibeAI] chat title request failed: HTTP ${response.status}`);
+				return null;
+			}
+			const payload = await response.json() as { data?: { title?: string } };
+			return payload?.data?.title ?? null;
+		} catch (error) {
+			this.logService.debug('[VibeAI] chat title failed', error);
+			return null;
+		} finally {
+			clearTimeout(timeout);
+		}
+	}
+
 	async inlineEdit(request: IVibeAIInlineEditRequest): Promise<string | null> {
 		// `@router.post("/edit")` under prefix `/api/chat` — the URL has no
 		// trailing slash. Rewrites can take a while (large max_tokens), hence
@@ -901,6 +1231,9 @@ export class VibeAIService extends Disposable implements IVibeAIService {
 					contextLimit: request.contextLimit,
 					// Ask-mode estimate: read-only tool subset + Ask system prompt.
 					readonly: request.readonly,
+					// Phase 240: plan-mode estimate — PLAN system prompt + the
+					// plan whitelist (estimate ≡ sent).
+					plan_mode: request.planMode,
 					// Phase 116: Side Chat — the parent-thread reference (the
 					// `parent` breakdown row; same assembly as the actual
 					// injection, estimate ≡ sent).
@@ -1058,6 +1391,111 @@ export class VibeAIService extends Disposable implements IVibeAIService {
 				throw new Error((payload as { detail?: string })?.detail ?? `VibeAI parallel discard failed (HTTP ${response.status})`);
 			}
 			return { ok: payload?.ok === true, error: typeof payload?.error === 'string' ? payload.error : undefined };
+		} finally {
+			clearTimeout(timeout);
+		}
+	}
+
+	async listAutomations(workspaceRoot?: string): Promise<IVibeAIAutomation[]> {
+		// `@router.get("/")` under prefix `/api/automations` — Phase 189:
+		// this workspace's automation rules (trigger + prompt + model
+		// binding) for the Agents Hub's Automations page. Provider
+		// credentials never ride back — the list payload carries the bound
+		// model name only.
+		const controller = new AbortController();
+		const timeout = setTimeout(() => controller.abort(), 10000);
+		try {
+			const query = workspaceRoot ? `?project_root=${encodeURIComponent(workspaceRoot)}` : '';
+			const response = await fetch(`${this.backendUrl}/api/automations${query}`, { signal: controller.signal });
+			if (!response.ok) {
+				throw new Error(`VibeAI automations request failed (HTTP ${response.status})`);
+			}
+			const payload = await response.json().catch(() => undefined) as { automations?: IVibeAIAutomation[] } | undefined;
+			return Array.isArray(payload?.automations) ? payload.automations : [];
+		} finally {
+			clearTimeout(timeout);
+		}
+	}
+
+	async createAutomation(workspaceRoot?: string, data?: IVibeAIAutomationCreateData): Promise<IVibeAIAutomation> {
+		// `@router.post("/")` — Phase 189: create a rule. Validation
+		// failures (bad trigger / no model) answer 400 with a user-readable
+		// `detail`, which is what the hub surfaces.
+		const controller = new AbortController();
+		const timeout = setTimeout(() => controller.abort(), 10000);
+		try {
+			const response = await fetch(`${this.backendUrl}/api/automations?project_root=${encodeURIComponent(workspaceRoot ?? '')}`, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify(data ?? {}),
+				signal: controller.signal
+			});
+			const payload = await response.json().catch(() => undefined) as (IVibeAIAutomation & { detail?: string }) | undefined;
+			if (!response.ok) {
+				throw new Error(payload?.detail ?? `VibeAI automation create failed (HTTP ${response.status})`);
+			}
+			return payload as IVibeAIAutomation;
+		} finally {
+			clearTimeout(timeout);
+		}
+	}
+
+	async updateAutomation(workspaceRoot?: string, id?: string, patch?: IVibeAIAutomationPatch): Promise<IVibeAIAutomation> {
+		// `@router.patch("/{automation_id}")` — Phase 189: enable/disable,
+		// re-bind the model, edit name/prompt/trigger.
+		const controller = new AbortController();
+		const timeout = setTimeout(() => controller.abort(), 10000);
+		try {
+			const response = await fetch(`${this.backendUrl}/api/automations/${encodeURIComponent(id ?? '')}?project_root=${encodeURIComponent(workspaceRoot ?? '')}`, {
+				method: 'PATCH',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify(patch ?? {}),
+				signal: controller.signal
+			});
+			const payload = await response.json().catch(() => undefined) as (IVibeAIAutomation & { detail?: string }) | undefined;
+			if (!response.ok) {
+				throw new Error(payload?.detail ?? `VibeAI automation update failed (HTTP ${response.status})`);
+			}
+			return payload as IVibeAIAutomation;
+		} finally {
+			clearTimeout(timeout);
+		}
+	}
+
+	async deleteAutomation(workspaceRoot?: string, id?: string): Promise<{ ok: boolean }> {
+		// `@router.delete("/{automation_id}")` — Phase 189.
+		const controller = new AbortController();
+		const timeout = setTimeout(() => controller.abort(), 10000);
+		try {
+			const response = await fetch(`${this.backendUrl}/api/automations/${encodeURIComponent(id ?? '')}?project_root=${encodeURIComponent(workspaceRoot ?? '')}`, {
+				method: 'DELETE',
+				signal: controller.signal
+			});
+			if (!response.ok) {
+				throw new Error(`VibeAI automation delete failed (HTTP ${response.status})`);
+			}
+			return { ok: true };
+		} finally {
+			clearTimeout(timeout);
+		}
+	}
+
+	async runAutomationNow(workspaceRoot?: string, id?: string): Promise<{ runId: string }> {
+		// `@router.post("/{automation_id}/run-now")` — Phase 189: manual
+		// trigger; the run record is created synchronously, so the hub sees
+		// "running" right away. Busy (already running) answers 409.
+		const controller = new AbortController();
+		const timeout = setTimeout(() => controller.abort(), 10000);
+		try {
+			const response = await fetch(`${this.backendUrl}/api/automations/${encodeURIComponent(id ?? '')}/run-now?project_root=${encodeURIComponent(workspaceRoot ?? '')}`, {
+				method: 'POST',
+				signal: controller.signal
+			});
+			const payload = await response.json().catch(() => undefined) as { runId?: string; detail?: string } | undefined;
+			if (!response.ok) {
+				throw new Error(payload?.detail ?? `VibeAI automation run failed (HTTP ${response.status})`);
+			}
+			return { runId: payload?.runId ?? '' };
 		} finally {
 			clearTimeout(timeout);
 		}
@@ -1270,6 +1708,14 @@ export class VibeAIService extends Disposable implements IVibeAIService {
 					autoMode: chat.autoMode,
 					// Phase 71 Plan mode execute phase: the user-approved plan.
 					plan: execute.plan,
+					// Phase 232: the persisted agreed-plan file + the streamed
+					// plan doc (both under .vibe/plans/) — without these two
+					// keys the execute phase's plan_doc_path stays None and
+					// its progress write-backs fall back to a fresh PLAN.md,
+					// so the open plan editor's To-dos never tick. Absent →
+					// backend fallback (unchanged).
+					plan_file: execute.planFile,
+					plan_doc_path: execute.planDocPath,
 					// Phase 113: the conversation's session id — the Agent
 					// endpoint opens its steer gate on it so mid-turn sends
 					// can queue as steers; the chat/plan/execute endpoints
@@ -1295,6 +1741,11 @@ export class VibeAIService extends Disposable implements IVibeAIService {
 					// agent's terminal commands per turn. Absent = the
 					// backend's default (high_risk).
 					permission_mode: chat.permissionMode,
+					// Phase 246: resume-from-failed-step retry — the failed
+					// turn's turn transcript id; the agent endpoint reloads
+					// its transcript and continues from the last tool
+					// boundary. Absent = a fresh turn (backward compatible).
+					resume_turn_id: chat.resumeTurnId,
 					// Phase 107: the editor's opened folder — the backend
 					// rebinds its tools / RAG index / rules / skills to it.
 					project_root: request.workspaceRoot
@@ -1551,11 +2002,14 @@ export class VibeAIService extends Disposable implements IVibeAIService {
 				return [{
 					requestId,
 					type: 'limit_reached',
-					limitReached: {
-						rounds: typeof event.rounds === 'number' ? event.rounds : 0,
-						segments: typeof event.segments === 'number' ? event.segments : 0,
-						reason: typeof event.reason === 'string' ? event.reason : 'rounds',
-					},
+				limitReached: {
+					rounds: typeof event.rounds === 'number' ? event.rounds : 0,
+					segments: typeof event.segments === 'number' ? event.segments : 0,
+					// Phase 239: total tool-round budget — the pane chip shows
+					// "used/total" (budget exhaustion vs early looping stop).
+					budget: typeof event.budget === 'number' ? event.budget : undefined,
+					reason: typeof event.reason === 'string' ? event.reason : 'rounds',
+				},
 					raw: event
 				}];
 			case 'retry':
@@ -1593,17 +2047,43 @@ export class VibeAIService extends Disposable implements IVibeAIService {
 				// Phase 71 Plan mode: the research phase's structured plan.
 				// A null/invalid plan = the backend failed to produce one —
 				// still emitted so the pane can render the retry note.
+				// Phase 218: planDocPath rides along — the plan phase already
+				// streamed PLAN.md to the project root (the pane opens it in
+				// the editor and the approval bar links to it).
 				return [{
 					requestId,
 					type: 'plan',
 					plan: this.normalizePlan(event?.plan),
+					planDocPath: typeof event?.planDocPath === 'string' ? event.planDocPath : undefined,
+					raw: event
+				}];
+			case 'plan_doc_start':
+				// Phase 218: the plan doc's first chunk (the backend created
+				// PLAN.md and wrote it before emitting) — the pane opens the
+				// doc in the editor and seeds it with this chunk.
+				return [{
+					requestId,
+					type: 'plan_doc_start',
+					planDocPath: typeof event?.path === 'string' ? event.path : undefined,
+					planDocDelta: typeof event?.delta === 'string' ? event.delta : '',
+					raw: event
+				}];
+			case 'plan_doc_delta':
+				// Phase 218: the plan doc's next chunk — the pane appends it
+				// to the editor's model (chunks join up to the on-disk file).
+				return [{
+					requestId,
+					type: 'plan_doc_delta',
+					planDocPath: typeof event?.path === 'string' ? event.path : undefined,
+					planDocDelta: typeof event?.delta === 'string' ? event.delta : '',
 					raw: event
 				}];
 			case 'agent_questions':
-				// Phase 121: the model asked clarifying questions without
-				// stopping work (ask_questions) — the pane renders a
-				// question card per event; answers go out via steer() and
-				// inject at the next tool boundary (the loop never waits).
+				// Phase 121/237: the model asked clarifying questions —
+				// the pane renders a question card per event; since
+				// Phase 237 the turn parks at the gate and the card's
+				// answer resolves it (the answer feeds back as the tool
+				// result and the loop continues).
 				return [{
 					requestId,
 					type: 'agent_questions',
@@ -1624,6 +2104,19 @@ export class VibeAIService extends Disposable implements IVibeAIService {
 								})
 								.filter((q: IVibeAIQuestion | null): q is IVibeAIQuestion => q !== null)
 							: [],
+					},
+					raw: event
+				}];
+			case 'agent_question_answered':
+				// Phase 237: the blocking question gate woke with the
+				// user's answer — the pane folds the matching question
+				// card (by id) to its answered state.
+				return [{
+					requestId,
+					type: 'agent_question_answered',
+					questionAnswered: {
+						id: typeof event.id === 'string' ? event.id : '',
+						answer: typeof event.answer === 'string' ? event.answer : '',
 					},
 					raw: event
 				}];
@@ -1659,10 +2152,15 @@ export class VibeAIService extends Disposable implements IVibeAIService {
 			case 'plan_start':
 				// Phase 71: the execute phase kicked off for the approved
 				// plan (steps count + the plan again for the progress card).
+				// Phase 218: planPath / planDocPath now actually map onto the
+				// stream data (the pane captures both on the conversation —
+				// before this the executing card's doc link never lit).
 				return [{
 					requestId,
 					type: 'plan_start',
 					plan: this.normalizePlan(event?.plan),
+					planPath: typeof event?.planPath === 'string' ? event.planPath : undefined,
+					planDocPath: typeof event?.planDocPath === 'string' ? event.planDocPath : undefined,
 					raw: event
 				}];
 			case 'plan_step_start':
@@ -1695,6 +2193,8 @@ export class VibeAIService extends Disposable implements IVibeAIService {
 				}];
 			case 'plan_done':
 				// Phase 71: the whole plan executed — done/failed step ids.
+				// Phase 218: planPath / planDocPath map through (restore
+				// parity with plan_start's captures).
 				return [{
 					requestId,
 					type: 'plan_done',
@@ -1702,6 +2202,22 @@ export class VibeAIService extends Disposable implements IVibeAIService {
 						steps: typeof event.steps === 'number' ? event.steps : 0,
 						stepsDone: Array.isArray(event.stepsDone) ? event.stepsDone.filter((s: unknown): s is number => typeof s === 'number') : [],
 						stepsFailed: Array.isArray(event.stepsFailed) ? event.stepsFailed.filter((s: unknown): s is number => typeof s === 'number') : [],
+					},
+					planPath: typeof event?.planPath === 'string' ? event.planPath : undefined,
+					planDocPath: typeof event?.planDocPath === 'string' ? event.planDocPath : undefined,
+					raw: event
+				}];
+			case 'plan_revision':
+				// Phase 241 (living plan): update_plan revised the remaining
+				// steps mid-execution — map the full step list through the
+				// same normalizer the plan card uses (settled prefix intact,
+				// so ids keep aligning with the card's rows).
+				return [{
+					requestId,
+					type: 'plan_revision',
+					planRevision: {
+						steps: this.normalizePlan({ steps: Array.isArray(event?.steps) ? event.steps : [] })?.steps ?? [],
+						reason: typeof event?.reason === 'string' ? event.reason : '',
 					},
 					raw: event
 				}];
@@ -1752,6 +2268,27 @@ export class VibeAIService extends Disposable implements IVibeAIService {
 					type: 'turn_state',
 					turnState: typeof event.state === 'string' ? event.state : undefined,
 					final: event.final === true,
+					raw: event
+				}];
+			case 'turn_start':
+				// Phase 245: the backend turn transcript id (the resume
+				// retry credential) — the pane stores it on the stream
+				// state; the turn record persists it for restore parity.
+				return [{
+					requestId,
+					type: 'turn_start',
+					turnId: typeof event.turn_id === 'string' ? event.turn_id : undefined,
+					resumed: event.resumed === true,
+					raw: event
+				}];
+			case 'resume_unavailable':
+				// Phase 246: the resume retry's transcript could not be
+				// loaded — the pane tears the resume attempt down and
+				// falls back to the legacy truncate + re-send path.
+				return [{
+					requestId,
+					type: 'resume_unavailable',
+					turnId: typeof event.turn_id === 'string' ? event.turn_id : undefined,
 					raw: event
 				}];
 			case 'parallel_agent_start':

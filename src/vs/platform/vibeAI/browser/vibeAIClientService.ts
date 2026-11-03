@@ -6,7 +6,7 @@
 import { IMainProcessService } from '../../ipc/common/mainProcessService.js';
 import { InstantiationType, registerSingleton } from '../../instantiation/common/extensions.js';
 import { IWorkspaceContextService } from '../../workspace/common/workspace.js';
-import { IVibeAICustomizeCreateData, IVibeAICustomizeItem, IVibeAICustomizeResult, IVibeAIChatRequest, IVibeAIContextUsage, IVibeAIContextUsageRequest, IVibeAIExecutePlanRequest, IVibeAIParallelRequest, IVibeAIParallelRun, IVibeAIService, IVibeAISkill, IVibeAISubagent, VibeAICustomizeKind, VibeAICustomizeScope } from '../common/vibeAI.js';
+import { IVibeAIAutomation, IVibeAIAutomationCreateData, IVibeAIAutomationPatch, IVibeAICustomizeCreateData, IVibeAICustomizeItem, IVibeAICustomizeResult, IVibeAIChatRequest, IVibeAIContextUsage, IVibeAIContextUsageRequest, IVibeAIExecutePlanRequest, IVibeAIParallelRequest, IVibeAIParallelRun, IVibeAIService, IVibeAISkill, IVibeAISubagent, VibeAICustomizeKind, VibeAICustomizeScope } from '../common/vibeAI.js';
 import { VibeAIClient } from '../common/vibeAIChannel.js';
 
 /**
@@ -103,6 +103,27 @@ export class VibeAIClientService extends VibeAIClient {
 
 	override customizeToggle(kind: VibeAICustomizeKind, name: string, scope: VibeAICustomizeScope): Promise<IVibeAICustomizeResult> {
 		return super.customizeToggle(kind, name, scope, this.workspaceRoot);
+	}
+
+	override listAutomations(): Promise<IVibeAIAutomation[]> {
+		// Phase 189: the hub's Automations page — always the opened folder.
+		return super.listAutomations(this.workspaceRoot);
+	}
+
+	override createAutomation(workspaceRoot?: string, data?: IVibeAIAutomationCreateData): Promise<IVibeAIAutomation> {
+		return super.createAutomation(workspaceRoot ?? this.workspaceRoot, data);
+	}
+
+	override updateAutomation(workspaceRoot?: string, id?: string, patch?: IVibeAIAutomationPatch): Promise<IVibeAIAutomation> {
+		return super.updateAutomation(workspaceRoot ?? this.workspaceRoot, id, patch);
+	}
+
+	override deleteAutomation(workspaceRoot?: string, id?: string): Promise<{ ok: boolean }> {
+		return super.deleteAutomation(workspaceRoot ?? this.workspaceRoot, id);
+	}
+
+	override runAutomationNow(workspaceRoot?: string, id?: string): Promise<{ runId: string }> {
+		return super.runAutomationNow(workspaceRoot ?? this.workspaceRoot, id);
 	}
 
 	override reloadMcp(): Promise<IVibeAICustomizeResult> {

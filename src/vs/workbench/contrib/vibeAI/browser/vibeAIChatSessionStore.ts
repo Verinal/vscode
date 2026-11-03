@@ -108,6 +108,15 @@ export interface IVibeAIPersistedTurn {
 	readonly routedModel?: IVibeAIModelRouting;
 	readonly error?: string;
 	/**
+	 * Phase 245: the backend turn transcript id (from the `turn_start`
+	 * event) — the resume-from-failed-step retry credential. Persisted so
+	 * the Retry button of a restored failed turn can still resume from
+	 * the server-side transcript after a reload. Optional — sessions
+	 * saved before Phase 245 predate the field (retry falls back to the
+	 * legacy full re-send).
+	 */
+	readonly turnId?: string;
+	/**
 	 * Phase 97: the turn was interrupted by the next send (the streamed
 	 * progress stays; the restore renders the interruption note). Optional
 	 * — sessions saved before Phase 97 predate the field.
@@ -237,6 +246,15 @@ export interface IVibeAIChatSession {
 	 */
 	readonly planPath?: string;
 	/**
+	 * Phase 232: the streamed plan doc's relative path
+	 * (`.vibe/plans/plan_<id>.plan.md`) — a restored tab keeps sending it
+	 * as `planDocPath` on Build so the execute phase ticks progress on the
+	 * SAME doc (without it the backend falls back to a fresh PLAN.md and
+	 * the original doc's To-dos never check off). Optional — sessions
+	 * saved before Phase 232 predate the field.
+	 */
+	readonly planDocPath?: string;
+	/**
 	 * Phase 177 (Agent Window, Cursor parity): the project folder the
 	 * conversation is bound to — sent as `workspaceRoot` on every request
 	 * so the backend rebinds its tools / RAG index / rules / skills even
@@ -245,6 +263,13 @@ export interface IVibeAIChatSession {
 	 * Phase 177 predate the field and fall back to the window's folder.
 	 */
 	readonly workspaceRoot?: string;
+	/**
+	 * Phase 227: the title was AI-summarized (POST /api/chat/title from
+	 * the first question) — later saves stick to it instead of
+	 * re-deriving the raw first question. Optional — sessions saved
+	 * before Phase 227 predate the flag and restore as derived titles.
+	 */
+	readonly titleCustom?: boolean;
 }
 
 /**
@@ -468,7 +493,10 @@ export class VibeAIChatSessionStore {
 		const sessions = this.list().filter(s => s.id !== sessionId);
 		const session: IVibeAIChatSession = {
 			id: sessionId,
-			title: sessionTitle(messages),
+			// Phase 227: an AI-summarized title sticks across saves — only
+			// a title still derived from the raw first question is
+			// recomputed per save.
+			title: previous?.titleCustom ? previous.title : sessionTitle(messages),
 			// The conversation's creation time sticks across saves.
 			createdAt: previous?.createdAt ?? now,
 			updatedAt: now,
@@ -476,10 +504,17 @@ export class VibeAIChatSessionStore {
 			pinned: previous?.pinned,
 			// Phase 61: images (data URLs) ride along with user messages so
 			// the restored thread shows the sent thumbnails.
+			// Phase 184: file/folder chips ride along too (same contract) —
+			// the restored thread shows the sent chips and the prompt edit
+			// can re-edit the message's attachment set.
 			messages: messages.map(m => ({
 				role: m.role,
 				content: m.content,
 				...(m.images && m.images.length > 0 ? { images: m.images } : {}),
+				...(m.files && m.files.length > 0 ? { files: m.files } : {}),
+				// r20: the assistant turn's working trace rides along (the
+				// hub's restored threads render its "Worked for Xs" row).
+				...(m.worked && m.worked.steps.length > 0 ? { worked: m.worked } : {}),
 			})),
 		};
 		// Phase 45: the completed turns go along with their artifacts
@@ -526,6 +561,12 @@ export class VibeAIChatSessionStore {
 		// setPlanPath() (captured at plan_start / plan_done).
 		if (previous?.planPath) {
 			(session as { planPath?: string }).planPath = previous.planPath;
+		}
+		// Phase 232: the streamed plan doc sticks across saves (like the
+		// agreed plan file) — turn-finish saves never drop it; the
+		// authoritative writer is setPlanDocPath() (captured at plan_start).
+		if (previous?.planDocPath) {
+			(session as { planDocPath?: string }).planDocPath = previous.planDocPath;
 		}
 		// Phase 177: the conversation's project folder sticks across saves —
 		// a conversation stays bound to the workspace it was created in, so
@@ -627,6 +668,65 @@ export class VibeAIChatSessionStore {
 		this.write(sessions);
 	}
 
+	/**
+	 * Phase 232: records the given conversation's streamed plan doc path
+	 * (like setPlanPath — a targeted mutation). A non-empty path sets it;
+	 * an empty path clears it (the doc never sticks back). A session not
+	 * in the store no-ops — the capture rides the next turn-finish save's
+	 * stick instead.
+	 */
+	setPlanDocPath(sessionId: string, planDocPath: string | undefined): void {
+		const sessions = this.list();
+		const session = sessions.find(s => s.id === sessionId);
+		if (!session) {
+			return;
+		}
+		const target = session as { planDocPath?: string };
+		const path = (planDocPath ?? '').trim();
+		if (path.length === 0) {
+			delete target.planDocPath;
+		} else {
+			target.planDocPath = path;
+		}
+		this.write(sessions);
+	}
+
+	/**
+	 * Phase 227: records the AI-summarized conversation title (like
+	 * setGoal — a targeted mutation). The flag makes later saves stick
+	 * to this title instead of re-deriving the raw first question. A
+	 * session not in the store no-ops — the pane persists the
+	 * conversation right before (persistTurns) so the patch lands.
+	 */
+	setSessionTitle(sessionId: string, title: string): void {
+		const sessions = this.list();
+		const session = sessions.find(s => s.id === sessionId);
+		if (!session) {
+			return;
+		}
+		const target = session as { title: string; titleCustom?: boolean };
+		target.title = title;
+		target.titleCustom = true;
+		this.write(sessions);
+	}
+
+	/**
+	 * Phase 227: clears the AI-summarized title — the first question was
+	 * edited (prompt resend), the title re-derives from the messages
+	 * until the next summary lands.
+	 */
+	resetSessionTitle(sessionId: string): void {
+		const sessions = this.list();
+		const session = sessions.find(s => s.id === sessionId);
+		if (!session) {
+			return;
+		}
+		const target = session as { title: string; titleCustom?: boolean };
+		target.title = sessionTitle(session.messages);
+		target.titleCustom = false;
+		this.write(sessions);
+	}
+
 	clear(): void {
 		this.storageService.remove(STORAGE_KEY, StorageScope.APPLICATION);
 		// Legacy buckets (pre-Phase 177 workspace-scoped sessions) go too.
@@ -713,27 +813,49 @@ export class VibeAIChatSessionStore {
 	private write(sessions: IVibeAIChatSession[]): void {
 		try {
 			let raw = JSON.stringify(sessions);
-			// Phase 45 size guard: when the per-turn artifacts push the
-			// payload over the limit, fall back to the plain message pairs
-			// (pre-Phase 45 behavior) instead of breaking persistence.
+			// Phase 45 size guard, Phase 216 rework: when the payload is over
+			// the limit, slim OLDEST-FIRST until it fits (the list is
+			// newest-first — list() sorts by updatedAt, save() unshifts the
+			// active session), so the newest conversations keep their turn
+			// records. The old guard wiped EVERY session's turns in one
+			// over-cap write; restored without records, the Phase 47
+			// alignment gate (finishStreaming) never re-captured them — one
+			// overflow permanently killed Retry / checkpoint restore for
+			// every conversation in the store.
 			if (raw.length > MAX_STORED_JSON_CHARS) {
-				raw = JSON.stringify(sessions.map(session => {
-					const slim: IVibeAIChatSession = { ...session };
-					delete (slim as { turns?: IVibeAIPersistedTurn[] }).turns;
-					return slim;
-				}));
-			}
-			// Phase 61: last-resort guard — base64 image payloads are the
-			// bulkiest data in the store; when the payload is STILL over
-			// the limit, strip them from every message (the text history
-			// survives; thumbnails are lost from restored threads only).
-			// Phase 113: the steered marker survives (it drives the
-			// turn↔user-message alignment on restore).
-			if (raw.length > MAX_STORED_JSON_CHARS) {
-				raw = JSON.stringify(sessions.map(session => ({
-					...session,
-					messages: session.messages.map(m => (m.steered ? { role: m.role, content: m.content, steered: true } : { role: m.role, content: m.content })),
-				})));
+				const slimmed: IVibeAIChatSession[] = sessions.map(session => ({ ...session }));
+				const sizes = slimmed.map(session => JSON.stringify(session).length);
+				let total = sizes.reduce((sum, size) => sum + size, 0);
+				// Stage 1: whole-turn records, oldest sessions first — only as
+				// many as needed to fit.
+				for (let index = slimmed.length - 1; index >= 0 && total > MAX_STORED_JSON_CHARS; index--) {
+					if (!(slimmed[index] as { turns?: IVibeAIPersistedTurn[] }).turns) {
+						continue;
+					}
+					delete (slimmed[index] as { turns?: IVibeAIPersistedTurn[] }).turns;
+					const newSize = JSON.stringify(slimmed[index]).length;
+					total -= sizes[index] - newSize;
+					sizes[index] = newSize;
+				}
+				// Phase 61 last-resort guard, Phase 216 same oldest-first
+				// policy: base64 images are the bulkiest data left — strip
+				// them from the oldest sessions' messages (the text history
+				// survives; thumbnails are lost from restored threads only).
+				// Phase 113: the steered marker survives (it drives the
+				// turn↔user-message alignment on restore).
+				for (let index = slimmed.length - 1; index >= 0 && total > MAX_STORED_JSON_CHARS; index--) {
+					if (!slimmed[index].messages.some(m => m.images && m.images.length > 0)) {
+						continue;
+					}
+					slimmed[index] = {
+						...slimmed[index],
+						messages: slimmed[index].messages.map(m => (m.steered ? { role: m.role, content: m.content, steered: true } : { role: m.role, content: m.content })),
+					};
+					const newSize = JSON.stringify(slimmed[index]).length;
+					total -= sizes[index] - newSize;
+					sizes[index] = newSize;
+				}
+				raw = JSON.stringify(slimmed);
 			}
 			this.storageService.store(
 				STORAGE_KEY,

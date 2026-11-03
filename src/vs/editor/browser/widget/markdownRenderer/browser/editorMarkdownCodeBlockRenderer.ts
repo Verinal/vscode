@@ -80,7 +80,7 @@ export class EditorMarkdownCodeBlockRenderer implements IMarkdownCodeBlockRender
 
 		// In markdown, it is possible that we stumble upon language aliases (e.g.js instead of javascript).
 		// it is possible no alias is given in which case we fall back to the current editor lang
-		const resolvedLanguageId = this.resolveCodeBlockLanguage(languageAlias, rawInfo, editor);
+		const resolvedLanguageId = this.resolveCodeBlockLanguage(languageAlias, rawInfo, editor, options);
 		const languageId = resolvedLanguageId ?? PLAINTEXT_LANGUAGE_ID;
 
 		// Phase 94: languages and their grammars register with the extension
@@ -116,7 +116,7 @@ export class EditorMarkdownCodeBlockRenderer implements IMarkdownCodeBlockRender
 			? this.withCodeBlockHeader(root, value, languageAlias, rawInfo, this._languageService.getLanguageName(languageId) ?? undefined)
 			: root;
 		if (needsTokenizationUpgrade) {
-			this.scheduleTokenizationUpgrade(block, languageAlias, rawInfo, value, editor);
+			this.scheduleTokenizationUpgrade(block, languageAlias, rawInfo, value, editor, options);
 		}
 
 		return block;
@@ -128,8 +128,18 @@ export class EditorMarkdownCodeBlockRenderer implements IMarkdownCodeBlockRender
 	 * in the fence info (```11.py). Returns undefined when nothing
 	 * resolves — the caller falls back to plaintext.
 	 */
-	private resolveCodeBlockLanguage(languageAlias: string | undefined, rawInfo: string | undefined, editor: ICodeEditor | undefined): string | undefined | null {
+	private resolveCodeBlockLanguage(languageAlias: string | undefined, rawInfo: string | undefined, editor: ICodeEditor | undefined, options?: IMarkdownRendererExtraOptions): string | undefined | null {
 		if (languageAlias) {
+			// Opt-in alias rerouting (e.g. the chat view maps powershell →
+			// shellscript): consulted before native resolution so an alias
+			// can be pointed at a different grammar than its own.
+			const mapped = options?.languageAliases?.[languageAlias.toLowerCase()];
+			if (mapped) {
+				const mappedId = this._languageService.getLanguageIdByLanguageName(mapped);
+				if (mappedId) {
+					return mappedId;
+				}
+			}
 			const byName = this._languageService.getLanguageIdByLanguageName(languageAlias);
 			if (byName) {
 				return byName;
@@ -156,8 +166,11 @@ export class EditorMarkdownCodeBlockRenderer implements IMarkdownCodeBlockRender
 	 * is replaced). Bounded: the retries stop when the block left the
 	 * document (its render was replaced) or the attempt cap runs out — a
 	 * language with no grammar keeps rendering plain.
+	 * Phase 209: a factory that already RESOLVED to null (transient failure)
+	 * used to stay null forever; getOrCreate now re-runs such factories, so
+	 * these retries also rescue blocks poisoned by an early failure.
 	 */
-	private scheduleTokenizationUpgrade(block: HTMLElement, languageAlias: string | undefined, rawInfo: string | undefined, value: string, editor: ICodeEditor | undefined): void {
+	private scheduleTokenizationUpgrade(block: HTMLElement, languageAlias: string | undefined, rawInfo: string | undefined, value: string, editor: ICodeEditor | undefined, options?: IMarkdownRendererExtraOptions): void {
 		const codeBlockWindow = getWindow(block);
 		let attempt = 0;
 		let upgraded = false;
@@ -166,7 +179,10 @@ export class EditorMarkdownCodeBlockRenderer implements IMarkdownCodeBlockRender
 			if (!block.isConnected) {
 				return; // the render was replaced or disposed — stop
 			}
-			const languageId = this.resolveCodeBlockLanguage(languageAlias, rawInfo, editor) ?? PLAINTEXT_LANGUAGE_ID;
+			// options ride along so the retry re-resolves through the same
+			// alias rerouting as the initial render (otherwise the upgrade
+			// would swap the rerouted colored source back to the plain one).
+			const languageId = this.resolveCodeBlockLanguage(languageAlias, rawInfo, editor, options) ?? PLAINTEXT_LANGUAGE_ID;
 			// tokenizeToString awaits TokenizationRegistry.getOrCreate — a
 			// pending grammar factory load is triggered here, so this
 			// attempt usually lands the colored source directly.

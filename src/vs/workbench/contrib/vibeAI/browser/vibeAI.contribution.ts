@@ -64,7 +64,9 @@ import { VibeAIInlineCompletionProvider } from './vibeAIInlineCompletion.js';
 import { startVibeAIInlineEdit } from './vibeAIInlineEdit.js';
 import { VIBE_AI_NO_MODEL_MESSAGE, VibeAIModelStore } from './vibeAIModelStore.js';
 import { AGENT_WINDOW_PROJECT_STORAGE_KEY, VibeAIAgentsHubInput, VibeAIAgentsHubPane } from './vibeAIAgentsHub.js';
+import { VibeAIPlanDocInput, VibeAIPlanDocPane } from './vibeAIPlanDocPane.js';
 import { VIBE_AI_HANDOFF_MAX_AGE_MS, VIBE_AI_HANDOFF_STORAGE_KEY, VibeAIChatSessionStore, parseVibeAIChatHandoff } from './vibeAIChatSessionStore.js';
+import { VibeAIMarkdownEditorModeContribution } from './vibeAIMarkdown.js';
 import './media/vibeAITitleBar.css';
 import './media/vibeAIAgentsHub.css';
 
@@ -158,6 +160,10 @@ class VibeAIAutoOpenChatContribution extends Disposable implements IWorkbenchCon
 }
 
 registerWorkbenchContribution2(VibeAIAutoOpenChatContribution.ID, VibeAIAutoOpenChatContribution, WorkbenchPhase.AfterRestored);
+
+// Phase 225: markdown files open Cursor-style — Preview default, "Editor
+// Mode" title submenu, per-file mode memory (see vibeAIMarkdown.ts).
+registerWorkbenchContribution2(VibeAIMarkdownEditorModeContribution.ID, VibeAIMarkdownEditorModeContribution, WorkbenchPhase.BlockRestore);
 
 class ClearVibeAIChatAction extends Action2 {
 	static readonly ID = 'vibeAIChat.clear';
@@ -512,6 +518,46 @@ Registry.as<IEditorFactoryRegistry>(EditorExtensions.EditorFactory).registerEdit
 	VibeAIAgentsHubInputSerializer
 );
 
+// ==================== Plan doc editor registration (Phase 226) ====================
+
+Registry.as<IEditorPaneRegistry>(EditorExtensions.EditorPane).registerEditorPane(
+	EditorPaneDescriptor.create(
+		VibeAIPlanDocPane,
+		VibeAIPlanDocPane.ID,
+		localize('vibeAIPlanDocEditor', "VibeAI Plan Doc")
+	),
+	[
+		// The input is constructed per resource by the resolver delegation
+		// (vibeAIMarkdown.ts) — the descriptor only needs the class.
+		new SyncDescriptor(VibeAIPlanDocInput as unknown as { new(): VibeAIPlanDocInput })
+	]
+);
+
+class VibeAIPlanDocInputSerializer implements IEditorSerializer {
+	canSerialize(editorInput: EditorInput): boolean {
+		return editorInput instanceof VibeAIPlanDocInput;
+	}
+
+	serialize(input: VibeAIPlanDocInput): string {
+		return JSON.stringify({ resource: input.resource.toString() });
+	}
+
+	deserialize(instantiationService: IInstantiationService, value: string): VibeAIPlanDocInput | undefined {
+		try {
+			const parsed = JSON.parse(value);
+			const resource = parsed?.resource ? URI.parse(parsed.resource) : undefined;
+			return resource ? new VibeAIPlanDocInput(resource) : undefined;
+		} catch {
+			return undefined;
+		}
+	}
+}
+
+Registry.as<IEditorFactoryRegistry>(EditorExtensions.EditorFactory).registerEditorSerializer(
+	VibeAIPlanDocInput.ID,
+	VibeAIPlanDocInputSerializer
+);
+
 // ==================== Cursor parity: "Agents" title bar pill ====================
 
 class VibeAIOpenAgentsWindowAction extends Action2 {
@@ -520,7 +566,7 @@ class VibeAIOpenAgentsWindowAction extends Action2 {
 	constructor() {
 		super({
 			id: VibeAIOpenAgentsWindowAction.ID,
-			title: localize2('vibeAI.openAgentsWindow', "Agents"),
+			title: localize2('vibeAI.openAgentsWindow', "Agents Window"),
 			tooltip: localize('vibeAI.openAgentsWindowTooltip', "Open the Agents hub — parallel agent sessions for this workspace"),
 			icon: Codicon.sparkle,
 			f1: false,
@@ -576,8 +622,11 @@ registerAction2(VibeAIOpenAgentsWindowAction);
 
 /**
  * The agent window's "IDE ↗" button: opens the hub's resolved project
- * folder in a normal IDE window (native openWindow reuses a window that
- * already shows the folder, mirroring Cursor's IDE jump).
+ * folder in a normal IDE window (Phase 181 r23, user: 「不能讓 agent
+ * window 頁面直接變成 ide 模式」). Main-side reuse rule (user: 「如果已有
+ * 打開的 ideui 就不用新建」): an IDE window already open on the folder is
+ * focused, not duplicated — the new-window fallback keeps the neutral
+ * agent window from morphing into an IDE in place (r5/r6's two-app rule).
  */
 class VibeAIAgentWindowOpenIdeAction extends Action2 {
 	static readonly ID = 'vibeAI.agentWindow.openIde';
@@ -592,7 +641,7 @@ class VibeAIAgentWindowOpenIdeAction extends Action2 {
 
 	async run(accessor: ServicesAccessor, folderUri?: URI): Promise<void> {
 		const nativeHostService = accessor.get(INativeHostService);
-		await nativeHostService.openWindow(folderUri ? [{ folderUri }] : []);
+		await nativeHostService.openVibeIdeWindow(folderUri);
 	}
 }
 
@@ -635,15 +684,27 @@ class VibeAIAgentWindowBootstrapContribution extends Disposable implements IWork
 		// "New Agent" chat, so hide it like the other chrome.
 		layoutService.setPartHidden(true, Parts.AUXILIARYBAR_PART);
 		layoutService.getContainer(window).classList.add('vibe-agent-window');
+		// r35: lift the pre-paint veil from workbench.ts — the shell is now
+		// in its final agent-window form, so the default chrome never shows.
+		document.documentElement.classList.remove('vibe-agent-window-booting');
+		document.getElementById('vibe-agent-window-booting-style')?.remove();
 
 		editorService.openEditor(VibeAIAgentsHubInput.getOrCreate(), { pinned: true }).then(
 			() => {
 				logService.trace('[vibeAI] agent window landed in the Agents hub');
 				// Phase 181 r2: restored panels re-show themselves after the
 				// initial hide — re-assert once the workbench settled.
+				// r32: the status bar came back the same way — its grid cell
+				// kept a 26px empty strip below the editor (the CSS hide only
+				// removes the element, not the cell). Sidebar/activity bar
+				// ride along: a restored cell for them reserves the same
+				// kind of dead space.
 				setTimeout(() => {
 					layoutService.setPartHidden(true, Parts.PANEL_PART);
 					layoutService.setPartHidden(true, Parts.AUXILIARYBAR_PART);
+					layoutService.setPartHidden(true, Parts.STATUSBAR_PART);
+					layoutService.setPartHidden(true, Parts.ACTIVITYBAR_PART);
+					layoutService.setPartHidden(true, Parts.SIDEBAR_PART);
 				}, 1000);
 			},
 			err => logService.warn('[vibeAI] agent window hub open failed', err),
@@ -743,7 +804,7 @@ class VibeAITitleBarPill extends BaseActionViewItem {
 		container.setAttribute('tabindex', '0');
 
 		const label = DOM.append(container, $('span.vibe-ai-titlebar-pill-label'));
-		label.textContent = localize('vibeAI.openAgentsWindow', "Agents");
+		label.textContent = localize('vibeAI.openAgentsWindow', "Agents Window");
 
 		this._register(DOM.addDisposableListener(container, DOM.EventType.CLICK, () => {
 			this.actionRunner?.run(this.action);

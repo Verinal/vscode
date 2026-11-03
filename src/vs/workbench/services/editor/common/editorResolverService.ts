@@ -110,8 +110,12 @@ const editorAssociationsConfigurationNode: IConfigurationNode = {
 				type: 'string'
 			},
 			markdownDescription: localize('editor.hiddenEditorTypes', "Configure editor types that are hidden from the editor type picker. The active editor type remains visible."),
+			// Phase 225: the markdown preview editor is this fork's DEFAULT
+			// editor for `*.md` (exclusive resolver in vibeAIMarkdown.ts) —
+			// upstream's Agents-window default hid it from the type picker,
+			// which would hide the new default.
 			agentsWindow: {
-				default: ['vscode.markdown.preview.editor']
+				default: []
 			}
 		}
 	}

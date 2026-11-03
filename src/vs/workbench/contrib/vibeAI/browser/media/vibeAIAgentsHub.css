@@ -212,6 +212,37 @@
 	color: var(--vscode-sideBar-foreground);
 }
 
+/* Phase 183: Repositories 分組（Cursor 側欄同構，圖三對標）——repo 列 caret
+   展開／收合，展開後最近對話內嵌在列下（.vibe-ai-agents-repo-threads 縮排，
+   讓對話圓點對齊 repo 名）；預設 2 筆、More 每點一次 +5（state 在
+   sidebarGroupClosed／sidebarGroupLimit，renderRepos/renderRepoThreads）。 */
+.vibe-ai-agents-repo-caret {
+	flex-shrink: 0;
+	font-size: 12px;
+	opacity: 0.7;
+}
+
+.vibe-ai-agents-repo-threads {
+	display: flex;
+	flex-direction: column;
+	gap: 1px;
+	margin: 0 0 2px 14px;
+	padding-bottom: 2px;
+}
+
+.vibe-ai-agents-thread-more {
+	padding: 4px 8px 6px 22px;
+	cursor: pointer;
+	font-size: 11px;
+	color: var(--vscode-descriptionForeground);
+}
+
+.vibe-ai-agents-thread-more:hover {
+	color: var(--vscode-sideBar-foreground);
+	background: var(--vscode-list-hoverBackground, rgba(128, 128, 128, 0.12));
+	border-radius: 4px;
+}
+
 .vibe-ai-agents-thread:hover {
 	background: var(--vscode-list-hoverBackground, rgba(128, 128, 128, 0.12));
 }
@@ -250,6 +281,16 @@
 }
 
 /* --- main canvas ------------------------------------------------------ */
+
+/* r31: main＋右側面板的包裹層——右側展開的「一半」以這層為基準（紅框區，
+   側欄以外的部分）；左側欄收起時這層吃滿整頁，右側自然成為整頁的一半 */
+.vibe-ai-agents-chatwrap {
+	flex: 1 1 auto;
+	display: flex;
+	flex-direction: row;
+	min-width: 0;
+	overflow: hidden;
+}
 
 .vibe-ai-agents-main {
 	flex: 1 1 auto;
@@ -348,6 +389,7 @@
 	max-width: 200px;
 }
 
+/* r11: 發送鈕與 IDE 對話框同款（vibe-ai-send-button）——灰色圓角方塊，非藍圓 */
 .vibe-ai-agents-send {
 	display: flex;
 	align-items: center;
@@ -355,16 +397,16 @@
 	width: 24px;
 	height: 24px;
 	border: none;
-	border-radius: 50%;
-	background: var(--vscode-button-background);
-	color: var(--vscode-button-foreground);
+	border-radius: 6px;
+	background: var(--vscode-button-secondaryBackground, rgba(128, 128, 128, 0.25));
+	color: var(--vscode-descriptionForeground);
 	cursor: pointer;
 	font-size: 14px;
 	flex-shrink: 0;
 }
 
 .vibe-ai-agents-send:hover {
-	background: var(--vscode-button-hoverBackground);
+	background: var(--vscode-button-secondaryHoverBackground, rgba(128, 128, 128, 0.4));
 }
 
 /* --- background agents strip ------------------------------------------ */
@@ -634,6 +676,53 @@
 	display: none !important;
 }
 
+/* r30 (user: 圖二圈住的這幾個功能全部不要): the layout/account/settings
+   icon cluster in the title bar has no job in the agent window. */
+.monaco-workbench.vibe-agent-window .action-toolbar-container {
+	display: none !important;
+}
+
+/* r30 (user: 圖三下面多餘的橫杠): the hidden panel part re-shows itself
+   after restore and paints an empty strip across the bottom — the agent
+   window never shows it (our terminal lives in the hub's right pane). */
+.monaco-workbench.vibe-agent-window .part.panel {
+	display: none !important;
+}
+
+/* --- Phase 183 (user: 捲軸全部要合 IDE 頁面一樣) -------------------------
+   agent window 內所有原生捲軸收成 IDE Settings 頁同款（vibeAISettings.css
+   的 6px 圓角細滑塊＋透明軌道），取代全域 14px 編輯器式捲軸（圖 1 右圈太寬）。
+   選取器涵蓋視窗內每個可捲容器：側欄、transcript、下拉選單、Customize 清單、
+   右側檔案／瀏覽器／terminal 面板；.vibe-ai-agents-hub 一併套用——同一個
+   hub 編輯器在 IDE 視窗開啟時長相一致。箭頭按鈕與角落方塊由全域
+   ::-webkit-scrollbar-button/corner 負責（不用重複宣告）。 */
+.vibe-ai-agents-hub ::-webkit-scrollbar,
+.monaco-workbench.vibe-agent-window ::-webkit-scrollbar {
+	width: 6px;
+	height: 6px;
+}
+
+.vibe-ai-agents-hub ::-webkit-scrollbar-track,
+.monaco-workbench.vibe-agent-window ::-webkit-scrollbar-track {
+	background: transparent;
+}
+
+.vibe-ai-agents-hub ::-webkit-scrollbar-thumb,
+.monaco-workbench.vibe-agent-window ::-webkit-scrollbar-thumb {
+	background: var(--vscode-scrollbarSlider-background, rgba(121, 121, 121, 0.4));
+	border-radius: 3px;
+}
+
+.vibe-ai-agents-hub ::-webkit-scrollbar-thumb:hover,
+.monaco-workbench.vibe-agent-window ::-webkit-scrollbar-thumb:hover {
+	background: var(--vscode-scrollbarSlider-hoverBackground, rgba(100, 100, 100, 0.7));
+}
+
+.vibe-ai-agents-hub ::-webkit-scrollbar-thumb:active,
+.monaco-workbench.vibe-agent-window ::-webkit-scrollbar-thumb:active {
+	background: var(--vscode-scrollbarSlider-activeBackground, rgba(191, 191, 191, 0.4));
+}
+
 /* --- rail header + search + collapse (Phase 181 r2) --------------------- */
 
 .vibe-ai-agents-side-head {
@@ -677,17 +766,28 @@
 	box-sizing: border-box;
 }
 
+/* r13: 收合側欄時 toggle 按鈕留下來（細條只含按鈕），再點一次展開——
+   頂欄不再放第二顆展開鈕 */
 .vibe-ai-agents-hub.rail-collapsed .vibe-ai-agents-side {
+	width: 40px;
+	padding: 10px 4px 0;
+}
+
+.vibe-ai-agents-hub.rail-collapsed .vibe-ai-agents-filter,
+.vibe-ai-agents-hub.rail-collapsed .vibe-ai-agents-actions,
+.vibe-ai-agents-hub.rail-collapsed .vibe-ai-agents-projects,
+.vibe-ai-agents-hub.rail-collapsed .vibe-ai-agents-sessions,
+.vibe-ai-agents-hub.rail-collapsed .vibe-ai-agents-foot {
 	display: none;
 }
 
-.vibe-ai-agents-rail-expand {
-	display: none;
-	margin-right: auto;
+.vibe-ai-agents-hub.rail-collapsed .vibe-ai-agents-side-head {
+	flex-direction: column;
+	gap: 2px;
 }
 
-.vibe-ai-agents-hub.rail-collapsed .vibe-ai-agents-rail-expand {
-	display: flex;
+.vibe-ai-agents-hub.rail-collapsed .vibe-ai-agents-side-head .codicon-search {
+	display: none;
 }
 
 /* Repositories header row: label + hover icons (Cursor parity) */
@@ -929,11 +1029,17 @@ button.vibe-ai-agents-model .codicon {
 	margin: 0 auto;
 }
 
-.vibe-ai-agents-chat-head {
+/* r13: 展開線程的標題改住頂欄（綠框位置）——chip＋Open in IDE＋close */
+.vibe-ai-agents-topbar-chat {
 	display: flex;
 	align-items: center;
 	gap: 4px;
-	padding: 2px 0 10px;
+	margin-right: auto;
+	min-width: 0;
+}
+
+.vibe-ai-agents-topbar-chat .vibe-ai-agents-chat-title {
+	max-width: 460px;
 }
 
 .vibe-ai-agents-chat-title {
@@ -980,14 +1086,16 @@ button.vibe-ai-agents-model .codicon {
 	color: var(--vscode-descriptionForeground);
 }
 
-/* agent turns: document-style markdown, no bubble (Cursor thread view) */
+/* agent turns: document-style markdown, no bubble (Cursor thread view).
+   r14: 字級／行高／顏色／標題／表格／程式碼全部由 vibe-ai-chat-markdown
+   （vibeAIChat.css，IDE 對話框同一套）提供——回答規則與 IDE 完全一致。 */
 .vibe-ai-agents-chat-text {
-	font-size: 13px;
-	line-height: 1.6;
 	word-break: break-word;
 }
 
 .vibe-ai-agents-chat-msg.user .vibe-ai-agents-chat-text {
+	font-size: 13px;
+	line-height: 1.6;
 	background: var(--vscode-editorWidget-background, rgba(128, 128, 128, 0.08));
 	border-radius: 10px;
 	padding: 10px 14px;
@@ -1003,4 +1111,1133 @@ button.vibe-ai-agents-model .codicon {
 .vibe-ai-agents-composer,
 .vibe-ai-agents-chips {
 	flex-shrink: 0;
+}
+
+/* r10: 展開對話後 composer 重組為 Cursor 的 follow-up 條——細一列輸入、chips 移到 composer 下方 */
+/* r11: 展開態寬度撐滿中央區（紅框範圍），回答內容／輸入框／chips 同寬對齊 */
+/* r13: 展開態輸入框組件貼到最低位置（transcript 撐滿、composer 沉底） */
+/* r16: chips 列下緣歸零——composer 組件貼齊視窗底（去掉紅色間隙） */
+.vibe-ai-agents-hub.chat-open .vibe-ai-agents-center { justify-content: flex-end; padding-bottom: 0; }
+.vibe-ai-agents-hub.chat-open .vibe-ai-agents-chat { order: 1; width: 100%; }
+.vibe-ai-agents-hub.chat-open .vibe-ai-agents-composer { order: 2; width: 100%; }
+.vibe-ai-agents-hub.chat-open .vibe-ai-agents-chips { display: none; }
+.vibe-ai-agents-hub.chat-open .vibe-ai-agents-bg { order: 4; }
+.vibe-ai-agents-hub.chat-open .vibe-ai-agents-par { order: 5; }
+.vibe-ai-agents-hub.chat-open .vibe-ai-agents-composer-input { min-height: 24px; padding: 6px 14px 2px; }
+.vibe-ai-agents-hub.chat-open .vibe-ai-agents-composer-bar { padding-top: 0; }
+
+/* r16: follow-up 態兩顆 chip（項目＋This PC）都移入 composer bar 貼在 ＋ 右側；
+   bar 左群組貼左（蓋掉 add 鈕的 margin-right:auto），ring 之後用 margin-left:auto
+   把模型群推到右端（r18：This PC 貼在項目旁，auto margin 從 This PC 移到 ring） */
+.vibe-ai-agents-hub.chat-open .vibe-ai-agents-composer-bar { justify-content: flex-start; }
+.vibe-ai-agents-hub.chat-open .vibe-ai-agents-composer-bar .vibe-ai-agents-add { margin-right: 0; }
+.vibe-ai-agents-hub.chat-open .vibe-ai-agents-composer-bar .vibe-ai-context-ring { margin-left: auto; }
+
+/* r26: Context Usage 面板移出 composer 卡片——IDE chat pane 同構（獨立卡片浮在
+   輸入框上方，pane 把它插在輸入卡之前；hub 原本嵌進有邊框的 composer 裡，
+   雙層框＋內捲軸非常突兀）。寬度跟隨 composer：fresh 560px、展開 100%；
+   展開態 order 2 與 composer 同級，DOM 在前 → 貼在輸入框正上方 */
+.vibe-ai-agents-hub .vibe-ai-context-panel {
+	width: min(560px, 100%);
+	margin: 0;
+	flex-shrink: 0;
+}
+.vibe-ai-agents-hub.chat-open .vibe-ai-context-panel { order: 2; width: 100%; }
+
+/* r12: 本窗執行的對話——transcript 尾端 live 回合（spinner＋狀態＋串流文字） */
+.vibe-ai-agents-chat-spin {
+	animation: vibe-ai-agents-spin 1.4s linear infinite;
+}
+
+.vibe-ai-agents-chat-state {
+	font-size: 11px;
+	color: var(--vscode-descriptionForeground);
+}
+
+/* r14: live 文字顏色不再覆寫——串流中的回答同 IDE（vibe-ai-chat-markdown #fff） */
+
+/* r13: 頁面不出橫向捲軸——所有溢出在容器內裁切，寬表格只在自身區塊內捲動 */
+.vibe-ai-agents-hub,
+.vibe-ai-agents-main,
+.vibe-ai-agents-center,
+.vibe-ai-agents-side {
+	min-width: 0;
+	overflow-x: hidden;
+}
+
+.vibe-ai-agents-chat-body {
+	overflow-x: hidden;
+}
+
+/* r14: pre/code/table 樣式移除——vibe-ai-chat-markdown（IDE 同款）已涵蓋 */
+
+/* r15/r19: 已送出的訊息可編輯重送（Cursor parity）——點卡片本體即就地編輯；
+   r28: ⤶ 圖示移除（卡片本身就是編輯入口，側邊圖示像顆多餘按鈕），hover 反白保留 */
+.vibe-ai-agents-chat-msg.user .vibe-ai-agents-chat-text {
+	position: relative;
+	padding-right: 34px;
+	cursor: pointer;
+}
+
+.vibe-ai-agents-chat-msg.user .vibe-ai-agents-chat-text:hover {
+	background: var(--vscode-list-hoverBackground, rgba(128, 128, 128, 0.14));
+}
+
+/* r28: 編輯卡＝composer 本體——box/input/bar 全部掛 .vibe-ai-agents-composer
+   系列 class（外觀行為與下方輸入框完完全全一模一樣，chat-open 緊湊態自動同款），
+   這裡只補兩條覆寫：卡片內撐滿、model chip 推到右群（無 ring 接 margin-left:auto） */
+.vibe-ai-agents-chat-edit-box {
+	width: 100%;
+}
+
+.vibe-ai-agents-chat-edit-bar .vibe-ai-agents-model {
+	margin-left: auto;
+}
+
+/* r20: 工作痕跡列——殼層（.vibe-ai-worked）沿用 vibeAIChat.css，
+   這裡只補 hub 自己的步驟列（圖示＋工具名） */
+.vibe-ai-agents-worked-step {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	font-size: 12px;
+	line-height: 1.6;
+	color: var(--vscode-descriptionForeground);
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+.vibe-ai-agents-worked-step .codicon {
+	font-size: 12px;
+	flex-shrink: 0;
+}
+
+.vibe-ai-agents-worked-ok {
+	color: var(--vscode-charts-green, #89d185);
+}
+
+.vibe-ai-agents-worked-fail {
+	color: var(--vscode-errorForeground, #f48771);
+}
+
+/* r24: 步驟列的目標詳情（read_file 後的路徑／run_terminal 的命令）——
+   暗字、超出省略，名字保持前景色 */
+.vibe-ai-agents-worked-detail {
+	color: var(--vscode-descriptionForeground);
+	opacity: 0.85;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	flex-shrink: 1;
+	min-width: 0;
+}
+
+/* r27: Thought for Xs 可展開（details/summary）——summary 沿用步驟列樣式，
+   caret 隨開合旋轉，內文暗色 pre-wrap 縮排對齊名字 */
+.vibe-ai-agents-worked-thought > summary {
+	list-style: none;
+	cursor: pointer;
+}
+
+.vibe-ai-agents-worked-thought > summary::-webkit-details-marker {
+	display: none;
+}
+
+.vibe-ai-agents-worked-thought-caret {
+	font-size: 12px;
+	flex-shrink: 0;
+	opacity: 0.7;
+	transition: transform 0.1s ease;
+}
+
+.vibe-ai-agents-worked-thought[open] > summary .vibe-ai-agents-worked-thought-caret {
+	transform: rotate(90deg);
+}
+
+.vibe-ai-agents-worked-thought-text {
+	font-size: 12px;
+	line-height: 1.6;
+	color: var(--vscode-descriptionForeground);
+	white-space: pre-wrap;
+	word-break: break-word;
+	padding: 2px 0 4px 27px;
+}
+
+/* r21: Customize 頁 items 容器（表單之外的清單區——async 重繪只動這層） */
+.vibe-ai-agents-cx-items {
+	display: block;
+}
+
+/* r21: 市場卡片 Add 鈕（accent 小 pill；已加＝disabled 灰） */
+.vibe-ai-agents-cx-market-add {
+	border: none;
+	border-radius: 6px;
+	background: var(--vscode-button-background);
+	color: var(--vscode-button-foreground);
+	padding: 3px 14px;
+	font-size: 12px;
+	cursor: pointer;
+	flex-shrink: 0;
+}
+
+.vibe-ai-agents-cx-market-add:hover {
+	background: var(--vscode-button-hoverBackground);
+}
+
+.vibe-ai-agents-cx-market-add:disabled {
+	opacity: 0.55;
+	cursor: default;
+}
+
+/* r17: 側欄 Customize 列選中態（Cursor：選中即反白） */
+.vibe-ai-agents-row.active {
+	background: var(--vscode-list-hoverBackground, rgba(128, 128, 128, 0.12));
+}
+
+/* r17: Customize 管理頁（Cursor 對標）——中央畫布取代 Settings 分頁；
+   .cx-open 隱藏對話／composer／chips／背景條，頁面佔滿中央 */
+.vibe-ai-agents-hub.cx-open .vibe-ai-agents-center { justify-content: flex-start; padding: 20px 24px 12px; }
+
+.vibe-ai-agents-hub.cx-open .vibe-ai-agents-chat,
+.vibe-ai-agents-hub.cx-open .vibe-ai-agents-composer,
+.vibe-ai-agents-hub.cx-open .vibe-ai-agents-chips,
+.vibe-ai-agents-hub.cx-open .vibe-ai-agents-bg,
+.vibe-ai-agents-hub.cx-open .vibe-ai-agents-par { display: none; }
+
+.vibe-ai-agents-cx {
+	display: flex;
+	flex-direction: column;
+	gap: 10px;
+	width: min(860px, 100%);
+	margin: 0 auto;
+	min-height: 0;
+}
+
+.vibe-ai-agents-cx-top {
+	display: flex;
+	gap: 8px;
+}
+
+.vibe-ai-agents-cx-search {
+	flex: 1;
+	height: 30px;
+	padding: 0 12px;
+	border-radius: 8px;
+	background: var(--vscode-input-background);
+	color: var(--vscode-input-foreground);
+	border: 1px solid var(--vscode-input-border, transparent);
+	outline: none;
+	font-size: 12px;
+}
+
+.vibe-ai-agents-cx-market {
+	height: 30px;
+	padding: 0 14px;
+	border: none;
+	border-radius: 8px;
+	background: var(--vscode-button-background);
+	color: var(--vscode-button-foreground);
+	cursor: pointer;
+	font-weight: 600;
+	font-size: 12px;
+	flex-shrink: 0;
+}
+
+.vibe-ai-agents-cx-market:hover {
+	background: var(--vscode-button-hoverBackground);
+}
+
+.vibe-ai-agents-cx-pills {
+	display: flex;
+	gap: 6px;
+	flex-wrap: wrap;
+}
+
+.vibe-ai-agents-cx-pill {
+	height: 26px;
+	padding: 0 12px;
+	border-radius: 13px;
+	border: 1px solid var(--vscode-input-border, transparent);
+	background: transparent;
+	color: var(--vscode-foreground);
+	cursor: pointer;
+	font-size: 12px;
+}
+
+.vibe-ai-agents-cx-pill:hover {
+	background: var(--vscode-toolbar-hoverBackground);
+}
+
+.vibe-ai-agents-cx-pill.active {
+	background: var(--vscode-button-secondaryBackground, rgba(128, 128, 128, 0.25));
+}
+
+.vibe-ai-agents-cx-list {
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+	overflow-y: auto;
+	min-height: 0;
+	padding-bottom: 8px;
+}
+
+.vibe-ai-agents-cx-section {
+	display: flex;
+	align-items: baseline;
+	gap: 6px;
+	font-weight: 600;
+	font-size: 13px;
+	margin-top: 6px;
+}
+
+.vibe-ai-agents-cx-section-count {
+	color: var(--vscode-descriptionForeground);
+	font-weight: 400;
+}
+
+.vibe-ai-agents-cx-card {
+	display: flex;
+	align-items: flex-start;
+	gap: 10px;
+	padding: 12px 14px;
+	border-radius: 10px;
+	background: var(--vscode-editorWidget-background, rgba(128, 128, 128, 0.08));
+	/* r25: cards stack with breathing room — the list read as one glued block */
+	margin-bottom: 8px;
+}
+
+.vibe-ai-agents-cx-card.off {
+	opacity: 0.6;
+}
+
+.vibe-ai-agents-cx-dot {
+	width: 8px;
+	height: 8px;
+	border-radius: 50%;
+	background: var(--vscode-descriptionForeground);
+	margin-top: 5px;
+	flex-shrink: 0;
+}
+
+.vibe-ai-agents-cx-dot.ok {
+	background: var(--vscode-charts-green, #4ec96a);
+}
+
+.vibe-ai-agents-cx-dot.fail {
+	background: var(--vscode-charts-red, #c55450);
+}
+
+.vibe-ai-agents-cx-dot.icon {
+	width: auto;
+	height: auto;
+	background: transparent;
+	border-radius: 0;
+	margin-top: 0;
+	font-size: 14px;
+	opacity: 0.8;
+}
+
+.vibe-ai-agents-cx-main {
+	flex: 1;
+	min-width: 0;
+}
+
+.vibe-ai-agents-cx-title {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	min-width: 0;
+}
+
+.vibe-ai-agents-cx-name {
+	font-weight: 600;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+.vibe-ai-agents-cx-scope {
+	font-size: 10px;
+	padding: 1px 6px;
+	border-radius: 8px;
+	flex-shrink: 0;
+}
+
+.vibe-ai-agents-cx-scope.project {
+	background: var(--vscode-button-background);
+	color: var(--vscode-button-foreground);
+}
+
+.vibe-ai-agents-cx-scope.global {
+	background: var(--vscode-button-secondaryBackground, rgba(128, 128, 128, 0.25));
+	color: var(--vscode-descriptionForeground);
+}
+
+.vibe-ai-agents-cx-desc {
+	font-size: 12px;
+	color: var(--vscode-descriptionForeground);
+	margin-top: 2px;
+	word-break: break-word;
+}
+
+.vibe-ai-agents-cx-actions {
+	display: flex;
+	align-items: center;
+	gap: 4px;
+	flex-shrink: 0;
+}
+
+.vibe-ai-agents-cx-actions .vibe-ai-agents-icon-btn {
+	display: flex;
+}
+
+/* Cursor 同款開關（MCP 啟停） */
+.vibe-ai-agents-cx-switch {
+	position: relative;
+	width: 28px;
+	height: 16px;
+	border-radius: 8px;
+	background: var(--vscode-button-secondaryBackground, rgba(128, 128, 128, 0.35));
+	cursor: pointer;
+	flex-shrink: 0;
+	transition: background 0.15s;
+}
+
+.vibe-ai-agents-cx-switch::after {
+	content: '';
+	position: absolute;
+	top: 2px;
+	left: 2px;
+	width: 12px;
+	height: 12px;
+	border-radius: 50%;
+	background: var(--vscode-foreground);
+	transition: left 0.15s;
+}
+
+.vibe-ai-agents-cx-switch.checked {
+	background: var(--vscode-button-background);
+}
+
+.vibe-ai-agents-cx-switch.checked::after {
+	left: 14px;
+	background: var(--vscode-button-foreground);
+}
+
+.vibe-ai-agents-cx-new {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	padding: 12px 14px;
+	border: none;
+	border-radius: 10px;
+	background: var(--vscode-editorWidget-background, rgba(128, 128, 128, 0.08));
+	color: var(--vscode-foreground);
+	cursor: pointer;
+	text-align: left;
+}
+
+.vibe-ai-agents-cx-new:hover {
+	background: var(--vscode-toolbar-hoverBackground);
+}
+
+.vibe-ai-agents-cx-new-text {
+	display: flex;
+	flex-direction: column;
+	gap: 1px;
+	min-width: 0;
+}
+
+.vibe-ai-agents-cx-new-title {
+	font-weight: 600;
+	font-size: 13px;
+}
+
+.vibe-ai-agents-cx-new-desc {
+	font-size: 12px;
+	color: var(--vscode-descriptionForeground);
+}
+
+.vibe-ai-agents-cx-empty {
+	color: var(--vscode-descriptionForeground);
+	font-size: 12px;
+}
+
+.vibe-ai-agents-cx-form-title {
+	font-weight: 600;
+}
+
+/* r23: the form card reuses the flex-row card layout — the "Add Rule"
+   title squeezed into a vertical strip and the wide field rows overflowed
+   horizontally (the stray scrollbar). Stack it as a block instead. */
+.vibe-ai-agents-cx-card.form {
+	display: block;
+}
+
+.vibe-ai-agents-cx-card.form .vibe-ai-agents-cx-form-title {
+	margin-bottom: 8px;
+}
+
+.vibe-ai-agents-cx-card.form .vibe-ai-agents-cx-form-row {
+	margin-bottom: 8px;
+}
+
+.vibe-ai-agents-cx-card.form > .vibe-ai-agents-cx-input {
+	display: block;
+	width: 100%;
+	box-sizing: border-box;
+	margin-bottom: 8px;
+}
+
+.vibe-ai-agents-cx-json {
+	font-family: var(--monaco-monospace-font-family, Consolas, monospace);
+	min-height: 150px;
+	line-height: 1.5;
+}
+
+.vibe-ai-agents-cx-card.form .vibe-ai-agents-cx-form-actions {
+	margin-top: 4px;
+}
+
+.vibe-ai-agents-cx-form-err {
+	color: var(--vscode-errorForeground);
+	font-size: 12px;
+}
+
+.vibe-ai-agents-cx-form-row {
+	display: flex;
+	gap: 8px;
+}
+
+.vibe-ai-agents-cx-form-row .vibe-ai-agents-cx-input {
+	flex: 1;
+	min-width: 0;
+}
+
+.vibe-ai-agents-cx-form-row select.vibe-ai-agents-cx-input {
+	flex: 0 0 auto;
+}
+
+.vibe-ai-agents-cx-input {
+	height: 28px;
+	padding: 0 10px;
+	border-radius: 6px;
+	background: var(--vscode-input-background);
+	color: var(--vscode-input-foreground);
+	border: 1px solid var(--vscode-input-border, transparent);
+	outline: none;
+	font-size: 12px;
+	font-family: inherit;
+}
+
+textarea.vibe-ai-agents-cx-input {
+	height: auto;
+	padding: 8px 10px;
+	resize: vertical;
+	line-height: 1.5;
+}
+
+.vibe-ai-agents-cx-form-actions {
+	display: flex;
+	gap: 8px;
+	justify-content: flex-end;
+}
+
+.vibe-ai-agents-cx-save {
+	height: 26px;
+	padding: 0 14px;
+	border: none;
+	border-radius: 6px;
+	background: var(--vscode-button-background);
+	color: var(--vscode-button-foreground);
+	cursor: pointer;
+	font-size: 12px;
+}
+
+.vibe-ai-agents-cx-save:hover {
+	background: var(--vscode-button-hoverBackground);
+}
+
+.vibe-ai-agents-cx-save:disabled {
+	opacity: 0.6;
+	cursor: default;
+}
+
+.vibe-ai-agents-cx-cancel {
+	height: 26px;
+	padding: 0 14px;
+	border: none;
+	border-radius: 6px;
+	background: var(--vscode-button-secondaryBackground, rgba(128, 128, 128, 0.25));
+	color: var(--vscode-descriptionForeground);
+	cursor: pointer;
+	font-size: 12px;
+}
+
+.vibe-ai-agents-cx-cancel:hover {
+	background: var(--vscode-button-secondaryHoverBackground, rgba(128, 128, 128, 0.35));
+}
+
+/* --- r29: 右側檔案展開區＋可點檔案 chip ----------------------------------
+   root 三欄 [side | chatwrap]——chatwrap 內再分 [main | filepane]：預設
+   filepane 隱藏；點 chat 內檔案引用才開啟，寬度佔 chatwrap（紅框主區）的
+   一半（r31：側欄收起時 chatwrap＝整頁，右側即整頁一半）。
+   .vibe-ai-file-chip 是 helper 上到 inline code 的可開檔標記（IDE pane 同名）。 */
+
+.vibe-ai-agents-filepane {
+	display: none;
+	flex-direction: column;
+	flex: 1 1 auto;
+	min-width: 0;
+	border-left: 1px solid var(--vscode-panel-border);
+	background: var(--vscode-editor-background, var(--vscode-panel-background));
+}
+
+/* r36: the pane shows when a file is open or the top-bar mirror toggle
+   expanded it empty; `pane-collapsed` (the same toggle) overrides both. */
+.vibe-ai-agents-hub.file-open:not(.pane-collapsed) .vibe-ai-agents-filepane,
+.vibe-ai-agents-hub.pane-open:not(.pane-collapsed) .vibe-ai-agents-filepane {
+	display: flex;
+	flex: 0 0 50%;
+}
+
+/* r36: mirror of the rail-header toggle, at the top bar's right end */
+.vibe-ai-agents-pane-btn {
+	margin-left: 6px;
+	color: var(--vscode-descriptionForeground);
+}
+
+/* r30: tab strip——檔案／Browser／Terminal 分頁（Cursor 右側面板同款），
+   右端固定 ＋（新瀏覽器分頁）與 terminal 捷徑 */
+.vibe-ai-agents-fp-tabs {
+	display: flex;
+	align-items: center;
+	gap: 2px;
+	padding: 4px 8px;
+	border-bottom: 1px solid var(--vscode-panel-border);
+	flex-shrink: 0;
+	overflow-x: hidden;
+}
+
+.vibe-ai-agents-fp-tab {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	padding: 3px 8px;
+	border-radius: 6px;
+	font-size: 12px;
+	color: var(--vscode-descriptionForeground);
+	cursor: pointer;
+	max-width: 180px;
+	flex-shrink: 0;
+}
+
+.vibe-ai-agents-fp-tab:hover {
+	background: var(--vscode-toolbar-hoverBackground);
+}
+
+.vibe-ai-agents-fp-tab.active {
+	background: var(--vscode-list-activeSelectionBackground, rgba(128, 128, 128, 0.25));
+	color: var(--vscode-foreground);
+}
+
+.vibe-ai-agents-fp-tab-label {
+	/* r33: min-width 0 lets the flex item shrink below its content, so the
+	   ellipsis engages when a file name exceeds the 180px tab cap. */
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.vibe-ai-agents-fp-tab-close {
+	font-size: 12px;
+	opacity: 0;
+	flex-shrink: 0;
+	border-radius: 4px;
+}
+
+.vibe-ai-agents-fp-tab:hover .vibe-ai-agents-fp-tab-close {
+	opacity: 0.8;
+}
+
+.vibe-ai-agents-fp-actions {
+	margin-left: auto;
+	display: flex;
+	align-items: center;
+	gap: 4px;
+	flex-shrink: 0;
+}
+
+.vibe-ai-agents-fp-action {
+	font-size: 14px;
+	padding: 2px 4px;
+	border-radius: 4px;
+	cursor: pointer;
+	color: var(--vscode-descriptionForeground);
+}
+
+.vibe-ai-agents-fp-action:hover {
+	background: var(--vscode-toolbar-hoverBackground);
+	color: var(--vscode-foreground);
+}
+
+.vibe-ai-agents-fp-body {
+	flex: 1 1 auto;
+	min-height: 0;
+	display: flex;
+	flex-direction: column;
+	overflow: hidden;
+}
+
+.vibe-ai-agents-fp-file {
+	flex: 1 1 auto;
+	min-height: 0;
+	overflow: auto;
+	padding: 12px 16px;
+}
+
+/* r30: 內嵌瀏覽器——URL bar＋iframe／新分頁頁（搜尋框＋Recents） */
+.vibe-ai-agents-fp-urlbar {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	padding: 6px 10px;
+	border-bottom: 1px solid var(--vscode-panel-border);
+	flex-shrink: 0;
+}
+
+.vibe-ai-agents-fp-url-action {
+	font-size: 14px;
+	color: var(--vscode-descriptionForeground);
+	cursor: pointer;
+	padding: 2px;
+	border-radius: 4px;
+	flex-shrink: 0;
+}
+
+.vibe-ai-agents-fp-url-action:hover {
+	background: var(--vscode-toolbar-hoverBackground);
+	color: var(--vscode-foreground);
+}
+
+.vibe-ai-agents-fp-url-input {
+	flex: 1 1 auto;
+	padding: 4px 10px;
+	border: 1px solid var(--vscode-input-border, transparent);
+	border-radius: 8px;
+	background: var(--vscode-input-background);
+	color: var(--vscode-input-foreground);
+	outline: none;
+	font-size: 12px;
+}
+
+.vibe-ai-agents-fp-frame {
+	flex: 1 1 auto;
+	min-height: 0;
+	border: none;
+	background: #ffffff;
+}
+
+.vibe-ai-agents-fp-home {
+	flex: 1 1 auto;
+	min-height: 0;
+	overflow: auto;
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	gap: 14px;
+	padding-top: 90px;
+}
+
+.vibe-ai-agents-fp-home-box {
+	width: min(480px, 90%);
+}
+
+.vibe-ai-agents-fp-home-input {
+	width: 100%;
+	box-sizing: border-box;
+	padding: 8px 14px;
+	border: 1px solid var(--vscode-input-border, transparent);
+	border-radius: 10px;
+	background: var(--vscode-input-background);
+	color: var(--vscode-input-foreground);
+	outline: none;
+	font-size: 13px;
+	text-align: center;
+}
+
+.vibe-ai-agents-fp-recents-title {
+	align-self: stretch;
+	padding: 0 36px;
+	font-size: 11px;
+	text-transform: uppercase;
+	letter-spacing: 0.04em;
+	color: var(--vscode-descriptionForeground);
+}
+
+.vibe-ai-agents-fp-recent {
+	align-self: stretch;
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	padding: 6px 36px;
+	font-size: 12px;
+	cursor: pointer;
+	color: var(--vscode-foreground);
+}
+
+.vibe-ai-agents-fp-recent:hover {
+	background: var(--vscode-list-hoverBackground);
+}
+
+.vibe-ai-agents-fp-recent-title {
+	font-weight: 600;
+	flex-shrink: 0;
+}
+
+.vibe-ai-agents-fp-recent-url {
+	color: var(--vscode-descriptionForeground);
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+/* r30: 真 terminal——xterm attach 進來的容器 */
+.vibe-ai-agents-fp-terminal {
+	flex: 1 1 auto;
+	min-height: 0;
+	padding: 4px 8px;
+}
+
+/* r34: xterm wrapper fills the pane host like the panel terminal does */
+.vibe-ai-agents-fp-terminal .terminal-wrapper {
+	height: 100%;
+}
+
+.vibe-ai-agents-file-pre {
+	margin: 0;
+	font-family: var(--vscode-editor-font-family, monospace);
+	font-size: 12.5px;
+	line-height: 1.55;
+	white-space: pre;
+	color: var(--vscode-editor-foreground);
+}
+
+.vibe-ai-agents-file-note {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	color: var(--vscode-descriptionForeground);
+	font-size: 12px;
+}
+
+.vibe-ai-agents-file-ide {
+	padding: 3px 10px;
+	border: none;
+	border-radius: 6px;
+	background: var(--vscode-button-secondaryBackground, rgba(128, 128, 128, 0.25));
+	color: var(--vscode-descriptionForeground);
+	cursor: pointer;
+	font-size: 12px;
+}
+
+.vibe-ai-agents-file-ide:hover {
+	background: var(--vscode-button-secondaryHoverBackground, rgba(128, 128, 128, 0.35));
+}
+
+/* 回答裡（與 README 預覽裡）點了會開檔的 inline code——虛線底線提示可點 */
+.vibe-ai-file-chip {
+	cursor: pointer;
+	border-bottom: 1px dotted var(--vscode-textLink-foreground, var(--vscode-focusBorder));
+}
+
+.vibe-ai-file-chip:hover {
+	color: var(--vscode-textLink-activeForeground, var(--vscode-textLink-foreground));
+}
+
+/* Phase 184: composer attachment chips row — pending image tiles + file
+   pills ride ABOVE the textarea inside the composer card (IDE composer
+   parity). The chips themselves reuse vibeAIChat.css `.vibe-ai-chip` /
+   `.vibe-ai-image-chip` (top-level selectors, bundled with the pane). */
+.vibe-ai-agents-att-row {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: flex-end;
+	gap: 4px;
+	padding: 8px 10px 0;
+}
+
+/* Phase 184: the open edit card's chips row — same row, no bottom padding
+   (the composer bar below already carries its own top padding). */
+.vibe-ai-agents-chat-edit-box .vibe-ai-agents-att-row {
+	padding-bottom: 0;
+}
+
+/* Phase 184: a sent message's attachment strip — same DOM/classes as the
+   IDE pane's (`.vibe-ai-user-attachments` + `-image` / `-att-chip`), but
+   hub user cards are full-width left-aligned threads, so the strip leads
+   left instead of the pane's right-aligned bubble edge. */
+.vibe-ai-agents-chat-msg.user .vibe-ai-user-attachments {
+	justify-content: flex-start;
+	margin-bottom: 0;
+}
+
+/* ==================== Phase 189: Automations page ==================== */
+
+/* Same center-canvas page shape as the Customize page (.vibe-ai-agents-cx). */
+.vibe-ai-agents-auto {
+	display: flex;
+	flex-direction: column;
+	gap: 10px;
+	width: min(860px, 100%);
+	margin: 0 auto;
+	min-height: 0;
+}
+
+.vibe-ai-agents-auto-head {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 8px;
+}
+
+.vibe-ai-agents-auto-title {
+	margin: 0;
+	font-size: 15px;
+	font-weight: 600;
+}
+
+.vibe-ai-agents-auto-new {
+	height: 30px;
+	padding: 0 14px;
+	border: none;
+	border-radius: 8px;
+	background: var(--vscode-button-background);
+	color: var(--vscode-button-foreground);
+	cursor: pointer;
+	font-weight: 600;
+	font-size: 12px;
+	flex-shrink: 0;
+}
+
+.vibe-ai-agents-auto-new:hover {
+	background: var(--vscode-button-hoverBackground);
+}
+
+.vibe-ai-agents-auto-hint {
+	color: var(--vscode-descriptionForeground);
+	font-size: 12px;
+}
+
+/* New Automation form */
+.vibe-ai-agents-auto-form-body {
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+	padding: 12px;
+	border: 1px solid var(--vscode-input-border, transparent);
+	border-radius: 10px;
+	background: var(--vscode-editorWidget-background, rgba(128, 128, 128, 0.08));
+}
+
+.vibe-ai-agents-auto-input {
+	height: 28px;
+	padding: 0 10px;
+	border-radius: 8px;
+	background: var(--vscode-input-background);
+	color: var(--vscode-input-foreground);
+	border: 1px solid var(--vscode-input-border, transparent);
+	outline: none;
+	font-size: 12px;
+	min-width: 0;
+}
+
+.vibe-ai-agents-auto-prompt {
+	padding: 8px 10px;
+	border-radius: 8px;
+	background: var(--vscode-input-background);
+	color: var(--vscode-input-foreground);
+	border: 1px solid var(--vscode-input-border, transparent);
+	outline: none;
+	font-size: 12px;
+	resize: vertical;
+	font-family: inherit;
+}
+
+.vibe-ai-agents-auto-form-row {
+	display: flex;
+	gap: 8px;
+	flex-wrap: wrap;
+}
+
+.vibe-ai-agents-auto-form-row select.vibe-ai-agents-auto-input {
+	flex: 1 1 160px;
+}
+
+.vibe-ai-agents-auto-cond {
+	flex: 0 1 110px;
+}
+
+.vibe-ai-agents-auto-form-error {
+	color: var(--vscode-errorForeground);
+	font-size: 12px;
+	min-height: 14px;
+}
+
+.vibe-ai-agents-auto-form-actions {
+	display: flex;
+	justify-content: flex-end;
+	gap: 8px;
+}
+
+.vibe-ai-agents-auto-cancel {
+	height: 26px;
+	padding: 0 12px;
+	border-radius: 8px;
+	border: 1px solid var(--vscode-input-border, transparent);
+	background: transparent;
+	color: var(--vscode-foreground);
+	cursor: pointer;
+	font-size: 12px;
+}
+
+.vibe-ai-agents-auto-cancel:hover {
+	background: var(--vscode-toolbar-hoverBackground);
+}
+
+.vibe-ai-agents-auto-create {
+	height: 26px;
+	padding: 0 12px;
+	border: none;
+	border-radius: 8px;
+	background: var(--vscode-button-background);
+	color: var(--vscode-button-foreground);
+	cursor: pointer;
+	font-weight: 600;
+	font-size: 12px;
+}
+
+.vibe-ai-agents-auto-create:disabled {
+	opacity: 0.5;
+	cursor: default;
+}
+
+.vibe-ai-agents-auto-create:hover:not(:disabled) {
+	background: var(--vscode-button-hoverBackground);
+}
+
+/* Rule cards */
+.vibe-ai-agents-auto-list {
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+	overflow-y: auto;
+	min-height: 0;
+	padding-bottom: 8px;
+}
+
+.vibe-ai-agents-auto-empty,
+.vibe-ai-agents-auto-error {
+	color: var(--vscode-descriptionForeground);
+	font-size: 12px;
+	padding: 10px 2px;
+}
+
+.vibe-ai-agents-auto-error {
+	color: var(--vscode-errorForeground);
+}
+
+.vibe-ai-agents-auto-card {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+	padding: 12px;
+	border: 1px solid var(--vscode-input-border, transparent);
+	border-radius: 10px;
+	background: var(--vscode-editorWidget-background, rgba(128, 128, 128, 0.06));
+}
+
+.vibe-ai-agents-auto-card.off {
+	opacity: 0.65;
+}
+
+.vibe-ai-agents-auto-card-head {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+}
+
+.vibe-ai-agents-auto-name {
+	font-weight: 600;
+	font-size: 13px;
+	flex: 1;
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.vibe-ai-agents-auto-status {
+	font-size: 11px;
+	padding: 1px 8px;
+	border-radius: 9px;
+	border: 1px solid var(--vscode-input-border, transparent);
+	color: var(--vscode-descriptionForeground);
+	flex-shrink: 0;
+}
+
+.vibe-ai-agents-auto-status.on {
+	color: var(--vscode-testing-iconPassed, var(--vscode-charts-green));
+}
+
+.vibe-ai-agents-auto-meta {
+	color: var(--vscode-descriptionForeground);
+	font-size: 12px;
+}
+
+.vibe-ai-agents-auto-runline {
+	font-size: 12px;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	color: var(--vscode-descriptionForeground);
+}
+
+.vibe-ai-agents-auto-runline.running {
+	color: var(--vscode-charts-blue, var(--vscode-descriptionForeground));
+}
+
+.vibe-ai-agents-auto-runline.error {
+	color: var(--vscode-errorForeground);
+}
+
+.vibe-ai-agents-auto-actions {
+	display: flex;
+	gap: 6px;
+	justify-content: flex-end;
+}
+
+.vibe-ai-agents-auto-actions button {
+	height: 24px;
+	padding: 0 10px;
+	border-radius: 8px;
+	border: 1px solid var(--vscode-input-border, transparent);
+	background: transparent;
+	color: var(--vscode-foreground);
+	cursor: pointer;
+	font-size: 12px;
+}
+
+.vibe-ai-agents-auto-actions button:hover:not(:disabled) {
+	background: var(--vscode-toolbar-hoverBackground);
+}
+
+.vibe-ai-agents-auto-actions button:disabled {
+	opacity: 0.5;
+	cursor: default;
+}
+
+.vibe-ai-agents-auto-delete:hover:not(:disabled) {
+	color: var(--vscode-errorForeground);
 }

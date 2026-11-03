@@ -144,6 +144,18 @@ class TokenizationSupportFactoryData<TSupport> extends Disposable {
 
 	private async _create(): Promise<void> {
 		const value = await this._factory.tokenizationSupport;
+		if (!value && !this._isDisposed) {
+			// Vulcan (Phase 209): a null resolution is a transient failure
+			// (grammar file read hiccup, oniguruma WASM fetch failure, …).
+			// Latching isResolved here used to poison the language for the
+			// rest of the session — every later getOrCreate short-circuited
+			// to null, so chat code blocks rendered plain forever and the
+			// bounded retries in the markdown renderers could never win.
+			// Drop the resolve promise so the next getOrCreate re-runs the
+			// factory instead.
+			this._resolvePromise = null;
+			return;
+		}
 		this._isResolved = true;
 		if (value && !this._isDisposed) {
 			this._register(this._registry.register(this._languageId, value));

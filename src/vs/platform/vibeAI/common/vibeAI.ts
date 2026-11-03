@@ -9,8 +9,12 @@ import { createDecorator } from '../../instantiation/common/instantiation.js';
 /**
  * Default URL of the local VibeCoding backend (FastAPI).
  * Can be overridden via `product.json#vibeAI.backendUrl` or the `VIBE_BACKEND_URL` environment variable.
+ * Port 8642 (Phase 194): 8000 is the FastAPI/Django default — the single most
+ * common collision on this product's target machines. 8642 is no mainstream
+ * stack's default; if it is ever held, the spawn path still falls back to a
+ * free port (Phase 182).
  */
-export const VIBE_AI_DEFAULT_BACKEND_URL = 'http://127.0.0.1:8000';
+export const VIBE_AI_DEFAULT_BACKEND_URL = 'http://127.0.0.1:8642';
 
 export interface IVibeAIMessage {
 	readonly role: string;
@@ -24,6 +28,15 @@ export interface IVibeAIMessage {
 	 */
 	readonly images?: string[];
 	/**
+	 * Phase 184: file/folder chips attached to a user message (drag-drop,
+	 * paperclip, @). Like `images`/`steered` this is frontend-only metadata
+	 * — the CURRENT turn's files ride the request as `context.files` (the
+	 * backend's Message models ignore the extra field when the history is
+	 * forwarded); the history carries them so the thread restores the sent
+	 * chips and the prompt edit can re-edit the attachment set.
+	 */
+	readonly files?: IVibeAIFileContext[];
+	/**
 	 * Phase 113: the message is a mid-turn steer (Cursor's "send now" —
 	 * sent while an Agent turn ran, injected at the next tool boundary).
 	 * Frontend-only metadata: it marks the thread's steered bubbles and
@@ -32,6 +45,26 @@ export interface IVibeAIMessage {
 	 * extra field when the history is forwarded.
 	 */
 	readonly steered?: boolean;
+	/**
+	 * r20: the assistant turn's working trace (Cursor's "Worked for Xs")
+	 * — the tool steps the turn ran plus its total duration. Frontend-only
+	 * metadata like `steered`: the backend's Message models ignore the
+	 * extra field when the history is forwarded; the hub renders it as a
+	 * collapsible Worked row above the answer.
+	 */
+	readonly worked?: IVibeAIWorkedTrace;
+}
+
+/**
+ * r20: one persisted working trace (see {@link IVibeAIMessage.worked}).
+ * `steps` keeps arrival order; `status` is the step's final outcome
+ * (`ok` / `error` — running steps never persist).
+ */
+export interface IVibeAIWorkedTrace {
+	readonly durationMs?: number;
+	/** r24: detail = the call's target (path/pattern/command) shown dimmed after the name. */
+	/** r27: thinking = the round's text — the "Thought for Xs" row expands to it. */
+	readonly steps: readonly { readonly name: string; readonly status?: string; readonly detail?: string; readonly thinking?: string }[];
 }
 
 export interface IVibeAIFileContext {
@@ -178,6 +211,17 @@ export interface IVibeAIChatRequest {
 	 * agreed plan (backward compatible).
 	 */
 	readonly planFile?: string;
+	/**
+	 * Phase 246: resume-from-failed-step retry — the failed turn's
+	 * `turnId` (captured from the `turn_start` event, persisted on the
+	 * turn record). When present the agent endpoint reloads that turn's
+	 * server-side transcript (`.vibe/turns/<session>/<turn>.jsonl`),
+	 * appends a resume seed and continues the loop from the last tool
+	 * boundary: completed tool rounds and their file changes are kept,
+	 * only the failed step is redone. Absent = a fresh turn (zero
+	 * change).
+	 */
+	readonly resumeTurnId?: string;
 }
 
 /**
@@ -250,6 +294,17 @@ export interface IVibeAIExecutePlanRequest {
 	 * on the backend when both are present.
 	 */
 	readonly planFile?: string;
+	/**
+	 * Phase 218: the plan doc (project-root `PLAN.md`) already streamed to
+	 * disk during the plan phase — the execute request carries it so the
+	 * backend skips the approval-time rewrite (a rewrite would wipe any
+	 * checkboxes the user ticked while the plan awaited approval).
+	 * Phase 234: `planDocPath` wins on the backend when both are present —
+	 * it is the live front-matter doc the plan editor watches (progress
+	 * ticks land here); the `planFile` archive is only the fallback for
+	 * resume-without-doc (the old priority silently no-op'd every write).
+	 */
+	readonly planDocPath?: string;
 }
 
 /**
@@ -270,6 +325,13 @@ export interface IVibeAIContextUsageRequest {
 	 * what an Ask-mode turn actually sends.
 	 */
 	readonly readonly?: boolean;
+	/**
+	 * Phase 240: plan-mode estimate — when true the backend counts the PLAN
+	 * system prompt and the plan whitelist (the read-only set plus
+	 * ask_questions), matching what a Plan-mode research turn actually
+	 * sends (estimate ≡ sent).
+	 */
+	readonly planMode?: boolean;
 	/**
 	 * Phase 107: the editor's opened folder — rules / skills / MCP are
 	 * estimated against it (same semantics as
@@ -357,6 +419,9 @@ export type VibeAICustomizeScope = 'project' | 'global';
  * "global") for the scope badge; the rest are kind-specific — rules:
  * alwaysApply/globs, skills: disableModelInvocation, mcp: command/enabled/
  * status/toolCount. `path` is the absolute definition file (Open file).
+ * Phase 185: rules/skills carry the user toggle state (`disabled`) and the
+ * body (`content`) for the inline edit form; mcp carries `env`/`cwd` for
+ * the same purpose.
  */
 export interface IVibeAICustomizeItem {
 	readonly name: string;
@@ -369,7 +434,11 @@ export interface IVibeAICustomizeItem {
 	readonly disableModelInvocation?: boolean;
 	readonly command?: string;
 	readonly args?: string[];
+	readonly env?: Record<string, string>;
+	readonly cwd?: string;
 	readonly enabled?: boolean;
+	readonly disabled?: boolean;
+	readonly content?: string;
 	readonly status?: string;
 	readonly error?: string;
 	readonly toolCount?: number;
@@ -464,6 +533,24 @@ export interface IVibeAIInlineEditRequest {
 }
 
 /**
+ * Chat title summary request (`POST /api/chat/title`, Phase 227): the
+ * conversation's first question goes in, a short LLM-summarized title
+ * comes out. Fire-and-forget — the pane keeps the raw derived title on
+ * a null result.
+ */
+export interface IVibeAIChatTitleRequest {
+	readonly question: string;
+	/** Pseudo-model 'auto' turns Auto routing on (autoPool + autoMode). */
+	readonly model?: string;
+	/** Custom-model routing (Settings → Models) provider override. */
+	readonly provider?: IVibeAIModelProvider;
+	/** Phase 70 Auto routing pool (sent together with model='auto'). */
+	readonly autoPool?: IVibeAIModelProvider[];
+	/** Phase 70 Auto routing "Optimize For" mode: cost | balance | intelligence. */
+	readonly autoMode?: string;
+}
+
+/**
  * A file change performed by an agent tool call (`write_file` /
  * `delete_file`), as surfaced in `tool_result` events. `oldContent`
  * is the on-disk content before the change (absent for creates) —
@@ -487,13 +574,26 @@ export interface IVibeAICodeChange {
 }
 
 /**
+ * Phase 247: a turn transcript's reconstructed file-change ledger (`GET
+ * /api/chat/agent/turn-changes`) — the server-side view a checkpoint
+ * rollback reconciles against. Tool rounds whose `tool_result` events
+ * were lost to a dead SSE connection (the fetch's "TypeError: terminated")
+ * still made it to the persisted transcript; entries whose feed copy was
+ * trimmed (old_content no longer verbatim) are omitted server-side —
+ * reverting from a partial content would corrupt the file.
+ */
+export interface IVibeAITurnChanges {
+	readonly turnId: string;
+	readonly changes: ReadonlyArray<IVibeAICodeChange>;
+}
+
+/**
  * Actual line range read by a `read_file` tool call (Phase 63), as
  * surfaced in `tool_result` events — the chat pane's tool card shows it
  * in the header ("x.py L10-L20"). `symbol` is the resolved function /
  * class name for symbol-based reads; `total` is the file's full line
  * count; `truncated` marks a clipped (paginated) read.
- */
-export interface IVibeAIReadRange {
+ */export interface IVibeAIReadRange {
 	readonly start: number;
 	readonly end: number;
 	readonly total?: number;
@@ -540,7 +640,7 @@ export interface IVibeAIDiagnostic {
 	readonly source?: string;
 }
 
-export type VibeAIStreamEventType = 'text' | 'thinking' | 'tool_start' | 'tool_result' | 'file_delta' | 'round_end' | 'context_compressed' | 'output_truncated' | 'limit_reached' | 'model_routed' | 'plan' | 'plan_start' | 'plan_step_start' | 'plan_step_done' | 'plan_done' | 'agent_questions' | 'approval_request' | 'approval_resolved' | 'steered' | 'diagnostics' | 'done' | 'goal_complete' | 'turn_state' | 'parallel_agent_start' | 'parallel_agent_done' | 'parallel_done' | 'error' | 'retry' | 'unknown';
+export type VibeAIStreamEventType = 'text' | 'thinking' | 'tool_start' | 'tool_result' | 'file_delta' | 'round_end' | 'context_compressed' | 'output_truncated' | 'limit_reached' | 'model_routed' | 'plan' | 'plan_doc_start' | 'plan_doc_delta' | 'plan_start' | 'plan_step_start' | 'plan_step_done' | 'plan_revision' | 'plan_done' | 'agent_questions' | 'agent_question_answered' | 'approval_request' | 'approval_resolved' | 'steered' | 'diagnostics' | 'done' | 'goal_complete' | 'turn_state' | 'turn_start' | 'resume_unavailable' | 'parallel_agent_start' | 'parallel_agent_done' | 'parallel_done' | 'error' | 'retry' | 'unknown';
 
 export interface IVibeAIStreamData {
 	readonly requestId: string;
@@ -611,6 +711,10 @@ export interface IVibeAIStreamData {
 	readonly limitReached?: {
 		readonly rounds: number;
 		readonly segments: number;
+		/** Phase 239: total tool-round budget (round cap × segment cap) — the
+		 *  pane chip shows "used/total" so budget exhaustion is distinguishable
+		 *  from an early loop-detection stop. */
+		readonly budget?: number;
 		readonly reason: 'rounds' | 'context' | string;
 	};
 	/** Phase 51: `output_truncated` — the backend round hit its per-round
@@ -631,6 +735,22 @@ export interface IVibeAIStreamData {
 	 * reads it instead of only frontend-inferred flags.
 	 */
 	readonly turnState?: string;
+	/**
+	 * `turn_start` (Phase 245): the backend turn transcript id (Cursor-parity
+	 * turn identity) — stamped on every agent/ask stream's first event and
+	 * persisted on the turn record; the Retry button sends it back as
+	 * `resumeTurnId` so the failed turn resumes from its last tool boundary
+	 * instead of re-running the whole question. Absent on dispatch-only
+	 * paths (/review, /name) — retry falls back to the legacy full re-send.
+	 */
+	readonly turnId?: string;
+	/**
+	 * `resume_unavailable` (Phase 246): the resume retry's transcript could
+	 * not be loaded (backend restarted into another workspace, file pruned,
+	 * id mismatch) — the pane tears the resume attempt down and falls back
+	 * to the legacy truncate + full re-send path. No stream content follows.
+	 */
+	readonly resumed?: boolean;
 	/**
 	 * Phase 71 (Plan mode): the structured plan of `plan` / `plan_start`
 	 * events. A `plan` event without a plan object = the backend failed
@@ -654,6 +774,18 @@ export interface IVibeAIStreamData {
 		readonly stepsFailed: number[];
 	};
 	/**
+	 * Phase 241 (`plan_revision`, living plan / Cursor 邊走邊改 parity): the
+	 * executor called update_plan mid-run — the remaining steps were revised
+	 * (settled steps are always a contiguous prefix, ids/titles intact). The
+	 * pane renders a slim revision row in the Worked timeline and swaps the
+	 * pending plan card's step list; the plan doc's To-dos block re-renders
+	 * from the rewritten file on its own.
+	 */
+	readonly planRevision?: {
+		readonly steps: IVibeAIPlanStep[];
+		readonly reason: string;
+	};
+	/**
 	 * Phase 157 (`plan_start` / `plan_done`): the persisted plan file's
 	 * workspace-relative path (.vibe/plans/*.md) — the pane captures it
 	 * on the conversation so subsequent agent turns carry it as
@@ -661,6 +793,25 @@ export interface IVibeAIStreamData {
 	 * when persistence was skipped.
 	 */
 	readonly planPath?: string;
+	/**
+	 * Phase 211 (`plan_start` / `plan_done`): the plan doc's path — the
+	 * project-root PLAN.md the execute phase writes and checks off
+	 * (Cursor-parity plan-as-doc). Absent when the write failed or the
+	 * workspace has no root.
+	 * Phase 218 (`plan` / `plan_doc_start` / `plan_doc_delta`): the plan
+	 * phase streams the doc to disk the moment the plan is ready (before
+	 * approval) — the pane opens it in the editor and appends the deltas,
+	 * and the approval bar links to it. Absent on `plan_doc_delta` once
+	 * the stream state owns the path.
+	 */
+	readonly planDocPath?: string;
+	/**
+	 * Phase 218 (`plan_doc_start` / `plan_doc_delta`): the plan doc's
+	 * streamed markdown chunk — `plan_doc_start` seeds the editor with the
+	 * first chunk, every `plan_doc_delta` appends one (the chunks join up
+	 * to exactly the on-disk PLAN.md).
+	 */
+	readonly planDocDelta?: string;
 	/**
 	 * Phase 92 (`approval_request` / `approval_resolved`): a terminal
 	 * command the backend intercepted (whitelist/hook) and parked at the
@@ -705,15 +856,26 @@ export interface IVibeAIStreamData {
 	 */
 	readonly pendingQueue?: string[];
 	/**
-	 * Phase 121 (`agent_questions`): the questions the agent asked
-	 * without stopping work (ask_questions) — the pane renders one
-	 * question card per event; the answer is sent via
-	 * {@link IVibeAIService.steer} and injects at the next tool
-	 * boundary (the loop never waits). Each card has its own id.
+	 * Phase 121/237 (`agent_questions`): the questions the agent asked —
+	 * the pane renders one question card per event. Since Phase 237 the
+	 * turn PARKS at the question gate until the card's answer resolves it
+	 * ({@link IVibeAIService.resolveAgentQuestion}); the answer feeds back
+	 * as the tool's result and the loop continues. Each card has its own
+	 * id (the gate's pending id).
 	 */
 	readonly questions?: {
 		readonly id: string;
 		readonly items: IVibeAIQuestion[];
+	};
+	/**
+	 * Phase 237 (`agent_question_answered`): the blocking question gate
+	 * woke with the user's answer — the pane folds the matching question
+	 * card (by id) to its answered state (idempotent; the card's own Send
+	 * already folded it, another surface's answer lands here).
+	 */
+	readonly questionAnswered?: {
+		readonly id: string;
+		readonly answer: string;
 	};
 	/**
 	 * Phase 120 (`goal_complete`): the model declared the session goal
@@ -852,6 +1014,80 @@ export interface IVibeAIParallelRun {
 	readonly variants: IVibeAIParallelVariantResult[];
 }
 
+/**
+ * Phase 189: one automation trigger (Cursor Automations parity — a rule
+ * that runs a full top-level agent on a schedule / on git events / on
+ * demand; never a sub-agent). The frontend speaks the camelCase payload
+ * shape; the backend normalizes and clamps (interval minutes 1–1440,
+ * daily "HH:MM").
+ */
+export interface IVibeAIAutomationTrigger {
+	readonly type: 'manual' | 'interval' | 'daily' | 'git_commit';
+	/** interval: step in minutes. */
+	readonly everyMinutes?: number;
+	/** daily: local time of day ("HH:MM", 24h). */
+	readonly dailyAt?: string;
+}
+
+/**
+ * Phase 189: one run of an automation (full top-level agent session,
+ * recorded by the backend with a summary of the final reply).
+ */
+export interface IVibeAIAutomationRun {
+	readonly id: string;
+	/** What fired it: 'manual' | 'schedule' | 'git'. */
+	readonly trigger: string;
+	readonly status: 'running' | 'done' | 'error';
+	readonly startedAt: number;
+	readonly finishedAt?: number | null;
+	readonly summary?: string;
+	readonly error?: string;
+}
+
+/**
+ * Phase 189: one automation as listed by the backend (per-workspace
+ * runtime file `.vibe/automations/automations.json`, gitignored). The
+ * provider binding is write-only over the wire — the list payload carries
+ * the bound model name for display, never the apiKey/baseUrl.
+ */
+export interface IVibeAIAutomation {
+	readonly id: string;
+	readonly name: string;
+	readonly prompt: string;
+	readonly trigger: IVibeAIAutomationTrigger;
+	readonly enabled: boolean;
+	readonly provider?: { readonly model?: string };
+	readonly createdAt: number;
+	readonly lastRunAt?: number | null;
+	/** git_commit trigger: last observed HEAD sha (baseline on first sight). */
+	readonly lastHead?: string | null;
+	readonly runs: IVibeAIAutomationRun[];
+}
+
+/**
+ * Phase 189: creation payload for an automation. `provider` is the full
+ * Settings → Models binding ({baseUrl, apiKey, model}) captured at
+ * creation time — unattended runs have no per-request credentials
+ * (Phase 178 convention), so the binding travels once, to the backend's
+ * gitignored runtime file, and is never echoed back.
+ */
+export interface IVibeAIAutomationCreateData {
+	readonly name: string;
+	readonly prompt: string;
+	readonly trigger: IVibeAIAutomationTrigger;
+	readonly enabled?: boolean;
+	readonly provider?: IVibeAIModelProvider;
+}
+
+/** Phase 189: partial update (enable/disable, re-bind, edit text/trigger). */
+export interface IVibeAIAutomationPatch {
+	readonly name?: string;
+	readonly prompt?: string;
+	readonly enabled?: boolean;
+	readonly trigger?: IVibeAIAutomationTrigger;
+	readonly provider?: IVibeAIModelProvider;
+}
+
 export interface IVibeAIService {
 	readonly _serviceBrand: undefined;
 
@@ -866,6 +1102,18 @@ export interface IVibeAIService {
 	 * Checks whether the VibeCoding backend is reachable.
 	 */
 	healthCheck(): Promise<boolean>;
+
+	/**
+	 * Phase 196/198: the Settings → General "Restart" button — a deterministic
+	 * fresh start, not merely re-spawning our own child. Kills the backend
+	 * this window spawned (tree-kill), then sweeps every leftover LISTENER
+	 * off the configured port (orphans of crashed sessions, zombies, manual
+	 * runs — the port is product-reserved), clears the pinned session URL
+	 * and re-runs the spawn path. A healthy external backend on ANOTHER port
+	 * is untouched; whatever held the configured port does not survive a
+	 * Restart. Resolves whether the backend is reachable afterwards.
+	 */
+	restartBackend(): Promise<boolean>;
 
 	/**
 	 * Starts a streaming chat request (`POST /api/chat`) against the
@@ -935,6 +1183,37 @@ export interface IVibeAIService {
 	discardParallelRun(workspaceRoot: string | undefined, runId: string, index?: number): Promise<{ ok: boolean; error?: string; removed?: number }>;
 
 	/**
+	 * Phase 189: lists this workspace's automations (`GET /api/automations`)
+	 * for the Agents Hub's Automations page. Rejects when the backend is
+	 * unreachable; the caller renders an empty/failed section.
+	 */
+	listAutomations(workspaceRoot?: string): Promise<IVibeAIAutomation[]>;
+
+	/**
+	 * Phase 189: creates an automation (`POST /api/automations`) — trigger +
+	 * prompt + model binding (write-only). Rejects with the backend's
+	 * validation message (400) for a bad trigger / missing model.
+	 */
+	createAutomation(workspaceRoot?: string, data?: IVibeAIAutomationCreateData): Promise<IVibeAIAutomation>;
+
+	/**
+	 * Phase 189: partially updates an automation (`PATCH /api/automations/{id}`)
+	 * — enable/disable toggle, re-bind the model, edit name/prompt/trigger.
+	 */
+	updateAutomation(workspaceRoot?: string, id?: string, patch?: IVibeAIAutomationPatch): Promise<IVibeAIAutomation>;
+
+	/**
+	 * Phase 189: deletes an automation (`DELETE /api/automations/{id}`).
+	 */
+	deleteAutomation(workspaceRoot?: string, id?: string): Promise<{ ok: boolean }>;
+
+	/**
+	 * Phase 189: runs an automation immediately (`POST /api/automations/{id}/run-now`)
+	 * — the record is created synchronously (busy → HTTP 409 rejection).
+	 */
+	runAutomationNow(workspaceRoot?: string, id?: string): Promise<{ runId: string }>;
+
+	/**
 	 * Aborts a running stream previously started with the given request id.
 	 */
 	cancel(requestId: string): void;
@@ -975,6 +1254,18 @@ export interface IVibeAIService {
 	deleteFile(path: string, workspaceRoot?: string): Promise<boolean>;
 
 	/**
+	 * Phase 247: fetches a turn's file-change ledger from the persisted
+	 * turn transcript (`GET /api/chat/agent/turn-changes`). A checkpoint
+	 * rollback reconciles the pane's captured `turnChanges` against it —
+	 * tool rounds executed after the SSE connection died never delivered
+	 * their tool_result events, but the transcript (flushed at every tool
+	 * boundary) holds them. Resolves null when the transcript is gone
+	 * (404) or the backend is unreachable — the caller falls back to the
+	 * locally captured changes (behavior no worse than before).
+	 */
+	getTurnChanges(sessionId: string, turnId: string, workspaceRoot?: string): Promise<IVibeAITurnChanges | null>;
+
+	/**
 	 * Phase 92: resolves a command approval gate (`POST
 	 * /api/chat/agent/approvals/resolve`). Called by the chat pane's
 	 * Run / Skip card while the backend's agent loop waits at the gate.
@@ -1005,6 +1296,16 @@ export interface IVibeAIService {
 	steer(sessionId: string, content: string, mode?: 'steer' | 'queue'): Promise<boolean>;
 
 	/**
+	 * Phase 237: resolves the blocking question gate the agent turn parks
+	 * on (`POST /api/chat/agent/questions/resolve`, the question card's
+	 * Send) — the answer feeds back to the model as the tool's result and
+	 * the loop continues. Returns true when the gate woke; false when the
+	 * gate is gone (already answered, backend restart, a restored old
+	 * card) — the caller falls back to {@link IVibeAIService.steer}.
+	 */
+	resolveAgentQuestion(id: string, answer: string): Promise<boolean>;
+
+	/**
 	 * Phase 159: pushes the IDE's diagnostics (errors/warnings) for the
 	 * files the agent just changed to the running Agent turn (`POST
 	 * /api/chat/agent/diagnostics`, session_id = the request's session).
@@ -1028,6 +1329,14 @@ export interface IVibeAIService {
 	 * when the backend produced nothing.
 	 */
 	inlineEdit(request: IVibeAIInlineEditRequest): Promise<string | null>;
+
+	/**
+	 * Summarizes a conversation title from the first question
+	 * (`POST /api/chat/title`, Phase 227). Returns the one-line title,
+	 * or null when the backend produced nothing — the caller keeps the
+	 * raw first-question title (fire-and-forget, never surfaces errors).
+	 */
+	chatTitle(request: IVibeAIChatTitleRequest): Promise<string | null>;
 
 	/**
 	 * Estimates the current conversation's token usage breakdown for

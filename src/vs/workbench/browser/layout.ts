@@ -2341,6 +2341,11 @@ export abstract class Layout extends Disposable implements IWorkbenchLayoutServi
 				return this.setAuxiliaryBarHidden(hidden);
 			case Parts.PANEL_PART:
 				return this.setPanelHidden(hidden);
+			// VibeCoding fork (r32): the switch silently dropped the status
+			// bar — callers (agent-window bootstrap) got a no-op, leaving the
+			// grid cell at its 26px height even with the element CSS-hidden.
+			case Parts.STATUSBAR_PART:
+				return this.setStatusBarHidden(hidden);
 		}
 	}
 

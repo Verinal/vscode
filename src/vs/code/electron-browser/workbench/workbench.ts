@@ -719,6 +719,28 @@ import { getPartsSplashColors, getPartsSplashLayoutMetrics } from './partsSplash
 			},
 			beforeImport: function (windowConfig) {
 
+				// r35: the agent window flashed the default workbench chrome for a
+				// moment before the vibeAI bootstrap hid it (AfterRestored runs
+				// after the parts have painted). The configuration is fully known
+				// here, before any workbench code runs, so veil the shell from
+				// the first paint; the bootstrap lifts the veil once the custom
+				// chrome is applied. The parts splash stays visible.
+				const workspace = windowConfig.workspace;
+				const configPath = workspace && 'configPath' in workspace ? workspace.configPath : undefined;
+				const isVibeAgentWindow = windowConfig.vibeAgentWindow === true || (!!configPath && configPath.path.toLowerCase().endsWith('/vibe-agent-window.code-workspace'));
+				if (isVibeAgentWindow) {
+					document.documentElement.classList.add('vibe-agent-window-booting');
+					const veil = document.createElement('style');
+					veil.id = 'vibe-agent-window-booting-style';
+					veil.textContent = '.vibe-agent-window-booting .monaco-workbench { visibility: hidden; }';
+					document.head.appendChild(veil);
+					// never brick the window if the bootstrap contribution never runs
+					window.setTimeout(() => {
+						document.documentElement.classList.remove('vibe-agent-window-booting');
+						document.getElementById('vibe-agent-window-booting-style')?.remove();
+					}, 5000);
+				}
+
 				// Show our splash as early as possible
 				showSplash(windowConfig);
 

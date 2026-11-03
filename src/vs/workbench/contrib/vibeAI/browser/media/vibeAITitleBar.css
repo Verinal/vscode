@@ -12,7 +12,7 @@
 	padding: 0 12px;
 	margin: 0 6px;
 	border-radius: 6px;
-	background: #1589ff;
+	background: var(--vscode-activityBarBadge-background, #0078d4);
 	color: #ffffff;
 	font-size: 12px;
 	font-weight: 500;
@@ -25,7 +25,7 @@
 }
 
 .vibe-ai-titlebar-pill:hover {
-	background: #3d9dff;
+	filter: brightness(1.15);
 	outline: 1px solid var(--vscode-contrastBorder, transparent);
 	outline-offset: -1px;
 }

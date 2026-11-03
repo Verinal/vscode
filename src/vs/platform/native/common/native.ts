@@ -303,6 +303,14 @@ export interface ICommonNativeHostService {
 	 */
 	openVibeAgentWindow(): Promise<void>;
 
+	/**
+	 * VibeCoding fork: the agent window's "IDE ↗" jump — focuses the IDE
+	 * window already open on `folderUri` when there is one (its hub and a
+	 * full IDE must not stack up per project), otherwise opens the folder
+	 * in a new IDE window.
+	 */
+	openVibeIdeWindow(folderUri?: UriComponents): Promise<void>;
+
 	getAgentHostEditorState(legacyEditorSessionCount: number): Promise<IAgentHostEditorState>;
 	updateAgentHostEditorState(update: AgentHostEditorUpdate): Promise<void>;
 	claimAgentsWindowInvitation(resource: UriComponents, developerMode: boolean): Promise<IAgentsWindowInvitation | undefined>;

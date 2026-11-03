@@ -1,0 +1,483 @@
+/*---------------------------------------------------------------------------------------------
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *--------------------------------------------------------------------------------------------*/
+
+/* ==================== VibeAI Plan Doc — rendered plan editor (Phase 226, Cursor parity) ==================== */
+
+.vibe-ai-plan-doc {
+	display: flex;
+	flex-direction: column;
+	width: 100%;
+	height: 100%;
+	background: var(--vscode-editor-background, #1f1f1f);
+	color: var(--vscode-editor-foreground, var(--vscode-foreground));
+	outline: none;
+}
+
+/* --- header: Plans crumb + Build pill --- */
+
+.vibe-ai-plan-doc-header {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	flex-shrink: 0;
+	padding: 8px 20px;
+	border-bottom: 1px solid var(--vscode-editorWidget-border, var(--vscode-widget-border, rgba(128, 128, 128, 0.2)));
+}
+
+.vibe-ai-plan-doc-crumb {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	font-size: 12.5px;
+	min-width: 0;
+	flex: 1;
+}
+
+.vibe-ai-plan-doc-crumb-root {
+	opacity: 0.6;
+}
+
+.vibe-ai-plan-doc-crumb-sep {
+	opacity: 0.4;
+}
+
+.vibe-ai-plan-doc-crumb-name {
+	font-weight: 600;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+/* Phase 230: the file icon before the crumb name — raw view only
+   (Cursor's markdown mode shows a file crumb; the rendered view
+   shows the plan name with no icon). */
+.vibe-ai-plan-doc-crumb-file {
+	display: none;
+	font-size: 14px;
+	opacity: 0.7;
+	flex-shrink: 0;
+}
+
+.vibe-ai-plan-doc.raw-mode .vibe-ai-plan-doc-crumb-file {
+	display: inline;
+}
+
+/* The Build pill (Cursor: warm amber, dark label, kbd hint inside). */
+.vibe-ai-plan-doc-build {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	flex-shrink: 0;
+	border: none;
+	border-radius: 6px;
+	padding: 4px 10px;
+	font-size: 12px;
+	font-weight: 600;
+	cursor: pointer;
+	background: var(--vscode-charts-orange, #d18616);
+	color: var(--vscode-editor-background, #1f1f1f);
+}
+
+.vibe-ai-plan-doc-build:hover {
+	filter: brightness(1.12);
+}
+
+.vibe-ai-plan-doc-build-kbd {
+	font-family: inherit;
+	font-size: 10.5px;
+	font-weight: 500;
+	opacity: 0.75;
+	padding: 0 4px;
+	border: 1px solid currentColor;
+	border-radius: 3px;
+}
+
+/* The model dropdown (Phase 227, Cursor: "Auto ⌄" muted control left of Build). */
+.vibe-ai-plan-doc-model {
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+	flex-shrink: 0;
+	min-width: 0;
+	border: none;
+	border-radius: 6px;
+	padding: 4px 8px;
+	font-size: 12px;
+	background: transparent;
+	color: var(--vscode-editor-foreground);
+	opacity: 0.85;
+	cursor: pointer;
+}
+
+.vibe-ai-plan-doc-model:hover {
+	background: var(--vscode-toolbar-hoverBackground, rgba(128, 128, 128, 0.2));
+	opacity: 1;
+}
+
+.vibe-ai-plan-doc-model-label {
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	max-width: 180px;
+}
+
+.vibe-ai-plan-doc-model-chevron {
+	font-size: 12px;
+	opacity: 0.7;
+}
+
+/* The header "..." (Cursor: opens the Editor Mode menu). */
+.vibe-ai-plan-doc-more {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	flex-shrink: 0;
+	width: 26px;
+	height: 26px;
+	border: none;
+	border-radius: 6px;
+	padding: 0;
+	background: transparent;
+	color: var(--vscode-editor-foreground);
+	opacity: 0.8;
+	cursor: pointer;
+}
+
+.vibe-ai-plan-doc-more:hover {
+	background: var(--vscode-toolbar-hoverBackground, rgba(128, 128, 128, 0.2));
+	opacity: 1;
+}
+
+/* --- Phase 229: raw ("Markdown") view — same header, plain editor page --- */
+
+.vibe-ai-plan-doc-raw {
+	display: none;
+	flex: 1;
+	min-height: 0;
+	/* The page owns the scroll (the rendered body's scroller is hidden). */
+	overflow: hidden;
+}
+
+.vibe-ai-plan-doc.raw-mode .vibe-ai-plan-doc-body {
+	display: none;
+}
+
+.vibe-ai-plan-doc.raw-mode .vibe-ai-plan-doc-raw {
+	display: block;
+}
+
+/* --- one scrolling page: markdown, To-dos, Referenced by --- */
+
+.vibe-ai-plan-doc-body {
+	flex: 1;
+	overflow-y: auto;
+	overflow-x: hidden;
+	min-height: 0;
+	min-width: 0;
+	outline: none;
+}
+
+.vibe-ai-plan-doc-md {
+	max-width: 780px;
+	margin: 0 auto;
+	padding: 20px 32px 8px;
+	user-select: text;
+	-webkit-user-select: text;
+	line-height: 1.55;
+	font-size: 13.5px;
+}
+
+.vibe-ai-plan-doc-md p {
+	margin: 0 0 8px;
+}
+
+.vibe-ai-plan-doc-md > :last-child {
+	margin-bottom: 0;
+}
+
+.vibe-ai-plan-doc-md h1,
+.vibe-ai-plan-doc-md h2,
+.vibe-ai-plan-doc-md h3,
+.vibe-ai-plan-doc-md h4,
+.vibe-ai-plan-doc-md h5,
+.vibe-ai-plan-doc-md h6 {
+	margin: 14px 0 6px;
+	font-weight: 600;
+	line-height: 1.3;
+}
+
+.vibe-ai-plan-doc-md h1 {
+	font-size: 1.5em;
+	overflow-wrap: anywhere;
+}
+
+.vibe-ai-plan-doc-md h2 {
+	font-size: 1.25em;
+}
+
+.vibe-ai-plan-doc-md h3 {
+	font-size: 1.12em;
+}
+
+.vibe-ai-plan-doc-md ul,
+.vibe-ai-plan-doc-md ol {
+	margin: 0 0 8px;
+	padding-left: 20px;
+}
+
+.vibe-ai-plan-doc-md li {
+	margin: 2px 0;
+}
+
+.vibe-ai-plan-doc-md blockquote {
+	margin: 6px 0;
+	padding: 2px 10px;
+	border-left: 3px solid var(--vscode-input-border, var(--vscode-panel-border, transparent));
+	color: var(--vscode-descriptionForeground);
+}
+
+.vibe-ai-plan-doc-md hr {
+	border: none;
+	border-top: 1px solid var(--vscode-input-border, var(--vscode-panel-border, transparent));
+	margin: 10px 0;
+}
+
+.vibe-ai-plan-doc-md code {
+	font-family: var(--monaco-monospace-font);
+	font-size: 12px;
+	background: rgba(128, 128, 128, 0.28);
+	border-radius: 3px;
+	padding: 1.5px 4px;
+}
+
+.vibe-ai-plan-doc-md table {
+	border-collapse: collapse;
+	margin: 8px 0;
+	display: block;
+	max-width: 100%;
+	overflow-x: auto;
+	text-align: left;
+}
+
+.vibe-ai-plan-doc-md th,
+.vibe-ai-plan-doc-md td {
+	border: 1px solid rgba(128, 128, 128, 0.4);
+	padding: 4px 10px;
+	vertical-align: top;
+}
+
+.vibe-ai-plan-doc-md th {
+	font-weight: 600;
+	background: rgba(128, 128, 128, 0.14);
+}
+
+/* --- To-dos + Referenced by: flow inside the page scroll (Cursor parity) --- */
+
+.vibe-ai-plan-doc-side {
+	max-width: 780px;
+	box-sizing: border-box;
+	margin: 0 auto;
+	padding: 6px 32px 28px;
+	display: flex;
+	flex-direction: column;
+	gap: 10px;
+	min-width: 0;
+}
+
+/* To-dos card */
+
+.vibe-ai-plan-doc-todos {
+	border: 1px solid var(--vscode-editorWidget-border, var(--vscode-widget-border, rgba(128, 128, 128, 0.25)));
+	border-radius: 8px;
+	padding: 10px 12px 8px;
+	font-size: 12.5px;
+	user-select: none;
+	overflow-wrap: anywhere;
+	min-width: 0;
+}
+
+.vibe-ai-plan-doc-todos-header {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	margin-bottom: 6px;
+}
+
+.vibe-ai-plan-doc-todos-count {
+	font-weight: 600;
+	opacity: 0.85;
+	flex: 1;
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.vibe-ai-plan-doc-todos-actions {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	flex-shrink: 0;
+}
+
+.vibe-ai-plan-doc-todos-action {
+	cursor: pointer;
+	opacity: 0.7;
+	font-size: 14px;
+}
+
+.vibe-ai-plan-doc-todos-action:hover {
+	opacity: 1;
+}
+
+/* "+ New" (both the To-dos header and the Referenced-by header). */
+.vibe-ai-plan-doc-todos-add {
+	cursor: pointer;
+	opacity: 0.75;
+	color: var(--vscode-focusBorder, var(--vscode-textLink-foreground, #3794ff));
+	font-size: 12px;
+	flex-shrink: 0;
+}
+
+.vibe-ai-plan-doc-todos-add:hover {
+	opacity: 1;
+	text-decoration: underline;
+}
+
+/* Compact Build pill inside the selection header. */
+.vibe-ai-plan-doc-build-small {
+	padding: 2px 8px;
+	font-size: 11.5px;
+}
+
+.vibe-ai-plan-doc-todos-list {
+	display: flex;
+	flex-direction: column;
+	gap: 1px;
+}
+
+.vibe-ai-plan-doc-todos-item {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	padding: 3px 6px;
+	border-radius: 4px;
+	min-width: 0;
+	cursor: default;
+}
+
+.vibe-ai-plan-doc-todos-item:hover {
+	background: var(--vscode-list-hoverBackground, rgba(128, 128, 128, 0.1));
+}
+
+.vibe-ai-plan-doc-todos-item.selected {
+	background: var(--vscode-list-activeSelectionBackground, rgba(128, 128, 128, 0.22));
+}
+
+.vibe-ai-plan-doc-todos-icon {
+	font-size: 13px;
+	flex-shrink: 0;
+	opacity: 0.8;
+}
+
+/* State colors (Cursor parity): running purple pulse, done green, failed red. */
+.vibe-ai-plan-doc-todos-icon.running {
+	opacity: 1;
+	color: var(--vscode-charts-purple, #b180d7);
+	animation: vibe-ai-plan-doc-spin 1.5s linear infinite;
+}
+
+.vibe-ai-plan-doc-todos-icon.done,
+.vibe-ai-plan-doc-todos-icon.codicon-check {
+	color: var(--vscode-charts-green, #89d185);
+}
+
+.vibe-ai-plan-doc-todos-icon.failed {
+	opacity: 1;
+	color: var(--vscode-errorForeground, #f48771);
+}
+
+@keyframes vibe-ai-plan-doc-spin {
+	from {
+		transform: rotate(0deg);
+	}
+	to {
+		transform: rotate(360deg);
+	}
+}
+
+.vibe-ai-plan-doc-todos-label {
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	opacity: 0.9;
+}
+
+/* Inline "+ New" editable row (Cursor image 4). */
+.vibe-ai-plan-doc-todos-add-row {
+	display: flex;
+	align-items: center;
+	padding: 1px 0;
+}
+
+.vibe-ai-plan-doc-todo-input {
+	flex: 1;
+	min-width: 0;
+	box-sizing: border-box;
+	border: none;
+	outline: none;
+	background: transparent;
+	color: var(--vscode-input-foreground, var(--vscode-foreground));
+	font-family: inherit;
+	font-size: 12.5px;
+	padding: 3px 6px;
+}
+
+.vibe-ai-plan-doc-todo-input::placeholder {
+	color: var(--vscode-input-placeholderForeground, var(--vscode-descriptionForeground));
+}
+
+/* Referenced by */
+
+.vibe-ai-plan-doc-ref {
+	border-top: 1px solid var(--vscode-editorWidget-border, var(--vscode-widget-border, rgba(128, 128, 128, 0.25)));
+	padding-top: 8px;
+	min-width: 0;
+}
+
+.vibe-ai-plan-doc-ref-header {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+}
+
+.vibe-ai-plan-doc-ref-count {
+	font-weight: 600;
+	opacity: 0.85;
+	font-size: 12.5px;
+	flex: 1;
+	min-width: 0;
+}
+
+.vibe-ai-plan-doc-ref-author {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	margin-top: 5px;
+	font-size: 12px;
+	opacity: 0.6;
+	min-width: 0;
+}
+
+.vibe-ai-plan-doc-ref-icon {
+	font-size: 13px;
+	flex-shrink: 0;
+}
+
+.vibe-ai-plan-doc-ref-name {
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}

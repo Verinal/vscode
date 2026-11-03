@@ -81,6 +81,12 @@ Type: files; Name: "{app}\{#VersionedResourcesFolder}\resources\app\node_modules
 Type: files; Name: "{app}\{#VersionedResourcesFolder}\resources\app\Credits_45.0.2454.85.html"; Check: IsNotBackgroundUpdate
 
 [UninstallDelete]
+; Fork (Phase 182): backend/ is installed via [Files], but at runtime the
+; backend writes into its own directory (chroma_db/, logs/, the downloaded
+; embedding model) — none of that is in the uninstall log, so the folder
+; would survive uninstall with hundreds of MB of re-creatable files. Drop
+; the whole directory; {app}\data (portable user data) is deliberately kept.
+Type: filesandordirs; Name: "{app}\backend"
 Type: filesandordirs; Name: "{app}\_"
 Type: filesandordirs; Name: "{app}\bin"
 Type: files; Name: "{app}\old_*"
@@ -1959,10 +1965,18 @@ var
   Parts: TArrayOfString;
   NewPath: string;
   i: Integer;
+  RC: Integer;
 begin
   if CurUninstallStep <> usUninstall then begin
     exit;
   end;
+
+  // Fork (Phase 182): the editor spawns VulcanBackend.exe as a child process
+  // and kills it on quit — but a force-closed app or a previous crash can
+  // leave it running, and it locks files inside {app}\backend, which would
+  // break both the uninstall log and the {app}\backend [UninstallDelete]
+  // entry below. Kill it before anything is deleted (no-op if not running).
+  Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /T /IM VulcanBackend.exe', '', SW_HIDE, ewWaitUntilTerminated, RC);
 
 #ifdef AppxPackageName
   RemoveAppxPackage();

@@ -2534,7 +2534,18 @@ export class LazyTokenizationSupport<TSupport = ITokenizationSupport> implements
 
 	get tokenizationSupport(): Promise<TSupport | null> {
 		if (!this._tokenizationSupport) {
-			this._tokenizationSupport = this.createSupport();
+			const promise = this.createSupport();
+			this._tokenizationSupport = promise;
+			promise.then((support) => {
+				// Vulcan (Phase 209): a null result means the factory failed
+				// transiently. Don't cache it — the next getOrCreate must
+				// re-run createSupport, otherwise one early failure (e.g. a
+				// grammar read racing window startup) keeps that language
+				// un-tokenized for the whole session.
+				if (!support && this._tokenizationSupport === promise) {
+					this._tokenizationSupport = null;
+				}
+			});
 		}
 		return this._tokenizationSupport;
 	}

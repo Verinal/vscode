@@ -327,6 +327,26 @@ body {
 	opacity: 1;
 }
 
+/* Phase 233: kill the blue focus ring in non-high-contrast themes —
+   the focusBorder outline reads as a decoration box (plan doc pane
+   body, quick pick input + wrapper, Agents Hub search, every text
+   input). Keyboard focus stays perceivable through per-widget
+   affordances (caret, list highlight); hc-black / hc-light keep the
+   outline (accessibility contract untouched). */
+.monaco-workbench:not(.hc-black):not(.hc-light) a:focus-visible,
+.monaco-workbench:not(.hc-black):not(.hc-light) [tabindex="0"]:focus,
+.monaco-workbench:not(.hc-black):not(.hc-light) [tabindex="-1"]:focus,
+.monaco-workbench:not(.hc-black):not(.hc-light) .synthetic-focus,
+.monaco-workbench:not(.hc-black):not(.hc-light) select:focus,
+.monaco-workbench:not(.hc-black):not(.hc-light) input[type="button"]:focus,
+.monaco-workbench:not(.hc-black):not(.hc-light) input[type="text"]:focus,
+.monaco-workbench:not(.hc-black):not(.hc-light) button:focus,
+.monaco-workbench:not(.hc-black):not(.hc-light) textarea:focus,
+.monaco-workbench:not(.hc-black):not(.hc-light) input[type="search"]:focus,
+.monaco-workbench:not(.hc-black):not(.hc-light) input[type="checkbox"]:focus {
+	outline-color: transparent;
+}
+
 .monaco-workbench.hc-black .synthetic-focus input,
 .monaco-workbench.hc-light .synthetic-focus input {
 	background: transparent; /* Search input focus fix when in high contrast */

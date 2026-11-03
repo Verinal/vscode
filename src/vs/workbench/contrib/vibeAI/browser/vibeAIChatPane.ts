@@ -6,21 +6,24 @@
 import * as DOM from '../../../../base/browser/dom.js';
 import { DataTransfers } from '../../../../base/browser/dnd.js';
 import { MarkdownRenderOptions } from '../../../../base/browser/markdownRenderer.js';
-import { Action, IAction, SubmenuAction } from '../../../../base/common/actions.js';
+import { Action } from '../../../../base/common/actions.js';
 import { timeout } from '../../../../base/common/async.js';
 import { encodeBase64 } from '../../../../base/common/buffer.js';
 import { UriList } from '../../../../base/common/dataTransfer.js';
 import { URI } from '../../../../base/common/uri.js';
 import { fromNowByDay, getDurationString } from '../../../../base/common/date.js';
 import { MarkdownString } from '../../../../base/common/htmlContent.js';
-import { DisposableStore, toDisposable } from '../../../../base/common/lifecycle.js';
+import { DisposableStore, IReference, toDisposable } from '../../../../base/common/lifecycle.js';
 import { getMediaMime, Mimes } from '../../../../base/common/mime.js';
 import { basename, extname, relativePath } from '../../../../base/common/resources.js';
 import { localize } from '../../../../nls.js';
+import { getCodeEditor, ICodeEditor, IContentWidget, IOverlayWidget, ContentWidgetPositionPreference, OverlayWidgetPositionPreference } from '../../../../editor/browser/editorBrowser.js';
 import { ICodeEditorService } from '../../../../editor/browser/services/codeEditorService.js';
 import { EditorMarkdownCodeBlockRenderer } from '../../../../editor/browser/widget/markdownRenderer/browser/editorMarkdownCodeBlockRenderer.js';
 import { ITerminalService } from '../../terminal/browser/terminal.js';
 import { ILanguageService } from '../../../../editor/common/languages/language.js';
+import { Range } from '../../../../editor/common/core/range.js';
+import { IResolvedTextEditorModel, ITextModelService } from '../../../../editor/common/services/resolverService.js';
 import { IClipboardService } from '../../../../platform/clipboard/common/clipboardService.js';
 import { ICommandService } from '../../../../platform/commands/common/commands.js';
 import { IConfigurationService } from '../../../../platform/configuration/common/configuration.js';
@@ -43,21 +46,32 @@ import { IWorkspaceContextService } from '../../../../platform/workspace/common/
 import { IVibeAIChatRequest, IVibeAICodeChange, IVibeAIContextUsage, IVibeAIDiagnostic, IVibeAIExecutePlanRequest, IVibeAIFileContext, IVibeAIMessage, IVibeAIModelProvider, IVibeAIModelRouting, IVibeAIPlan, IVibeAISkill, IVibeAIStreamData, IVibeAIService, IVibeAISubagent } from '../../../../platform/vibeAI/common/vibeAI.js';
 import { VibeAIChatSessionStore, IVibeAIChatSession, IVibeAIChatHandoff, IVibeAIChatScrollPos, IVibeAIChatSearchHit, IVibeAIPersistedToolCall, IVibeAIPersistedTurn, IVibeAIPersistedTurnSegment, IVibeAITurnTimelineNode, VIBE_AI_HANDOFF_STORAGE_KEY, searchConversationContent } from './vibeAIChatSessionStore.js';
 import { IVibeAIModelConfig, VIBE_AI_NO_MODEL_MESSAGE, VibeAIModelStore } from './vibeAIModelStore.js';
+import { buildModelMenuActions } from './vibeAIModelMenu.js';
 import { computeDiffLines, computeDiffStats } from './vibeAIDiff.js';
 import { VibeAIToolCard } from './vibeAIToolCard.js';
 import { regroupWorkedSteps, summarizeWorkedActivity, workedCountsSegments } from './vibeAIWorkedGroups.js';
 import { VibeAIEditorHighlighter } from './vibeAIEditorHighlight.js';
 import { IPendingMermaidPart, isMermaidCodeBlock, VibeAIMermaidRenderer } from './vibeAIMermaid.js';
+import { enhanceFileChips } from './vibeAIFileChips.js';
 import { ViewPane } from '../../../browser/parts/views/viewPane.js';
 import { IViewletViewOptions } from '../../../browser/parts/views/viewsViewlet.js';
 import { IViewDescriptorService } from '../../../common/views.js';
 import { IEditorService } from '../../../services/editor/common/editorService.js';
+import { ITextFileService } from '../../../services/textfile/common/textfiles.js';
+import { DEFAULT_EDITOR_ASSOCIATION } from '../../../common/editor.js';
 import './media/vibeAIChat.css';
 
 const $ = DOM.$;
 
 /** Markdown re-render throttle while a stream is running (ms). */
-const MARKDOWN_RENDER_THROTTLE_MS = 120;
+// r22: smooth streaming — the answer paints through a pump that advances a
+// few characters per tick toward the received text, so bursty SSE deltas
+// render as a steady typewriter flow instead of clumps. A backlog drains
+// proportionally (a whole buffered paragraph lands within ~a quarter
+// second, still visibly typed).
+const SMOOTH_STREAM_TICK_MS = 40;
+const SMOOTH_STREAM_MIN_CHARS = 3;
+const SMOOTH_STREAM_CATCHUP_DIVISOR = 6;
 /**
  * Phase 86: deferred mermaid mount safety net — the asyncRenderCallback is
  * the normal mount trigger, but it only fires once EVERY code block of the
@@ -87,6 +101,17 @@ const RESTORE_SCROLL_SETTLE_MS = 200;
  * stops scrolling).
  */
 const RESTORE_SCROLL_PERSIST_MS = 600;
+/**
+ * Phase 208: how long the restore chase keeps waiting for further thread
+ * growth after the last one. The landing passes (above) finish while the
+ * restored thread is still growing (mermaid webviews mount deferred, images
+ * decode, code-block editors initialize) — every late growth shoves the
+ * landed viewport up and nothing re-lands it (the pending flag is already
+ * consumed), which used to leave content-heavy threads near the top. The
+ * chase re-pins the bottom on each growth and ends after this much
+ * growth-free time (or when the user scrolls up / switches tabs).
+ */
+const RESTORE_CHASE_IDLE_MS = 1500;
 /** Phase 123: how long a search hit's landing highlight stays lit (the CSS animation matches). */
 const SEARCH_HIT_FLASH_MS = 1600;
 /** Per-file context payload clip (backend clips to 6000 as well). */
@@ -302,12 +327,33 @@ function isMutatingTool(name: string): boolean {
 }
 
 /**
+ * Phase 192: shell-family fences all tokenize with the shellscript grammar.
+ * The official powershell grammar leaves bare dev commands (docker / pip /
+ * cd / flags) unscoped — a ```powershell block renders white next to a
+ * colored ```bash block — and ```shell / ```console / ```terminal / ```posh
+ * resolve to no language at all. shellscript (jeff-hykin) colors all of
+ * them. Exported: the Agents Hub's transcript renderer shares it (its
+ * hand-rolled markdown options would otherwise keep powershell plain).
+ */
+export const VIBE_AI_SHELL_LANGUAGE_ALIASES: Record<string, string> = {
+	powershell: 'shellscript',
+	pwsh: 'shellscript',
+	ps: 'shellscript',
+	ps1: 'shellscript',
+	posh: 'shellscript',
+	shell: 'shellscript',
+	console: 'shellscript',
+	terminal: 'shellscript',
+};
+
+/**
  * Phase 61: reads a pasted/dropped image File into a data URL, downscaled
  * to {@link IMAGE_MAX_EDGE} on its longest edge (canvas re-encode; PNG is
  * kept for screenshots, JPEG for photos). Oversized/undecodable images
  * resolve to the raw data URL — the attach path is best-effort.
+ * Phase 184: exported — the Agents Hub's composer attach reuses it.
  */
-function readImageAsDataUrl(file: File): Promise<string> {
+export function readImageAsDataUrl(file: File): Promise<string> {
 	return new Promise<string>((resolve, reject) => {
 		const reader = new FileReader();
 		reader.onload = () => {
@@ -575,6 +621,19 @@ interface VibeAIStreamState {
 	// truth from the backend; the awaiting-plan guard in finishStreaming
 	// reads it alongside planPhase (which stays for restored turns).
 	turnState: string | undefined;
+	// Phase 245: the backend turn transcript id (the `turn_start` event,
+	// the stream's first event) — the resume-from-failed-step retry
+	// credential, captured into the turn record at finish.
+	turnId: string | undefined;
+	// Phase 246: this stream is a resume-from-failed-step retry (Retry on
+	// an errored turn whose transcript id is known) — finishStreaming
+	// merges the record into the failed turn's record instead of pushing
+	// a new one.
+	isResume: boolean;
+	// Phase 246: the resume divider note ("Retrying from the failed
+	// step…") — removed when the resume attempt is torn down
+	// (resume_unavailable fallback).
+	resumeDivider: HTMLElement | undefined;
 
 	// --- Phase 71: Plan mode (research → plan → approval → execution)
 	// The plan card's lifecycle: `awaiting` while the plan waits for the
@@ -591,10 +650,59 @@ interface VibeAIStreamState {
 	planCardRoot: HTMLElement | undefined;
 	planProgress: HTMLElement | undefined;
 	planStepRows: Map<number, HTMLElement> | undefined;
+	// --- Phase 231: per-step activity group (plan execution) — the step's
+	// whole activity (narration text, Thought blocks, tool cards) collects
+	// in one collapsible <details> inside the Worked shell; a clean
+	// plan_step_done settles it to its summary row ("Step N — title ·
+	// Worked for Xs · counts") and folds it, so each finished step collapses
+	// as ONE row (ask/agent Worked-shell parity, per step). A failed step's
+	// group stays open for debugging; the next step_start opens a fresh
+	// group (the failed one keeps its expanded activity).
+	planStepGroup: {
+		root: HTMLDetailsElement;
+		steps: HTMLElement;
+		icon: HTMLElement;
+		label: HTMLElement;
+		meta: HTMLElement;
+		stepId: number;
+		startedAt: number;
+	} | undefined;
+	// --- Phase 218: plan doc streaming (Cursor-parity plan-as-doc) — the
+	// plan phase streams PLAN.md into the editor while the approval waits:
+	// the accumulated markdown (chunks join up to exactly the on-disk
+	// file), the model reference the edits apply through (resolved async —
+	// deltas buffer into `text` until it lands), the open promise so
+	// settle waits for it, and the code editor the openEditor call landed
+	// (Phase 219 — the approval widget mounts on it).
+	planDocStream: {
+		path: string;
+		// Phase 223: the conversation's project root captured at doc-start —
+		// the doc path is workspace-relative, and the Agent Window's neutral
+		// workspace has no folder to anchor it (the editor never opened).
+		root: string;
+		text: string;
+		ref: IReference<IResolvedTextEditorModel> | undefined;
+		opening: Promise<void> | undefined;
+		editor?: ICodeEditor;
+	} | undefined;
+	// --- Phase 219: the approval lives IN the plan doc's editor — an
+	// overlay widget pinned to the editor's top center carries the
+	// Build / Cancel actions (the chat bar remains only as the fallback
+	// for a turn whose doc never opened). The editor pointer survives the
+	// doc-stream settle — the widget outlives the model reference.
+	planApproval: {
+		editor: ICodeEditor;
+		widget: IOverlayWidget;
+	} | undefined;
 
-	// --- markdown streaming (throttled re-render)
+	// --- markdown streaming (smoothed re-render)
 	markdownRenderTimer: number | undefined;
 	lastMarkdownRender: number;
+	// r22: absolute char index into `turn.text` painted so far — the pump
+	// (markdownRenderTimer above) advances it toward the received length so
+	// bursty delta arrivals paint as a steady typewriter flow; run-close /
+	// turn-finish render the full slice and bypass it.
+	smoothedLen: number;
 	renderedMarkdown: DisposableStore | undefined;
 }
 
@@ -634,6 +742,10 @@ interface VibeAITurnRecord {
 	planStatus?: VibeAIPlanCardStatus;
 	planResults?: { stepsDone: number[]; stepsFailed: number[] };
 	error?: string;
+	// Phase 245: the backend turn transcript id (turn_start event) — the
+	// resume-from-failed-step retry credential, persisted so a restored
+	// failed turn still resumes after a reload (no id → legacy re-send).
+	turnId?: string;
 	// Phase 97: the turn was interrupted by the next send — restore renders
 	// the interruption note (never set for a normally finished turn).
 	interrupted?: boolean;
@@ -702,6 +814,12 @@ interface VibeAIConversation {
 	sessionId: string;
 	title: string;
 	/**
+	 * Phase 227: the AI title summary was already requested for this
+	 * conversation (fire-and-forget once per conversation — a failed
+	 * summary keeps the raw derived title instead of retrying).
+	 */
+	titleRequested?: boolean;
+	/**
 	 * Phase 93: the conversation's own composer mode (ask/agent/plan) —
 	 * per conversation so switching tabs never carries one tab's mode
 	 * into another (each tab dispatches its turns with its own mode).
@@ -741,6 +859,37 @@ interface VibeAIConversation {
 	 * worked when these lived on turnDisposables). Dies with the tab.
 	 */
 	turnRecordDisposables: DisposableStore;
+	/**
+	 * Phase 218: the failed turn's row + prompt stashed the moment a
+	 * stream error arrives — retryFailedTurn's fallback for conversations
+	 * whose turn record is missing (restored from a turns-less store
+	 * before the Phase 218 alignment self-heal ran). Cleared with the
+	 * next turn (startAssistantTurn). Phase 246: also stashes the failed
+	 * stream's turn transcript id (the resume credential) when the
+	 * turn_start event made it through before the error.
+	 */
+	lastFailedTurn: { userRow: HTMLElement; userText: string; turnId?: string } | undefined;
+	/**
+	 * Phase 224: the plan doc editor's To-dos block — a Cursor-parity
+	 * content widget pinned under the doc's last line (the "N To-dos
+	 * [+ New]" checklist rows mirror the plan steps; the "Referenced by
+	 * 1 Agent" author row names the creating conversation). Lives on the
+	 * CONVERSATION, not the turn stream: the execute turn's plan_step
+	 * events keep ticking it after the planning turn ends. Dies with the
+	 * doc's tab (editor onDidDispose) or the pane (turnRecordDisposables);
+	 * a newer plan's mount replaces it.
+	 */
+	planTodos: {
+		editor: ICodeEditor;
+		widget: IContentWidget;
+		rows: Map<number, HTMLElement>;
+		/**
+		 * Phase 241 (living plan): the checklist's list container —
+		 * update_plan revisions append/remove rows here after mount (the
+		 * rows map alone can't anchor an append once it's empty).
+		 */
+		list: HTMLElement;
+	} | undefined;
 	/** Sequence guard for this conversation's context-usage refreshes. */
 	contextUsageSeq: number;
 	/**
@@ -790,6 +939,13 @@ interface VibeAIConversation {
 	 */
 	planPath?: string;
 	/**
+	 * Phase 213: the plan doc's workspace-relative path (PLAN.md at the
+	 * project root, captured from the execute phase's plan_start) — the
+	 * plan card links to it. Absent on the awaiting card (the doc is
+	 * written on Build) and when persistence failed.
+	 */
+	planDocPath?: string;
+	/**
 	 * Phase 177 (Agent Window, Cursor parity): the project folder this
 	 * conversation is bound to — sent as `workspaceRoot` on every request
 	 * so continuing a conversation from the Agent Window (whose neutral
@@ -821,6 +977,24 @@ interface VibeAIFileContextEntry {
 	content?: string;
 }
 
+/**
+ * Phase 184: one attachment target — the pending set a composer's chips
+ * row shows and the whole attach pipeline (paste / drop / paperclip)
+ * writes into. The MAIN sink wraps the pane-level fields (mirrored per
+ * conversation); an open prompt edit owns its own (seeded from the edited
+ * message — the edit box no longer mirrors the input below). Arrays are
+ * mutated in place; the tracked-read collections are sink-scoped so
+ * send() / commitPromptEdit wait out only the reads that belong to them.
+ */
+interface VibeAIAttachmentSink {
+	readonly files: IVibeAIFileContext[];
+	readonly images: string[];
+	readonly pendingFileReads: Map<string, Promise<void>>;
+	readonly pendingImageReads: Set<Promise<void>>;
+	/** Re-renders the owning composer's chips row + action buttons. */
+	readonly refresh: () => void;
+}
+
 interface VibeAIPromptEdit {
 	conversation: VibeAIConversation;
 	row: HTMLElement;
@@ -835,6 +1009,17 @@ interface VibeAIPromptEdit {
 	/** The edit box's composer shell (.vibe-ai-input-container clone). */
 	shell: HTMLElement;
 	chipsRow: HTMLElement | undefined;
+	/**
+	 * Phase 184: the edit box's OWN attachment set — seeded from the
+	 * edited message's attachments (the sent chips/thumbnails), editable
+	 * in place (chip ✕ removes, paste/drop/paperclip adds) and consumed
+	 * by the re-send. The main input's pending set is never touched.
+	 */
+	files: IVibeAIFileContext[];
+	images: string[];
+	/** Phase 184: edit-scoped in-flight attachment reads (send-wait contract). */
+	pendingFileReads: Map<string, Promise<void>>;
+	pendingImageReads: Set<Promise<void>>;
 	modeButton: HTMLElement | undefined;
 	modeIcon: HTMLElement | undefined;
 	modeLabel: HTMLElement | undefined;
@@ -906,6 +1091,15 @@ export class VibeAIChatPane extends ViewPane {
 	// Phase 101: debounce handle for the open tabs' scroll-position
 	// persist (rescheduled on every scroll, fires after the last one).
 	private scrollPersistTimer: number | undefined;
+	// Phase 208: the active restore chase — a bottom landing keeps
+	// re-pinning while the thread still grows (mermaid webviews, images,
+	// code-block editors land after the landing passes). One at a time:
+	// the newest bottom landing replaces it.
+	private restoreChase: {
+		readonly conversationId: string;
+		readonly observer: ResizeObserver;
+		idleTimer: number;
+	} | undefined;
 	private readonly tabDisposables = new DisposableStore();
 
 	// --- state (mirrored pane fields of the active conversation)
@@ -949,6 +1143,14 @@ export class VibeAIChatPane extends ViewPane {
 	//     DOM, so its toolbar/chips/ring refs hang off this state and
 	//     every label/state update fans out to both composers.
 	private promptEdit: VibeAIPromptEdit | undefined;
+	// --- Set by the edit's outside-press cancel (enterPromptEdit's document
+	//     pointerdown): the click that closed the edit must not re-open one
+	//     — not on the same message's attachment strip, not on another
+	//     bubble. Clicking outside means exit; a fresh click edits again.
+	//     registerPromptEditDelegation's reset listener clears it on the
+	//     next press (it runs before the edit's cancel listener — both are
+	//     document-capture, pane-level registered first).
+	private promptEditReopenSuppressed = false;
 	// --- Phase 48: the main input toolbar's listeners (die with the
 	//     pane); an edit box's toolbar listeners live on its own store.
 	private readonly inputToolbarDisposables = new DisposableStore();
@@ -1057,7 +1259,12 @@ export class VibeAIChatPane extends ViewPane {
 		@IClipboardService private readonly clipboardService: IClipboardService,
 		@ITerminalService private readonly terminalService: ITerminalService,
 		@IMarkerService private readonly markerService: IMarkerService,
-		@ICommandService private readonly commandService: ICommandService
+		@ICommandService private readonly commandService: ICommandService,
+		// Phase 218: plan doc streaming — the model reference applies the
+		// streamed PLAN.md chunks to the editor's model; the text file
+		// service clears the transient dirty flag once the stream lands.
+		@ITextModelService private readonly textModelService: ITextModelService,
+		@ITextFileService private readonly textFileService: ITextFileService
 	) {
 		super(
 			options,
@@ -1100,6 +1307,18 @@ export class VibeAIChatPane extends ViewPane {
 		this.model = configurationService.getValue<string>('vibeAI.chat.model') || 'Auto';
 		// Phase 70: Optimize For bias of the Auto router (Cursor parity).
 		this.autoMode = configurationService.getValue<string>('vibeAI.chat.autoMode') || 'balance';
+		// Phase 227: the model is now also pickable from the plan doc pane's
+		// header (same config keys) — an external pick must land here too,
+		// or Build/execute would keep routing with the stale in-memory model.
+		this._register(configurationService.onDidChangeConfiguration(e => {
+			if (e.affectsConfiguration('vibeAI.chat.model')) {
+				this.model = this.configurationService.getValue<string>('vibeAI.chat.model') || 'Auto';
+				this.updateModelLabel();
+			}
+			if (e.affectsConfiguration('vibeAI.chat.autoMode')) {
+				this.autoMode = this.configurationService.getValue<string>('vibeAI.chat.autoMode') || 'balance';
+			}
+		}));
 	}
 
 	protected override renderBody(container: HTMLElement): void {
@@ -1259,6 +1478,23 @@ export class VibeAIChatPane extends ViewPane {
 		//     ✕ on a tab deletes that conversation, + opens a new one
 		this.tabsContainer = DOM.append(this.tabBar, $('.vibe-ai-tabbar-tabs'));
 
+		// Phase 191: the strip slides instead of squeezing tabs — a vertical
+		// wheel over it scrolls horizontally (native horizontal wheel /
+		// trackpad pans and Shift+Wheel already map to scrollLeft). The
+		// wheel is only hijacked while the strip actually moves, so at
+		// either end the gesture falls through to the view below.
+		this._register(DOM.addDisposableListener(this.tabsContainer, DOM.EventType.WHEEL, (e: WheelEvent) => {
+			if (e.deltaY === 0 || e.deltaX !== 0) {
+				return;
+			}
+			const strip = this.tabsContainer!;
+			const before = strip.scrollLeft;
+			strip.scrollLeft += e.deltaY;
+			if (strip.scrollLeft !== before) {
+				e.preventDefault();
+			}
+		}, { passive: false }));
+
 		const actions = DOM.append(this.tabBar, $('.vibe-ai-tabbar-actions'));
 		const newChatButton = DOM.append(actions, $('button.vibe-ai-icon-btn.codicon.codicon-plus')) as HTMLButtonElement;
 		newChatButton.title = localize('vibeAIChat.newChat', "New Chat");
@@ -1350,6 +1586,8 @@ export class VibeAIChatPane extends ViewPane {
 			steerQueue: [],
 			turnDisposables: new DisposableStore(),
 			turnRecordDisposables: new DisposableStore(),
+			lastFailedTurn: undefined,
+			planTodos: undefined,
 			turns: [],
 			contextUsageSeq: 0,
 			// Phase 177: the project folder is frozen at creation (the
@@ -1443,6 +1681,9 @@ export class VibeAIChatPane extends ViewPane {
 		this.syncFromActiveConversation();
 		this.showOnlyConversation(id);
 		this.renderTabs();
+		// Phase 191: a tab switched to (or newly created) slides into view
+		// when the no-shrink strip overflows.
+		this.scrollActiveTabIntoView();
 		this.renderChips();
 		this.renderContextUsage();
 		// Phase 120: the goal banner belongs to the active conversation —
@@ -1473,6 +1714,11 @@ export class VibeAIChatPane extends ViewPane {
 		// position on re-activation (per-tab memory).
 		const switchTo = this.conversations.find(candidate => candidate.id === id);
 		if (switchTo) {
+			// Phase 208: a chase armed for the tab we left must not
+			// survive the switch — it would yank the new tab to its
+			// bottom on the next thread growth. The pending-landing
+			// branch below re-arms it for the tab switching to.
+			this.stopRestoreChase();
 			if (switchTo.pendingLatestScroll) {
 				this.scrollToLatestTurn(switchTo);
 			} else if (switchTo.recordedScroll) {
@@ -1507,10 +1753,22 @@ export class VibeAIChatPane extends ViewPane {
 	 * chat pane. The hub reveals this pane first (openView focus).
 	 * Phase 177: `workspaceRoot` binds the new conversation to the hub's
 	 * target project (Agent Window parity — the window itself has no
-	 * folder).
+	 * folder). Phase 184: the hub composer's pending attachment chips ride
+	 * along (files + images land in the fresh conversation's main sink
+	 * before send() consumes and clears them).
 	 */
-	async sendFromHub(text: string, workspaceRoot?: string): Promise<void> {
+	async sendFromHub(text: string, workspaceRoot?: string, files?: IVibeAIFileContext[], images?: string[]): Promise<void> {
 		this.newConversation(workspaceRoot);
+		if (images && images.length > 0) {
+			this.attachedImages.push(...images);
+		}
+		if (files && files.length > 0) {
+			this.attachedFiles.push(...files);
+		}
+		if ((files && files.length > 0) || (images && images.length > 0)) {
+			this.renderChips();
+			this.updateInputActions();
+		}
 		if (this.inputElement) {
 			this.inputElement.value = text;
 		}
@@ -1525,8 +1783,10 @@ export class VibeAIChatPane extends ViewPane {
 	 * (the session store never keeps zero-message sessions either) and an
 	 * active empty tab is not recorded — the restore falls back to the
 	 * first restored tab. Phase 101: the open tabs' recorded scroll
-	 * positions ride along (keyed by session id) — the tabs come back
-	 * where their threads were left on restart / project re-import.
+	 * positions ride along (keyed by session id). Phase 208: the restart
+	 * restore no longer consumes them (it lands on the latest turn); the
+	 * payload keeps the field for schema compatibility, and the recorded
+	 * positions remain the in-session tab-switch memory.
 	 */
 	private persistOpenState(): void {
 		const openIds: string[] = [];
@@ -1557,9 +1817,12 @@ export class VibeAIChatPane extends ViewPane {
 	 * recorded active conversation is focused again. Sessions deleted or
 	 * evicted (MAX_SESSIONS) since the last window are skipped; when
 	 * nothing restores, the pre-Phase-79 behavior applies (one fresh
-	 * empty conversation). Phase 101: each restored tab comes back where
-	 * its thread was left (the recorded scroll position; pinned-at-bottom
-	 * tabs restore to the bottom, no-record tabs to the latest turn).
+	 * empty conversation). Phase 208: every restored tab lands on its
+	 * latest turn (the very bottom) — the Phase 101 cross-restart scroll
+	 * restore is retired (a recorded offset lands mid-thread and drifted
+	 * with late-growing blocks; reopening the window must show the
+	 * latest conversation). The persisted scrollTops are no longer
+	 * consumed (the field stays for schema compatibility).
 	 */
 	private restoreOpenConversations(): void {
 		const state = this.sessionStore.getOpenState();
@@ -1577,9 +1840,16 @@ export class VibeAIChatPane extends ViewPane {
 		// the empty active conversation" branch); the rest open their own
 		// tabs — the strip order matches the recorded one.
 		for (const session of restoreSessions) {
-			// Phase 101: the tab's recorded scroll position rides along —
-			// its thread lands where it was left.
-			this.loadSession(session, state.scrollTops?.[session.id]);
+			// Phase 208: the restart restore always lands on the latest
+			// turn (the very bottom). Phase 101's cross-restart scroll
+			// restore is retired here: a recorded offset lands mid-thread
+			// by design, and with late-growing blocks (mermaid webviews,
+			// images, code-block editors) it frequently drifted off anyway.
+			// The user's expectation is explicit — reopening the window
+			// shows the latest conversation. Within a live window the
+			// tab-switch memory (setActiveConversation → applyRecordedScroll)
+			// still applies; search-hit jumps keep their focusTurn landing.
+			this.loadSession(session);
 		}
 		// Focus the recorded active conversation; when it was deleted or
 		// never recorded (an empty tab was active at close time), fall
@@ -1658,6 +1928,10 @@ export class VibeAIChatPane extends ViewPane {
 			return;
 		}
 		this.tabDisposables.clear();
+		// Phase 191: the strip slides instead of squeezing tabs — a rebuild
+		// (title update, stream dot, tab switch) must not yank an
+		// overflowing strip back to its left edge.
+		const keepScrollLeft = this.tabsContainer.scrollLeft;
 		DOM.clearNode(this.tabsContainer);
 		for (const conversation of this.conversations) {
 			const tab = DOM.append(this.tabsContainer, $('.vibe-ai-tab'));
@@ -1690,6 +1964,14 @@ export class VibeAIChatPane extends ViewPane {
 				}
 			}));
 		}
+		if (keepScrollLeft > 0) {
+			this.tabsContainer.scrollLeft = keepScrollLeft;
+		}
+	}
+
+	/** Phase 191: brings the active tab into view when the strip overflows. */
+	private scrollActiveTabIntoView(): void {
+		this.tabsContainer?.querySelector('.vibe-ai-tab.active')?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
 	}
 
 	private updateTabTitle(): void {
@@ -1705,6 +1987,53 @@ export class VibeAIChatPane extends ViewPane {
 	private deriveSessionTitle(text: string): string {
 		const raw = text.trim().replace(/\s+/g, ' ');
 		return raw.length > 40 ? `${raw.substring(0, 40)}…` : raw;
+	}
+
+	/**
+	 * Phase 227: asks the backend to summarize the conversation title
+	 * from the first question (fire-and-forget, once per conversation —
+	 * Cursor parity: the history list shows a short AI title instead of
+	 * the raw prompt). Same model routing as the dispatched turn. The
+	 * raw derived title (deriveSessionTitle) stands in until the summary
+	 * lands — and stays forever when the backend returns nothing.
+	 */
+	private requestAiSessionTitle(conversation: VibeAIConversation, model: string | undefined, provider: IVibeAIModelProvider | undefined, autoPool: IVibeAIModelProvider[] | undefined): void {
+		if (conversation.titleRequested) {
+			return;
+		}
+		// A restored conversation whose stored title is already
+		// AI-derived never re-requests; one with a raw derived title does
+		// (its first question rides history from the restore).
+		if (this.sessionStore.list().some(session => session.id === conversation.sessionId && session.titleCustom)) {
+			return;
+		}
+		const firstUser = conversation.history.find(message => message.role === 'user' && !message.steered);
+		const question = firstUser?.content.trim();
+		if (!question) {
+			return;
+		}
+		conversation.titleRequested = true;
+		this.vibeAIService.chatTitle({
+			question,
+			...(model ? { model } : {}),
+			...(provider ? { provider } : {}),
+			...(autoPool && autoPool.length > 0 ? { autoPool, autoMode: this.autoMode } : {}),
+		}).then(title => {
+			const label = title?.trim().replace(/\s+/g, ' ');
+			if (!label) {
+				return;
+			}
+			const clipped = label.length > 48 ? `${label.substring(0, 48)}…` : label;
+			conversation.title = clipped;
+			if (this.getActiveConversation() === conversation) {
+				this.sessionTitle = clipped;
+			}
+			// Persist first (a turn still streaming has no session record
+			// yet), then patch — save() sticks titleCustom titles.
+			this.persistTurns(conversation);
+			this.sessionStore.setSessionTitle(conversation.sessionId, clipped);
+			this.renderTabs();
+		}).catch(() => { /* the raw derived title stays */ });
 	}
 
 	private renderInputToolbar(inputContainer: HTMLElement): void {
@@ -1740,7 +2069,7 @@ export class VibeAIChatPane extends ViewPane {
 	 * sync. All listeners go into `store` (pane lifetime for the main
 	 * input, the edit's own store for an edit box).
 	 */
-	private buildInputToolbar(parent: HTMLElement, store: DisposableStore, opts: { sendTitle: string; onSend: () => void; showContextRing?: boolean }): {
+	private buildInputToolbar(parent: HTMLElement, store: DisposableStore, opts: { sendTitle: string; onSend: () => void; showContextRing?: boolean; onAttach?: () => void }): {
 		modeButton: HTMLElement;
 		modeIcon: HTMLElement;
 		modeLabel: HTMLElement;
@@ -1776,10 +2105,12 @@ export class VibeAIChatPane extends ViewPane {
 		// opts out — usage belongs to the live input, not a resent prompt.
 		const ring = opts.showContextRing === false ? undefined : this.buildContextRing(toolbar, store);
 
-		// attach (paperclip) — Cursor-parity 📎, attaches the active file
+		// attach (paperclip) — Cursor-parity 📎, attaches the active file.
+		// Phase 184: an edit box's toolbar routes the attach into its own
+		// per-message set (opts.onAttach); the main input keeps the default.
 		const attachButton = DOM.append(toolbar, $('button.vibe-ai-input-tool.codicon.codicon-attach')) as HTMLElement;
 		attachButton.title = localize('vibeAIChat.mentionTitle', "Attach the current file to the conversation (@)");
-		store.add(DOM.addDisposableListener(attachButton, DOM.EventType.CLICK, () => this.attachActiveFile()));
+		store.add(DOM.addDisposableListener(attachButton, DOM.EventType.CLICK, () => opts.onAttach ? opts.onAttach() : this.attachActiveFile()));
 
 		// mic (voice input) — Cursor-parity 🎤, visible while the input is empty
 		const micButton = DOM.append(toolbar, $('button.vibe-ai-input-tool.codicon.codicon-mic')) as HTMLElement;
@@ -1959,7 +2290,7 @@ export class VibeAIChatPane extends ViewPane {
 	 * text payload would pollute the input); without images the native
 	 * text paste runs untouched.
 	 */
-	private handleImagePaste(e: ClipboardEvent): void {
+	private handleImagePaste(e: ClipboardEvent, sink: VibeAIAttachmentSink = this.mainAttachmentSink()): void {
 		const items = e.clipboardData?.items;
 		if (!items) {
 			return;
@@ -1979,7 +2310,7 @@ export class VibeAIChatPane extends ViewPane {
 		e.preventDefault();
 		e.stopPropagation();
 		// Phase 171: tracked — a slow decode shows spinner tiles first.
-		this.trackImageRead(this.attachImageFiles(files));
+		this.trackImageRead(sink, this.attachImageFiles(files, sink));
 	}
 
 	/**
@@ -1987,16 +2318,17 @@ export class VibeAIChatPane extends ViewPane {
 	 * downscaled data URLs (readImageAsDataUrl), surfaced as removable
 	 * thumbnail chips, sent with the next turn as `images` on the user
 	 * message (the backend builds the multimodal request from them).
+	 * Phase 184: routes into the given sink (edit box = its own set).
 	 */
-	private async attachImageFiles(files: File[]): Promise<void> {
+	private async attachImageFiles(files: File[], sink: VibeAIAttachmentSink = this.mainAttachmentSink()): Promise<void> {
 		let rejected = false;
 		for (const file of files) {
-			if (this.attachedImages.length >= MAX_ATTACHED_IMAGES) {
+			if (sink.images.length >= MAX_ATTACHED_IMAGES) {
 				rejected = true;
 				break;
 			}
 			try {
-				this.attachedImages.push(await readImageAsDataUrl(file));
+				sink.images.push(await readImageAsDataUrl(file));
 			} catch (err) {
 				this.logService.warn('[VibeAI] failed to read attached image', err);
 				this.notificationService.error(localize('vibeAIChat.imageReadFailed', "Failed to read the pasted image — try copying it again."));
@@ -2009,8 +2341,7 @@ export class VibeAIChatPane extends ViewPane {
 				MAX_ATTACHED_IMAGES
 			));
 		}
-		this.renderChips();
-		this.updateInputActions();
+		sink.refresh();
 	}
 
 	/**
@@ -2077,14 +2408,15 @@ export class VibeAIChatPane extends ViewPane {
 	 * URL), and any other file reads in (clipped, same as
 	 * attachActiveFile). Same-path entries skip (dedup).
 	 */
-	private async attachDroppedResources(uris: URI[]): Promise<void> {
+	private async attachDroppedResources(uris: URI[], sink: VibeAIAttachmentSink = this.mainAttachmentSink()): Promise<void> {
 		let rejectedImage = false;
 		// Phase 171: the drop attaches to the list that was live when it
 		// happened — a tab switch mid-stat/mid-read never reroutes the
 		// attachments into the other conversation (the live pane mirrors
 		// this list until the switch, so the spinner chips still show).
-		const target = this.attachedFiles;
-		const targetImages = this.attachedImages;
+		// Phase 184: the list IS the sink's own array (captured at entry).
+		const target = sink.files;
+		const targetImages = sink.images;
 		// Phase 1 — stat + placeholder chips (metadata only, fast). Each
 		// accepted entry starts its tracked read; the spinner chips below
 		// resolve as the reads settle (readDroppedFile / readDroppedImage).
@@ -2101,23 +2433,22 @@ export class VibeAIChatPane extends ViewPane {
 					}
 					const entry: VibeAIFileContextEntry = { path: displayPath, kind: 'folder', content: '' };
 					target.push(entry);
-					this.trackFileRead(displayPath, this.readDroppedFile({ uri, kind: 'folder', entry, images: targetImages }));
+					this.trackFileRead(sink, displayPath, this.readDroppedFile({ uri, kind: 'folder', entry, images: targetImages, sink }));
 				} else if (IMAGE_FILE_EXTENSIONS.has(extname(uri).toLowerCase())) {
-					if (targetImages.length + this.pendingImageReads.size >= MAX_ATTACHED_IMAGES) {
+					if (targetImages.length + sink.pendingImageReads.size >= MAX_ATTACHED_IMAGES) {
 						rejectedImage = true;
 						continue;
 					}
-					this.trackImageRead(this.readDroppedImage(uri, targetImages));
+					this.trackImageRead(sink, this.readDroppedImage(uri, targetImages, sink));
 				} else {
 					if (target.some(file => file.path === displayPath)) {
 						continue;
 					}
 					const entry: VibeAIFileContextEntry = { path: displayPath, kind: 'file', content: '' };
 					target.push(entry);
-					this.trackFileRead(displayPath, this.readDroppedFile({ uri, kind: 'file', size: stat.size, entry, images: targetImages }));
+					this.trackFileRead(sink, displayPath, this.readDroppedFile({ uri, kind: 'file', size: stat.size, entry, images: targetImages, sink }));
 				}
-				this.renderChips();
-				this.updateInputActions();
+				sink.refresh();
 			} catch (err) {
 				this.logService.warn('[VibeAI] failed to attach the dropped resource', err);
 				this.notificationService.error(localize('vibeAIChat.dropReadFailed', "Failed to attach the dropped file — it may not be readable."));
@@ -2137,22 +2468,23 @@ export class VibeAIChatPane extends ViewPane {
 	 * tracked image pipeline (spinner tiles while the bytes decode), URIs
 	 * go through the two-phase resource attach (placeholder chips land on
 	 * the drop; content fills in behind a spinner), and anything else
-	 * (e.g. a URL drag) keeps the native text insert.
+	 * (e.g. a URL drag) keeps the native text insert. Phase 184: routes
+	 * into the given sink (the edit shell drops onto its own set).
 	 */
-	private async handleDrop(e: DragEvent): Promise<void> {
+	private async handleDrop(e: DragEvent, sink: VibeAIAttachmentSink = this.mainAttachmentSink()): Promise<void> {
 		// OS image drag — image chips (same as the paste path).
 		const imageFiles = Array.from(e.dataTransfer?.files ?? []).filter(file => file.type.startsWith('image/'));
 		if (imageFiles.length > 0) {
 			e.preventDefault();
 			e.stopPropagation();
-			this.trackImageRead(this.attachImageFiles(imageFiles));
+			this.trackImageRead(sink, this.attachImageFiles(imageFiles, sink));
 			return;
 		}
 		const uris = this.extractDroppedUris(e);
 		if (uris.length > 0) {
 			e.preventDefault();
 			e.stopPropagation();
-			await this.attachDroppedResources(uris);
+			await this.attachDroppedResources(uris, sink);
 		}
 	}
 
@@ -2161,29 +2493,28 @@ export class VibeAIChatPane extends ViewPane {
 	 * spinner while it runs and send() waits it out before capturing. The
 	 * entry's removal is identity-guarded (a removed-then-redropped path's
 	 * fresh read is never torn down by the old read's settle).
+	 * Phase 184: tracked on the sink's own map (main composer / edit box).
 	 */
-	private trackFileRead(displayPath: string, work: Promise<void>): void {
+	private trackFileRead(sink: VibeAIAttachmentSink, displayPath: string, work: Promise<void>): void {
 		const tracked = work.finally(() => {
-			if (this.pendingFileReads.get(displayPath) === tracked) {
-				this.pendingFileReads.delete(displayPath);
+			if (sink.pendingFileReads.get(displayPath) === tracked) {
+				sink.pendingFileReads.delete(displayPath);
 			}
 		});
-		this.pendingFileReads.set(displayPath, tracked);
+		sink.pendingFileReads.set(displayPath, tracked);
 	}
 
-	/** Phase 171: tracked variant for image reads (a promise set — the count is its size). */
-	private trackImageRead(work: Promise<void>): void {
+	/** Phase 171/182: tracked variant for image reads (a promise set — the count is its size). */
+	private trackImageRead(sink: VibeAIAttachmentSink, work: Promise<void>): void {
 		const tracked = work.finally(() => {
-			if (this.pendingImageReads.delete(tracked)) {
-				this.renderChips();
-				this.updateInputActions();
+			if (sink.pendingImageReads.delete(tracked)) {
+				sink.refresh();
 			}
 		});
-		this.pendingImageReads.add(tracked);
+		sink.pendingImageReads.add(tracked);
 		// The spinner tile paints immediately, not on settle — the drop is
 		// visible while the bytes are still being read.
-		this.renderChips();
-		this.updateInputActions();
+		sink.refresh();
 	}
 
 	/**
@@ -2193,7 +2524,7 @@ export class VibeAIChatPane extends ViewPane {
 	 * Settles the chip on both paths: content fills in, or the placeholder
 	 * comes off with an error.
 	 */
-	private async readDroppedFile(job: { uri: URI; kind: 'file' | 'folder'; size?: number; entry: VibeAIFileContextEntry; images: string[] }): Promise<void> {
+	private async readDroppedFile(job: { uri: URI; kind: 'file' | 'folder'; size?: number; entry: VibeAIFileContextEntry; images: string[]; sink: VibeAIAttachmentSink }): Promise<void> {
 		try {
 			let content: string;
 			if (job.kind === 'folder') {
@@ -2204,7 +2535,7 @@ export class VibeAIChatPane extends ViewPane {
 				const isDocument = DOCUMENT_EXTRACT_EXTENSIONS.has(extname(job.uri).toLowerCase());
 				const maxBytes = isDocument ? MAX_DROP_DOCUMENT_BYTES : MAX_DROP_FILE_BYTES;
 				if ((job.size ?? 0) > maxBytes) {
-					this.dropPlaceholderFile(job.entry);
+					this.dropPlaceholderFile(job.entry, job.sink);
 					this.notificationService.warn(localize(
 						'vibeAIChat.dropFileTooLarge',
 						"\"{0}\" is too large to attach as context (limit {1} MB).",
@@ -2242,9 +2573,9 @@ export class VibeAIChatPane extends ViewPane {
 						// it won't fit — outline + opening + the read_document
 						// hint with the doc_id INSIDE the budget, since the
 						// backend re-clips chip content to 6000). Attach as-is.
-						this.finalizeDroppedFile(job.entry, result.content);
+						this.finalizeDroppedFile(job.entry, result.content, job.sink);
 					} catch (err) {
-						this.dropPlaceholderFile(job.entry);
+						this.dropPlaceholderFile(job.entry, job.sink);
 						this.logService.warn('[VibeAI] failed to extract the dropped document', err);
 						const message = err instanceof Error && err.message ? err.message : localize('vibeAIChat.dropParseFailed', "Failed to parse this document.");
 						this.notificationService.warn(message);
@@ -2254,7 +2585,7 @@ export class VibeAIChatPane extends ViewPane {
 				const read = await this.fileService.readFile(job.uri);
 				const text = read.value.toString();
 				if (text.includes('\u0000')) {
-					this.dropPlaceholderFile(job.entry);
+					this.dropPlaceholderFile(job.entry, job.sink);
 					this.notificationService.warn(localize(
 						'vibeAIChat.dropBinaryFile',
 						"\"{0}\" is binary — it can't be attached as text context.",
@@ -2264,16 +2595,16 @@ export class VibeAIChatPane extends ViewPane {
 				}
 				content = text.length > FILE_CONTEXT_MAX_CHARS ? text.substring(0, FILE_CONTEXT_MAX_CHARS) : text;
 			}
-			this.finalizeDroppedFile(job.entry, content);
+			this.finalizeDroppedFile(job.entry, content, job.sink);
 		} catch (err) {
-			this.dropPlaceholderFile(job.entry);
+			this.dropPlaceholderFile(job.entry, job.sink);
 			this.logService.warn('[VibeAI] failed to attach the dropped resource', err);
 			this.notificationService.error(localize('vibeAIChat.dropReadFailed', "Failed to attach the dropped file — it may not be readable."));
 		}
 	}
 
-	/** Phase 171: a dropped image's read — data URL in, spinner tile off. */
-	private async readDroppedImage(uri: URI, targetImages: string[] = this.attachedImages): Promise<void> {
+	/** Phase 171: a dropped image's read — data URL in, spinner tile off. Phase 184: sink-routed. */
+	private async readDroppedImage(uri: URI, targetImages: string[] = this.attachedImages, sink: VibeAIAttachmentSink = this.mainAttachmentSink()): Promise<void> {
 		try {
 			const content = await this.fileService.readFile(uri);
 			targetImages.push(`data:${getMediaMime(uri.path) ?? 'image/png'};base64,${encodeBase64(content.value)}`);
@@ -2281,8 +2612,7 @@ export class VibeAIChatPane extends ViewPane {
 			this.logService.warn('[VibeAI] failed to attach the dropped resource', err);
 			this.notificationService.error(localize('vibeAIChat.dropReadFailed', "Failed to attach the dropped file — it may not be readable."));
 		} finally {
-			this.renderChips();
-			this.updateInputActions();
+			sink.refresh();
 		}
 	}
 
@@ -2293,24 +2623,34 @@ export class VibeAIChatPane extends ViewPane {
 	 * re-renders it on return), and a chip removed mid-read stays gone (its
 	 * detached object is written but never rendered).
 	 */
-	private finalizeDroppedFile(entry: VibeAIFileContextEntry, content: string): void {
-		this.pendingFileReads.delete(entry.path);
+	private finalizeDroppedFile(entry: VibeAIFileContextEntry, content: string, sink: VibeAIAttachmentSink = this.mainAttachmentSink()): void {
+		sink.pendingFileReads.delete(entry.path);
 		entry.content = content;
-		this.renderChips();
-		this.updateInputActions();
+		sink.refresh();
 	}
 
-	/** Phase 171: takes a placeholder chip off (read failed / rejected). */
-	private dropPlaceholderFile(entry: VibeAIFileContextEntry): void {
-		this.pendingFileReads.delete(entry.path);
-		this.attachedFiles = this.attachedFiles.filter(file => file !== entry);
+	/** Phase 171: takes a placeholder chip off (read failed / rejected). Phase 184: sink-routed. */
+	private dropPlaceholderFile(entry: VibeAIFileContextEntry, sink: VibeAIAttachmentSink = this.mainAttachmentSink()): void {
+		sink.pendingFileReads.delete(entry.path);
+		// Phase 184: in-place splice — the sink holds the live array (a
+		// reassignment would orphan the conversation mirror).
+		const index = sink.files.indexOf(entry);
+		if (index >= 0) {
+			sink.files.splice(index, 1);
+		}
 		// The read may have started on another tab (dropped, then switched
 		// mid-read) — sweep the conversation mirrors so the stale chip goes.
-		for (const conversation of this.conversations) {
-			conversation.attachedFiles = conversation.attachedFiles.filter(file => file !== entry);
+		// Main-sink only: an edit box's set is not mirrored anywhere (the
+		// pane-level pendingFileReads identity marks the main sink).
+		if (sink.pendingFileReads === this.pendingFileReads) {
+			for (const conversation of this.conversations) {
+				const mirrorIndex = conversation.attachedFiles.indexOf(entry);
+				if (mirrorIndex >= 0) {
+					conversation.attachedFiles.splice(mirrorIndex, 1);
+				}
+			}
 		}
-		this.renderChips();
-		this.updateInputActions();
+		sink.refresh();
 	}
 
 	/**
@@ -2448,19 +2788,22 @@ export class VibeAIChatPane extends ViewPane {
 			return;
 		}
 		const hasText = edit.textarea.value.trim().length > 0;
+		// Phase 184: the edit's own attachments enable the re-send too
+		// (main-input parity: an image-only / files-only message sends).
+		const hasAttachments = edit.images.length > 0 || edit.files.length > 0;
 		const streaming = !!edit.conversation.stream;
 		if (edit.sendButton) {
-			edit.sendButton.style.display = hasText ? 'flex' : 'none';
-			edit.sendButton.classList.toggle('enabled', hasText);
+			edit.sendButton.style.display = (hasText || hasAttachments) ? 'flex' : 'none';
+			edit.sendButton.classList.toggle('enabled', hasText || hasAttachments);
 			edit.sendButton.title = streaming
 				? localize('vibeAIChat.resendSkips', "Re-send — aborts the running answer (Enter)")
 				: localize('vibeAIChat.resend', "Re-send (Enter)");
 		}
 		if (edit.micButton) {
-			edit.micButton.style.display = !hasText && !streaming ? 'flex' : 'none';
+			edit.micButton.style.display = !hasText && !hasAttachments && !streaming ? 'flex' : 'none';
 		}
 		if (edit.stopButton) {
-			edit.stopButton.style.display = streaming && !hasText ? 'flex' : 'none';
+			edit.stopButton.style.display = streaming && !hasText && !hasAttachments ? 'flex' : 'none';
 		}
 	}
 
@@ -2561,19 +2904,26 @@ export class VibeAIChatPane extends ViewPane {
 		// send too — the captured list rides THIS request (dispatchTurn's
 		// files) and the composer clears with the message (Cursor parity:
 		// attachments are per-message, the chips no longer linger in the
-		// input after sending).
+		// input after sending). Phase 184: the captured list ALSO rides the
+		// history message (frontend-only metadata) so the sent bubble shows
+		// its chips and the prompt edit can re-edit the attachment set.
 		const files = this.attachedFiles.length > 0 ? [...this.attachedFiles] : undefined;
 		this.attachedImages = [];
 		this.attachedFiles = [];
 		this.renderChips();
-		this.history.push(images ? { role: 'user', content: text, images } : { role: 'user', content: text });
+		this.history.push({
+			role: 'user',
+			content: text,
+			...(images ? { images } : {}),
+			...(files ? { files } : {}),
+		});
 		// Cursor-parity tab title: the first user message names the chat.
 		if (this.sessionTitle === 'New Agent' && text.length > 0) {
 			this.sessionTitle = this.deriveSessionTitle(text);
 			this.updateTabTitle();
 		}
-		const userRow = this.renderUserTurn(conversation, text, images);
-		this.dispatchTurn(conversation, text, userRow, files);
+		const userRow = this.renderUserTurn(conversation, text, images, files);
+		this.dispatchTurn(conversation, text, userRow, files ?? []);
 	}
 
 	/**
@@ -2851,7 +3201,11 @@ export class VibeAIChatPane extends ViewPane {
 		conversation: VibeAIConversation,
 		text: string,
 		userRow: HTMLElement,
-		files: IVibeAIFileContext[] = this.attachedFiles,
+		// Phase 184: attachments are captured per send (the request's
+		// context.files) — no implicit pickup of the main input's pending
+		// chips anymore (side/goal/queue-resume/Continue sends are
+		// text-only; a resend carries the edit box's own set).
+		files: IVibeAIFileContext[] = [],
 	): void {
 		// Phase 44: the turn's live state hangs off this conversation, so
 		// the stream keeps running (and rendering into its own thread) even
@@ -2938,6 +3292,12 @@ export class VibeAIChatPane extends ViewPane {
 				}),
 			...(files.length > 0 ? { context: { files } } : {}),
 		};
+		// Phase 227: the first question gets an AI-summarized title
+		// (Cursor parity — the history list stops showing the raw prompt).
+		// Same model routing as this turn; fire-and-forget, the raw
+		// derived title stands in until (or forever when) the summary
+		// lands.
+		this.requestAiSessionTitle(conversation, request.model, provider, autoPool);
 		// Phase 71: Plan mode streams the research phase (read-only loop →
 		// structured plan) — the plan event opens the approval card and the
 		// execute phase streams into the same turn after Build. Agent mode
@@ -3042,10 +3402,23 @@ export class VibeAIChatPane extends ViewPane {
 				// Phase 45: remember the error for the turn record (persisted).
 				if (conversation.stream) {
 					conversation.stream.lastError = message;
+					// Phase 218: stash the failed turn's row + prompt NOW (the
+					// stream state dies at the done event's teardown) — the
+					// Retry fallback for a turn whose record never got
+					// captured (a conversation restored from a turns-less
+					// store). Cleared with the next turn (startAssistantTurn).
+					// Phase 246: the stream's turn transcript id rides along —
+					// the resume-from-failed-step retry credential.
+					if (conversation.stream.userRow) {
+						conversation.lastFailedTurn = { userRow: conversation.stream.userRow, userText: conversation.stream.userText, turnId: conversation.stream.turnId };
+					}
 				}
-				// Phase 134: Cursor-parity Retry — transient provider errors
-				// (the backend's `retryable` flag) render a Retry button.
-				this.showError(message, conversation, data.retryable === true);
+				// Phase 134: Cursor-parity Retry. Phase 195 (user ruling): ANY
+				// stream error terminates a running agent turn — the Retry
+				// pill renders unconditionally, not just for the backend's
+				// transient-error classification (a final "fetch failed"
+				// after auto-retries exhausted used to lose the button).
+				this.showError(message, conversation, true);
 				break;
 			}
 			case 'steered':
@@ -3069,6 +3442,21 @@ export class VibeAIChatPane extends ViewPane {
 				if (conversation.stream) {
 					conversation.stream.turnState = data.turnState;
 				}
+				break;
+			case 'turn_start':
+				// Phase 245: the backend turn transcript id (the stream's
+				// first event) — the resume-from-failed-step retry
+				// credential, captured into the turn record at finish.
+				if (conversation.stream) {
+					conversation.stream.turnId = data.turnId;
+				}
+				break;
+			case 'resume_unavailable':
+				// Phase 246: the resume retry's transcript could not be
+				// loaded — tear the attempt down and fall back to the
+				// legacy truncate + full re-send (behavior no worse than
+				// before this feature).
+				this.handleResumeUnavailable(conversation, data);
 				break;
 			case 'diagnostics':
 				// Phase 159: the backend injected the IDE's diagnostics
@@ -3122,11 +3510,17 @@ export class VibeAIChatPane extends ViewPane {
 				this.handleApprovalResolved(conversation, data);
 				break;
 			case 'agent_questions':
-				// Phase 121: the model asked clarifying questions without
-				// stopping work — a question card with an answer box
-				// (Cursor-parity Ask questions tool); the answer goes out
-				// via steer() and injects at the next tool boundary.
+				// Phase 121/237: the model asked clarifying questions — a
+				// question card with an answer box (Cursor-parity Ask
+				// questions tool); since Phase 237 the turn parks at the
+				// question gate and the card's answer resolves it.
 				this.handleAgentQuestions(conversation, data);
+				break;
+			case 'agent_question_answered':
+				// Phase 237: the gate woke with the user's answer — fold
+				// the matching card (by id) to its answered state
+				// (idempotent; covers answers sent from another surface).
+				this.handleAgentQuestionAnswered(conversation, data);
 				break;
 			case 'context_compressed':
 				this.handleContextCompressed(conversation, data);
@@ -3151,9 +3545,22 @@ export class VibeAIChatPane extends ViewPane {
 				break;
 			case 'plan':
 				// Phase 71: the research phase produced the structured plan
-				// (or failed to — the retry note). Opens the approval card;
-				// the turn stays open until the user builds or cancels.
+				// (or failed to — the retry note). Phase 218: opens the slim
+				// approval bar (the plan card retired — the plan doc already
+				// streamed into the editor); the turn stays open until the
+				// user builds or cancels.
 				this.handlePlanReady(conversation, data);
+				break;
+			case 'plan_doc_start':
+				// Phase 218: the plan doc's first chunk — the plan phase
+				// wrote PLAN.md and the pane opens it in the editor (the
+				// document content area), streaming the rest into it.
+				this.handlePlanDocStart(conversation, data);
+				break;
+			case 'plan_doc_delta':
+				// Phase 218: the plan doc's next chunk — appended to the
+				// editor's model (chunks join up to the on-disk file).
+				this.handlePlanDocDelta(conversation, data);
 				break;
 			case 'plan_start':
 				// Phase 71: the execute phase kicked off for the approved
@@ -3171,6 +3578,12 @@ export class VibeAIChatPane extends ViewPane {
 			case 'plan_done':
 				// Phase 71: the whole plan executed — the roll-up.
 				this.handlePlanDone(conversation, data);
+				break;
+			case 'plan_revision':
+				// Phase 241 (living plan): the executor revised the remaining
+				// steps mid-run (update_plan) — a timeline revision row plus
+				// the plan card / To-dos block sync.
+				this.handlePlanRevision(conversation, data);
 				break;
 			case 'round_end':
 				// Phase 89: the backend's explicit final-result marker —
@@ -3201,24 +3614,41 @@ export class VibeAIChatPane extends ViewPane {
 
 	/**
 	 * Phase 71: the research phase produced the structured plan (the
-	 * `plan` event). Closes the open research runs so the card lands
-	 * after them and renders the approval card (summary + steps + Build /
-	 * Cancel). A plan-less event = the backend failed to produce a valid
-	 * plan — a retry note renders instead.
+	 * `plan` event). Closes the open research runs so what follows lands
+	 * after them. Phase 218: the plan CARD is gone — the plan doc (since
+	 * 221 under .vibe/plans/) streamed into the editor (the document
+	 * content area, plan_doc_* events) BEFORE this point. Phase 220: the
+	 * chat shows the closing message as the turn's final answer (it
+	 * streamed into the purple-dot run opened at plan_doc_start). Phase
+	 * 222: the "Created Plan" decision card (221) lands after the answer
+	 * and the turn ENDS here (Cursor parity — the card is a finished-turn
+	 * artifact; Build opens a fresh execute turn). A plan-less event = the
+	 * backend failed to produce a valid plan — a retry note renders
+	 * instead.
 	 */
 	private handlePlanReady(conversation: VibeAIConversation, data: IVibeAIStreamData): void {
 		const state = conversation.stream;
 		if (!state || !state.currentAssistantRow) {
 			return;
 		}
-		// Close the research runs so the card appends after them (the
-		// execute phase's blocks append after the card — run order).
-		this.closeRunsBefore(conversation, 'plan');
+		// Close the research runs so what follows appends after them (the
+		// execute phase's blocks append after it — run order). Phase 220:
+		// the closing message streamed as a text run (the final answer) —
+		// closed here WITHOUT the narration fold (closeRunsBefore('plan')
+		// would intoWork-fold it into the shell); it stays at row level.
+		this.closeThinkingRun(conversation);
+		this.closeToolsRun(conversation);
+		this.closeTextRun(conversation);
 		// Reset the open-run signal — a stale kind (the last research run)
 		// would swallow the execute phase's first text/thinking deltas
 		// (no new block run would open for them).
 		state.lastBlockKind = undefined;
 		state.pendingPlan = data.plan;
+		// Phase 218/221: the doc path arrives WITH the plan (streamed during
+		// the plan phase, before the card) — the card links to it. Phase 222:
+		// always overwrite — a turn whose doc write failed must not show the
+		// PREVIOUS turn's doc link (View Plan pointing at a stale file).
+		conversation.planDocPath = data.planDocPath;
 		if (!data.plan) {
 			const note = DOM.append(state.currentAssistantRow, $('.vibe-ai-plan-failed-note'));
 			note.textContent = localize(
@@ -3229,8 +3659,434 @@ export class VibeAIChatPane extends ViewPane {
 			return;
 		}
 		state.planPhase = 'awaiting';
-		this.renderPlanCard(conversation, state.currentAssistantRow, data.plan, 'awaiting');
+		// Phase 221: Cursor-parity decision card — a compact "Created Plan"
+		// card in the chat (label + title + steps preview + View Plan /
+		// Build / Cancel), landing right after the closing answer (user
+		// spec: copy Cursor's plan card).
+		this.renderPlanApprovalBar(conversation, state.currentAssistantRow, data.plan);
+		// Phase 219: the Build / Cancel overlay widget still mounts over the
+		// plan doc's editor (Cursor's doc-header Build). The decision card
+		// above is always in the chat, so a closed tab / failed open no
+		// longer needs a separate chat fallback.
+		this.showPlanApprovalWidget(conversation, data.plan);
+		// Phase 224: Cursor-parity To-dos block — mounts on the doc's editor
+		// the moment the tab is held (the same entry.opening wait the
+		// approval uses). The block belongs to the DOCUMENT: it hangs on the
+		// conversation (not this turn's stream) so the execute turn's
+		// plan_step events keep ticking it after this turn ends.
+		const docEntry = state.planDocStream;
+		if (docEntry) {
+			const plan = data.plan;
+			const mountTodos = (editor?: ICodeEditor) => {
+				if (editor && plan) {
+					this.mountPlanTodosWidget(conversation, plan, editor);
+				}
+			};
+			if (docEntry.opening) {
+				void docEntry.opening.then(() => mountTodos(docEntry.editor), () => mountTodos(undefined));
+			} else {
+				mountTodos(docEntry.editor);
+			}
+		}
+		// The doc finished streaming into the editor — settle it (clear the
+		// transient dirty flag; the model content matches the disk now).
+		this.settlePlanDocStream(state);
+		// Phase 215: research is done — fold the Worked shell (the same
+		// collapse moment as ask/agent turns: the activity folds before the
+		// next content lands, here the decision card). Phase 222: the turn
+		// does NOT stay open — the done event finishes it right after this
+		// (the card persists as a finished-turn artifact; Build re-opens a
+		// fresh execute turn from it).
+		this.settleWorkShell(conversation);
 		this.scrollBottom(conversation, true);
+	}
+
+	// ==================== Phase 218: plan doc streaming (plan-as-doc) ====================
+
+	/**
+	 * Phase 218: the plan doc's first chunk (plan_doc_start) — the backend
+	 * created PLAN.md and wrote the chunk before emitting. Opens the doc
+	 * in the editor (the document content area) and resolves the model
+	 * reference the remaining chunks apply through; the editor binds to
+	 * the same model, so edits land in the visible tab.
+	 */
+	private handlePlanDocStart(conversation: VibeAIConversation, data: IVibeAIStreamData): void {
+		const state = conversation.stream;
+		if (!state || !data.planDocPath) {
+			return;
+		}
+		// A stale stream (interrupted plan turn) never blocks a fresh one.
+		if (state.planDocStream) {
+			this.settlePlanDocStream(state);
+		}
+		const entry = {
+			path: data.planDocPath,
+			// The conversation's project root — the doc path is relative and
+			// must anchor somewhere even in the folder-less Agent Window.
+			root: this.conversationWorkspaceRoot(conversation),
+			text: data.planDocDelta ?? '',
+			ref: undefined as IReference<IResolvedTextEditorModel> | undefined,
+			opening: undefined as Promise<void> | undefined,
+		};
+		state.planDocStream = entry;
+		entry.opening = this.openPlanDocStreamEditor(entry);
+		// Phase 220: the chat keeps only the always-used pulsing purple dot
+		// at the plan card's former position while the doc writes — an empty
+		// streaming text body (the same caret the answers stream with). The
+		// closing message (the turn's final answer) streams into this very
+		// run when it arrives after the doc is done.
+		if (state.lastBlockKind !== 'text') {
+			this.closeRunsBefore(conversation, 'text');
+			this.ensureTextRun(conversation);
+		}
+		state.lastBlockKind = 'text';
+		this.scrollBottom(conversation);
+	}
+
+	/**
+	 * Phase 218: opens the plan doc in the editor and acquires its model
+	 * reference (both resolve to the same text model — the reference may
+	 * land before or after the editor does). Model load races the stream
+	 * (the disk file already holds every written chunk) — the first apply
+	 * re-asserts the accumulated SSE truth over whatever the model loaded.
+	 */
+	private async openPlanDocStreamEditor(entry: { path: string; root: string; text: string; ref: IReference<IResolvedTextEditorModel> | undefined; opening: Promise<void> | undefined; editor?: ICodeEditor; }): Promise<void> {
+		const uri = this.resolveWorkspacePath(entry.path, entry.root);
+		if (!uri) {
+			return;
+		}
+		// The document content area shows the doc while it streams (a
+		// preview-tab open; revealIfOpened reuses an existing tab). The
+		// code editor the pane lands is kept — Phase 219's approval widget
+		// mounts on it once the plan is ready.
+		try {
+			// Phase 226: no explicit override — the resolver routes `*.plan.md`
+			// to the rendered Plan doc pane (which attaches to the same model
+			// and re-renders per chunk). If the plan pane fails to open, fall
+			// back to the raw text editor so the Phase 219/224 editor widgets
+			// still have a host.
+			const pane = await this.editorService.openEditor({ resource: uri, options: { revealIfOpened: true } })
+				?? await this.editorService.openEditor({ resource: uri, options: { override: DEFAULT_EDITOR_ASSOCIATION.id, revealIfOpened: true } });
+			entry.editor = getCodeEditor(pane?.getControl()) ?? undefined;
+		} catch {
+			// Editor open failed (uri not openable) — the model reference
+			// may still resolve; the approval falls back to the chat bar.
+		}
+		try {
+			entry.ref = await this.textModelService.createModelReference(uri);
+			this.applyPlanDocStream(entry);
+		} catch {
+			// No model for the uri (file gone / not resolvable) — the disk
+			// write still happened; the doc link re-opens it later.
+		}
+	}
+
+	/**
+	 * Phase 218: one plan doc chunk (plan_doc_delta) — buffered into the
+	 * accumulated text and applied to the editor's model when it's ready.
+	 */
+	private handlePlanDocDelta(conversation: VibeAIConversation, data: IVibeAIStreamData): void {
+		const entry = conversation.stream?.planDocStream;
+		if (!entry || !data.planDocPath || data.planDocPath !== entry.path) {
+			return;
+		}
+		entry.text += data.planDocDelta ?? '';
+		if (entry.ref) {
+			this.applyPlanDocStream(entry);
+		}
+	}
+
+	/**
+	 * Phase 218: converges the editor's model to the accumulated stream
+	 * text — appending the missing tail when the model is a prefix of it
+	 * (the normal streaming case), re-asserting the whole text otherwise
+	 * (the model loaded more of the disk file than the SSE saw). The tail
+	 * reveal keeps the streaming end in view.
+	 */
+	private applyPlanDocStream(entry: { text: string; ref: IReference<IResolvedTextEditorModel> | undefined; }): void {
+		const model = entry.ref?.object.textEditorModel;
+		if (!model) {
+			return;
+		}
+		const current = model.getValue();
+		if (current !== entry.text) {
+			if (entry.text.startsWith(current)) {
+				const lastLine = model.getLineCount();
+				const lastCol = model.getLineMaxColumn(lastLine);
+				model.pushEditOperations(
+					[],
+					[{ range: new Range(lastLine, lastCol, lastLine, lastCol), text: entry.text.slice(current.length) }],
+					() => null
+				);
+			} else {
+				model.setValue(entry.text);
+			}
+		}
+		// Follow the stream: reveal the tail in every editor showing the doc.
+		const target = model.uri.toString();
+		for (const editor of this.codeEditorService.listCodeEditors()) {
+			if (editor.getModel()?.uri.toString() === target) {
+				editor.revealLine(model.getLineCount());
+			}
+		}
+	}
+
+	/**
+	 * Phase 218: the doc stream is over (the `plan` event, turn finish or
+	 * a stale-stream replacement) — clear the transient dirty flag the
+	 * model edits left (the content matches the on-disk file, so a force
+	 * revert is a no-op reload) and release the reference. A user who
+	 * hand-edited the doc mid-stream keeps their edits (dirty stays).
+	 */
+	private settlePlanDocStream(state: VibeAIStreamState): void {
+		const entry = state.planDocStream;
+		if (!entry) {
+			return;
+		}
+		state.planDocStream = undefined;
+		const finish = () => {
+			try {
+				entry.ref?.dispose();
+			} catch {
+				// the reference may already be gone with the editor
+			}
+		};
+		(entry.opening ?? Promise.resolve()).then(() => {
+			const model = entry.ref?.object.textEditorModel;
+			if (model && model.getValue() === entry.text) {
+				const uri = this.resolveWorkspacePath(entry.path, entry.root);
+				if (uri) {
+					this.textFileService.revert(uri, { force: true }).catch(() => { /* best effort */ });
+				}
+			}
+		}).finally(finish);
+	}
+
+	// ==================== Phase 219: approval in the plan doc editor ====================
+
+	/**
+	 * Phase 219: shows the plan approval IN the doc's editor — an overlay
+	 * widget pinned to the editor's top center with the Build / Cancel
+	 * actions (user spec: the plan is a DOCUMENT, the approval happens on
+	 * it — no plan card or bar in the chat). Waits for the doc's editor
+	 * open when it is still resolving (the widget mounts the moment the
+	 * tab lands); falls back to the chat approval bar when no editor ends
+	 * up holding the doc (open failed / sentinel root without a doc path /
+	 * tab closed mid-approval).
+	 */
+	private showPlanApprovalWidget(conversation: VibeAIConversation, plan: IVibeAIPlan): void {
+		const state = conversation.stream;
+		if (!state) {
+			return;
+		}
+		const mount = (editor: ICodeEditor | undefined) => {
+			const live = conversation.stream;
+			// The same live turn, still awaiting, nothing mounted yet —
+			// anything else (turn resolved / superseded) mounts nothing.
+			const awaiting = !!live && live === state && live.planPhase === 'awaiting' && !live.planApproval && !!live.currentAssistantRow;
+			if (editor && awaiting && live) {
+				try {
+					const widget = this.createPlanApprovalWidget(conversation, plan);
+					editor.addOverlayWidget(widget);
+					live.planApproval = { editor, widget };
+					// The doc's tab closes mid-approval — the widget dies
+					// with the editor; the chat's decision card (Phase 221,
+					// always rendered at plan-ready) keeps Build / Cancel
+					// reachable, nothing to re-render here.
+					this.conversationPlanDisposables(conversation).add(this.editorService.onDidCloseEditor(e => {
+						if (live.planApproval?.editor !== editor) {
+							return;
+						}
+						live.planApproval = undefined;
+					}));
+					return;
+				} catch {
+					// The editor is gone already (tab closed / disposed) —
+					// the chat decision card takes the approval.
+				}
+			}
+		};
+		const entry = state.planDocStream;
+		if (entry?.opening) {
+			void entry.opening.then(() => mount(entry.editor), () => mount(undefined));
+		} else {
+			mount(entry?.editor);
+		}
+	}
+
+	/**
+	 * Phase 219: builds the editor overlay widget — plan title + the
+	 * summary/steps meta and the shared Build / Cancel actions (same
+	 * handlers and wiring as the fallback bar: renderPlanActions keeps
+	 * the planCardRoot contract for cancelPlan / executePlanFromCard).
+	 */
+	private createPlanApprovalWidget(conversation: VibeAIConversation, plan: IVibeAIPlan): IOverlayWidget {
+		const dom = $('.vibe-ai-plan-approval-widget');
+		const icon = DOM.append(dom, $('span.codicon.codicon-checklist.vibe-ai-plan-icon'));
+		icon.setAttribute('aria-hidden', 'true');
+		const title = DOM.append(dom, $('span.vibe-ai-plan-approval-title'));
+		title.textContent = localize('vibeAIChat.planTitle', "Plan");
+		const meta = DOM.append(dom, $('span.vibe-ai-plan-approval-meta'));
+		meta.textContent = plan.summary && plan.summary.length > 0
+			? plan.summary
+			: localize('vibeAIChat.planStepsCount', "{0} steps", plan.steps.length);
+		meta.title = meta.textContent ?? '';
+		this.renderPlanActions(conversation, dom, plan);
+		return {
+			getId: () => `vibeAI.planApproval.${conversation.id}`,
+			getDomNode: () => dom,
+			getPosition: () => ({ preference: OverlayWidgetPositionPreference.TOP_CENTER })
+		};
+	}
+
+	/**
+	 * Phase 219: removes the editor approval widget — every resolution of
+	 * the awaiting phase (Build, Cancel, interrupt, execution start,
+	 * stream teardown). The editor may be gone already; the remove is
+	 * best effort.
+	 */
+	private disposePlanApprovalWidget(state: VibeAIStreamState | undefined): void {
+		const approval = state?.planApproval;
+		if (!approval) {
+			return;
+		}
+		state!.planApproval = undefined;
+		try {
+			approval.editor.removeOverlayWidget(approval.widget);
+		} catch {
+			// the editor is gone already (tab closed / disposed)
+		}
+	}
+
+	// ==================== Phase 224: the plan doc's To-dos block ====================
+
+	/**
+	 * Phase 224: Cursor-parity To-dos block — a content widget pinned under
+	 * the plan doc's last line: the "N To-dos [+ New]" checklist (rows
+	 * mirror the plan steps; plan_step events tick them live) and the
+	 * "Referenced by 1 Agent" author row (the creating conversation;
+	 * + New spawns a fresh agent seeded with the plan reference). The
+	 * re-anchor follows the doc's growth (a layout pass per model change);
+	 * the block dies with the doc's tab (editor onDidDispose) or the pane
+	 * (turnRecordDisposables), and a newer plan's mount replaces it.
+	 */
+	private mountPlanTodosWidget(conversation: VibeAIConversation, plan: IVibeAIPlan, editor: ICodeEditor): void {
+		const model = editor.getModel();
+		if (!model) {
+			return;
+		}
+		this.disposePlanTodosWidget(conversation);
+		const dom = $('.vibe-ai-plan-todos');
+		const header = DOM.append(dom, $('.vibe-ai-plan-todos-header'));
+		const count = DOM.append(header, $('span.vibe-ai-plan-todos-count'));
+		let todoCount = plan.steps.length;
+		count.textContent = localize('vibeAIChat.planTodosCount', "{0} To-dos", todoCount);
+		const addNew = DOM.append(header, $('span.vibe-ai-plan-todos-add'));
+		addNew.textContent = localize('vibeAIChat.planTodosAdd', "+ New");
+		const list = DOM.append(dom, $('.vibe-ai-plan-todos-list'));
+		const rows = new Map<number, HTMLElement>();
+		for (const step of plan.steps) {
+			const row = DOM.append(list, $('.vibe-ai-plan-todos-item'));
+			row.dataset['step'] = String(step.id);
+			const icon = DOM.append(row, $('span.codicon.vibe-ai-plan-todos-icon'));
+			icon.setAttribute('aria-hidden', 'true');
+			// Pending until its plan_step_start arrives (same icon set as
+			// the chat card's step rows).
+			icon.classList.add('codicon-circle-large-outline');
+			const label = DOM.append(row, $('span.vibe-ai-plan-todos-label'));
+			label.textContent = step.title;
+			rows.set(step.id, row);
+		}
+		// "Referenced by 1 Agent [+ New]" — the creating conversation is the
+		// reference; + New spawns a fresh agent (new conversation, project
+		// inherited) whose first message works through the plan.
+		const refSection = DOM.append(dom, $('.vibe-ai-plan-todos-ref'));
+		const refHeader = DOM.append(refSection, $('.vibe-ai-plan-todos-ref-header'));
+		refHeader.textContent = localize('vibeAIChat.planTodosReferenced', "Referenced by {0} Agent", 1);
+		const refAdd = DOM.append(refHeader, $('span.vibe-ai-plan-todos-add'));
+		refAdd.textContent = localize('vibeAIChat.planTodosAdd', "+ New");
+		const author = DOM.append(refSection, $('.vibe-ai-plan-todos-author'));
+		author.textContent = conversation.title || 'VibeCoding';
+		// + New (To-dos): appends an editable checkbox line to the doc —
+		// the same `- [ ] N. ` shape the progress helpers read back.
+		conversation.turnRecordDisposables.add(DOM.addDisposableListener(addNew, DOM.EventType.CLICK, e => {
+			e.preventDefault();
+			e.stopPropagation();
+			todoCount++;
+			count.textContent = localize('vibeAIChat.planTodosCount', "{0} To-dos", todoCount);
+			const lastLine = model.getLineCount();
+			const lastCol = model.getLineMaxColumn(lastLine);
+			model.pushEditOperations(
+				[],
+				[{ range: new Range(lastLine, lastCol, lastLine, lastCol), text: `\n- [ ] ${todoCount}. ` }],
+				() => null
+			);
+			editor.focus();
+			const line = model.getLineCount();
+			editor.setPosition({ lineNumber: line, column: model.getLineMaxColumn(line) });
+		}));
+		// + New (Referenced by): a fresh agent on this plan.
+		conversation.turnRecordDisposables.add(DOM.addDisposableListener(refAdd, DOM.EventType.CLICK, e => {
+			e.preventDefault();
+			e.stopPropagation();
+			if (!conversation.planDocPath) {
+				return;
+			}
+			void this.sendFromHub(
+				localize('vibeAIChat.planTodosSpawn',
+					"Execute the plan in {0}: work through its to-dos in order, one at a time.", conversation.planDocPath),
+				conversation.workspaceRoot
+			);
+		}));
+		const widget: IContentWidget = {
+			getId: () => `vibeAI.planTodos.${conversation.id}`,
+			getDomNode: () => dom,
+			getPosition: () => {
+				const m = editor.getModel();
+				if (!m) {
+					return null;
+				}
+				const last = m.getLineCount();
+				return {
+					position: { lineNumber: last, column: m.getLineMaxColumn(last) },
+					preference: [ContentWidgetPositionPreference.BELOW]
+				};
+			}
+		};
+		editor.addContentWidget(widget);
+		conversation.planTodos = { editor, widget, rows, list };
+		// Follow the doc's growth: every content change (stream chunks,
+		// hand edits, + New appends) re-anchors the block under the new
+		// last line.
+		conversation.turnRecordDisposables.add(model.onDidChangeContent(() => {
+			try {
+				editor.layoutContentWidget(widget);
+			} catch {
+				// the editor is gone already
+			}
+		}));
+		// The doc's tab closed — the block dies with the editor.
+		conversation.turnRecordDisposables.add(editor.onDidDispose(() => {
+			conversation.planTodos = undefined;
+		}));
+	}
+
+	/**
+	 * Phase 224: removes the plan doc's To-dos block — a newer plan's
+	 * mount replaces it; the block otherwise dies with the doc's editor
+	 * (onDidDispose) or the pane (turnRecordDisposables).
+	 */
+	private disposePlanTodosWidget(conversation: VibeAIConversation): void {
+		const todos = conversation.planTodos;
+		if (!todos) {
+			return;
+		}
+		conversation.planTodos = undefined;
+		try {
+			todos.editor.removeContentWidget(todos.widget);
+		} catch {
+			// the editor is gone already (tab closed / disposed)
+		}
 	}
 
 	/**
@@ -3293,9 +4149,96 @@ export class VibeAIChatPane extends ViewPane {
 		if (status === 'awaiting') {
 			this.renderPlanActions(conversation, card, plan);
 		}
+		// Phase 213: the plan doc link (Cursor-parity plan-as-doc) — the
+		// execute phase wrote the plan doc (.vibe/plans since Phase 221) and
+		// checks steps off in it; the link opens it in the editor. The
+		// awaiting card has no doc yet (written during planning).
+		if (status !== 'awaiting' && conversation.planDocPath) {
+			const docLink = DOM.append(card, $('a.vibe-ai-plan-doc-link'));
+			docLink.textContent = localize('vibeAIChat.planDocLink', "View Plan");
+			docLink.title = conversation.planDocPath;
+			this.conversationPlanDisposables(conversation).add(DOM.addDisposableListener(docLink, DOM.EventType.CLICK, e => {
+				e.preventDefault();
+				e.stopPropagation();
+				this.openFile(conversation.planDocPath!);
+			}));
+		}
 		// Executed plans show the recorded per-step results.
 		if (status === 'executed') {
 			this.applyPlanResults(card, plan, results ?? { stepsDone: [], stepsFailed: [] });
+		}
+	}
+
+	/**
+	 * Phase 221: the Cursor-parity decision card — replaces the 218 slim
+	 * bar (user spec: the chat keeps a "Created Plan" card like Cursor's:
+	 * small label, the plan title, a steps preview, then a footer with
+	 * View Plan + the shared Build / Cancel actions). Reuses the card's
+	 * action buttons and the planCardRoot slot, so cancelPlan /
+	 * executePlanFromCard / plan_start's card swap keep working on it
+	 * unchanged.
+	 */
+	private renderPlanApprovalBar(conversation: VibeAIConversation, parent: HTMLElement, plan: IVibeAIPlan): void {
+		const state = conversation.stream;
+		// A re-render replaces the previous card (same slot as the plan card).
+		if (state?.planCardRoot) {
+			state.planCardRoot.remove();
+			state.planCardRoot = undefined;
+			state.planProgress = undefined;
+			state.planStepRows = undefined;
+		}
+		const bar = DOM.append(parent, $('.vibe-ai-plan-bar.vibe-ai-created-plan'));
+		bar.classList.add('vibe-ai-plan-awaiting');
+		const label = DOM.append(bar, $('span.vibe-ai-plan-bar-label'));
+		label.textContent = localize('vibeAIChat.createdPlan', "Created Plan");
+		const title = DOM.append(bar, $('.vibe-ai-plan-bar-title'));
+		title.textContent = plan.summary && plan.summary.length > 0
+			? plan.summary
+			: localize('vibeAIChat.planStepsCount', "{0} steps", plan.steps.length);
+		const preview = plan.steps.slice(0, 3).map(step => `${step.id}. ${step.title}`).join('；');
+		if (preview) {
+			const desc = DOM.append(bar, $('.vibe-ai-plan-bar-desc'));
+			desc.textContent = plan.steps.length > 3 ? `${preview}…` : preview;
+			desc.title = desc.textContent ?? '';
+		}
+		const footer = DOM.append(bar, $('.vibe-ai-plan-bar-footer'));
+		// The doc is already on disk (streamed during the plan phase) — the
+		// link opens it in the editor (Cursor-parity plan-as-doc).
+		if (conversation.planDocPath) {
+			const docLink = DOM.append(footer, $('a.vibe-ai-plan-doc-link.vibe-ai-plan-bar-link'));
+			docLink.textContent = localize('vibeAIChat.planDocLink', "View Plan");
+			docLink.title = conversation.planDocPath;
+			this.conversationPlanDisposables(conversation).add(DOM.addDisposableListener(docLink, DOM.EventType.CLICK, e => {
+				e.preventDefault();
+				e.stopPropagation();
+				this.openFile(conversation.planDocPath!);
+			}));
+		}
+		if (state) {
+			state.planCardRoot = bar;
+			state.planProgress = undefined;
+			state.planStepRows = undefined;
+		}
+		this.renderPlanActions(conversation, footer, plan);
+	}
+
+	/**
+	 * Phase 218: folds the awaiting approval bar (or a restored awaiting
+	 * card) to its cancelled state — actions removed, dimmed, with a short
+	 * note. Shared by the bar's Cancel click (works on a restored card
+	 * with no live stream state), cancelPlan and the interrupt path (the
+	 * awaiting guard in finishStreaming would otherwise keep it open).
+	 */
+	private foldPlanAwaitingToCancelled(root: HTMLElement | undefined): void {
+		if (!root) {
+			return;
+		}
+		root.classList.remove('vibe-ai-plan-awaiting');
+		root.classList.add('vibe-ai-plan-cancelled');
+		root.querySelector('.vibe-ai-plan-actions')?.remove();
+		if (root.classList.contains('vibe-ai-plan-bar') && !root.querySelector('.vibe-ai-plan-bar-note')) {
+			const note = DOM.append(root, $('span.vibe-ai-plan-bar-note'));
+			note.textContent = localize('vibeAIChat.planBarCancelled', "Cancelled — the plan doc is kept in .vibe/plans");
 		}
 	}
 
@@ -3321,11 +4264,9 @@ export class VibeAIChatPane extends ViewPane {
 		this.conversationPlanDisposables(conversation).add(DOM.addDisposableListener(cancel, DOM.EventType.CLICK, e => {
 			e.preventDefault();
 			e.stopPropagation();
-			// Fold this card to its cancelled state (also works on a
+			// Fold this card/bar to its cancelled state (also works on a
 			// restored card, where there is no live turn to close).
-			card.classList.remove('vibe-ai-plan-awaiting');
-			card.classList.add('vibe-ai-plan-cancelled');
-			actions.remove();
+			this.foldPlanAwaitingToCancelled(card);
 			this.cancelPlan(conversation);
 		}));
 	}
@@ -3371,7 +4312,8 @@ export class VibeAIChatPane extends ViewPane {
 			state.lastBlockKind = 'tools';
 		}
 		state.workAnyTool = true;
-		const card = DOM.append(state.workSteps ?? state.currentAssistantRow, $('.vibe-ai-approval-card'));
+		// Phase 231: a permission gate mid-step lands in that step's group.
+		const card = DOM.append(this.planActivityRoot(state) ?? state.currentAssistantRow, $('.vibe-ai-approval-card'));
 		card.dataset['approvalId'] = approval.id;
 		const header = DOM.append(card, $('.vibe-ai-approval-header'));
 		const icon = DOM.append(header, $('span.codicon.codicon-debug-disconnect.vibe-ai-approval-icon'));
@@ -3497,15 +4439,15 @@ export class VibeAIChatPane extends ViewPane {
 	}
 
 	/**
-	 * Phase 121: the model asked clarifying questions without stopping
-	 * work (ask_questions) — renders one question card per event inside
-	 * the turn's Worked shell (Cursor-parity Ask questions tool). The
-	 * loop does NOT wait: the tool result already says "sent — continue
-	 * other steps", so the card stays live while the agent works on.
-	 * The answer (or a picked option) goes out via
-	 * {@link sendAgentAnswerFromCard} → `steer()` with the turn's
-	 * session id and injects at the next tool boundary (the Steered
-	 * bubble confirms it); the card then marks itself answered.
+	 * Phase 121/237: the model asked clarifying questions (ask_questions)
+	 * — renders one question card per event inside the turn's Worked
+	 * shell (Cursor-parity Ask questions tool). Since Phase 237 the turn
+	 * PARKS at the question gate until the card's answer resolves it —
+	 * the loop does not continue, and the turn cannot finish with the
+	 * question unanswered. The answer (or a picked option) goes out via
+	 * {@link sendAgentAnswerFromCard} → `resolveAgentQuestion()` (the
+	 * gate's pending id rides the card) and feeds back to the model as
+	 * the tool's result; the card then marks itself answered.
 	 */
 	private handleAgentQuestions(conversation: VibeAIConversation, data: IVibeAIStreamData): void {
 		const state = conversation.stream;
@@ -3525,7 +4467,8 @@ export class VibeAIChatPane extends ViewPane {
 		}
 		state.workAnyTool = true;
 		const disposables = this.conversationPlanDisposables(conversation);
-		const card = DOM.append(state.workSteps ?? state.currentAssistantRow, $('.vibe-ai-questions-card'));
+		// Phase 231: a questions card mid-step lands in that step's group.
+		const card = DOM.append(this.planActivityRoot(state) ?? state.currentAssistantRow, $('.vibe-ai-questions-card'));
 		if (questions.id.length > 0) {
 			card.dataset['questionsId'] = questions.id;
 		}
@@ -3542,6 +4485,11 @@ export class VibeAIChatPane extends ViewPane {
 		const send = DOM.append(answerRow, $('button.vibe-ai-questions-send')) as HTMLButtonElement;
 		send.textContent = localize('vibeAIChat.agentQuestionsSend', "Send");
 		send.type = 'button';
+		// One pick per question (Phase 237): the pick highlights its chip
+		// (click a sibling to switch, click again to deselect) and the
+		// input box stays free for notes beyond the offered options —
+		// Send collects the picks + the notes, either alone sends.
+		const picks = questions.items.map(() => '');
 		questions.items.forEach((item, index) => {
 			const itemEl = DOM.append(list, $('.vibe-ai-questions-item'));
 			const text = DOM.append(itemEl, $('.vibe-ai-questions-text'));
@@ -3555,30 +4503,37 @@ export class VibeAIChatPane extends ViewPane {
 					chip.textContent = option;
 					chip.type = 'button';
 					chip.title = option;
-					// Picking an option fills the answer box — the user
-					// can still edit before sending.
 					disposables.add(DOM.addDisposableListener(chip, DOM.EventType.CLICK, e => {
 						e.preventDefault();
 						e.stopPropagation();
 						if (input.disabled) {
 							return;
 						}
-						input.value = option;
-						input.focus();
+						const wasPicked = chip.classList.contains('selected');
+						for (const sibling of options.children) {
+							(sibling as HTMLElement).classList.remove('selected');
+						}
+						if (wasPicked) {
+							picks[index] = '';
+						} else {
+							chip.classList.add('selected');
+							picks[index] = option;
+						}
 					}));
 				}
 			}
 		});
+		const sendAnswer = (): void => this.sendAgentAnswerFromCard(card, conversation, input, send, picks);
 		disposables.add(DOM.addDisposableListener(send, DOM.EventType.CLICK, e => {
 			e.preventDefault();
 			e.stopPropagation();
-			this.sendAgentAnswerFromCard(card, conversation, input, send);
+			sendAnswer();
 		}));
 		disposables.add(DOM.addDisposableListener(input, DOM.EventType.KEY_DOWN, e => {
 			if (e.key === 'Enter') {
 				e.preventDefault();
 				e.stopPropagation();
-				this.sendAgentAnswerFromCard(card, conversation, input, send);
+				sendAnswer();
 			}
 		}));
 		// An unanswered question is as reachable as a pending approval —
@@ -3587,51 +4542,127 @@ export class VibeAIChatPane extends ViewPane {
 	}
 
 	/**
-	 * Phase 121: sends the card's answer for the running Agent turn
-	 * (`steer()` → `POST /api/chat/agent/steer`, session id = the
-	 * conversation's store session) and marks the card answered. The
-	 * `steered` event (the injection echo) renders the answer as the
-	 * Steered bubble in the timeline when it lands at the next tool
-	 * boundary. Failure (404 — the turn finished between the render and
-	 * this call, or a network error): the input is restored so nothing
-	 * is lost and an error note explains how to send it.
+	 * Phase 121/237: sends the card's answer for the parked Agent turn —
+	 * the card carries the gate's pending id, so `resolveAgentQuestion()`
+	 * wakes the gate directly and the answer feeds back as the tool's
+	 * result (the turn continues with it). The answer is the picked
+	 * options (per question, `picks`) plus the input's free-text notes
+	 * (anything beyond the offered options) — either alone sends. Fallbacks
+	 * keep the older paths alive: a gone gate (answered elsewhere, backend
+	 * restart, a restored old card) but a still-running turn goes out via
+	 * `steer()` (Phase 121 behavior — injects at the next tool boundary,
+	 * the `steered` event renders the Steered bubble); a finished turn
+	 * shows the not-delivered note so the user can press Enter to send it
+	 * as a new message. Failure at either stage restores the input so
+	 * nothing is lost.
 	 */
-	private sendAgentAnswerFromCard(card: HTMLElement, conversation: VibeAIConversation, input: HTMLInputElement, send: HTMLButtonElement): void {
-		const text = input.value.trim();
+	private sendAgentAnswerFromCard(card: HTMLElement, conversation: VibeAIConversation, input: HTMLInputElement, send: HTMLButtonElement, picks: string[]): void {
+		const notes = input.value.trim();
+		const multi = picks.length > 1;
+		const picked = picks
+			.map((pick, index) => (pick ? (multi ? `${index + 1}. ${pick}` : pick) : ''))
+			.filter(part => part.length > 0)
+			.join('；');
+		const text = notes.length > 0
+			? (picked.length > 0 ? `${picked}——${notes}` : notes)
+			: picked;
 		if (text.length === 0) {
 			return;
 		}
 		const state = conversation.stream;
 		input.disabled = true;
 		send.disabled = true;
-		// Same in-flight contract as steerActiveTurn — if the turn ends
-		// before the tool boundary injects the answer, done's
+		// Phase 121 fallback path (the resolve below is the Phase 237
+		// primary): same in-flight contract as steerActiveTurn — if the
+		// turn ends before the tool boundary injects the answer, done's
 		// pending_steer preserves it (the echo removes the entry).
-		state?.inflightSteers.push(text);
-		void this.vibeAIService.steer(conversation.sessionId, text).then(steered => {
-			if (steered) {
-				// Queued for injection — mark the card answered. The
-				// Steered bubble renders the answer in the timeline
-				// when it lands at the next tool boundary.
-				card.classList.add('answered');
-				card.querySelector('.vibe-ai-questions-answer')?.remove();
+		const steerFallback = (): void => {
+			state?.inflightSteers.push(text);
+			void this.vibeAIService.steer(conversation.sessionId, text).then(steered => {
+				if (steered) {
+					// Queued for injection — mark the card answered. The
+					// Steered bubble renders the answer in the timeline
+					// when it lands at the next tool boundary.
+					this.markQuestionCardAnswered(card, text);
+					return;
+				}
+				// Not delivered — restore the card so the user keeps
+				// their words.
+				const index = state?.inflightSteers.indexOf(text) ?? -1;
+				if (index >= 0 && state) {
+					state.inflightSteers.splice(index, 1);
+				}
+				input.disabled = false;
+				send.disabled = false;
+				input.value = text;
 				const note = DOM.append(card, $('.vibe-ai-questions-note'));
-				note.textContent = localize('vibeAIChat.agentQuestionsAnswered', "Answered — the agent will see it at the next tool boundary");
-				return;
-			}
-			// Not delivered — restore the card so the user keeps
-			// their words.
-			const index = state?.inflightSteers.indexOf(text) ?? -1;
-			if (index >= 0 && state) {
-				state.inflightSteers.splice(index, 1);
-			}
-			input.disabled = false;
-			send.disabled = false;
-			input.value = text;
-			const note = DOM.append(card, $('.vibe-ai-questions-note'));
-			note.classList.add('error');
-			note.textContent = localize('vibeAIChat.agentQuestionsNotDelivered', "Not delivered — the turn already finished; press Enter to send as a new message");
-		});
+				note.classList.add('error');
+				note.textContent = localize('vibeAIChat.agentQuestionsNotDelivered', "Not delivered — the turn already finished; press Enter to send as a new message");
+			});
+		};
+		const questionId = card.dataset['questionsId'] ?? '';
+		if (questionId.length > 0) {
+				// Phase 237 primary: wake the gate the turn parks on. The
+				// agent_question_answered event folds the card too — the fold
+				// order with this response is a race (the SSE event usually
+				// wins), markQuestionCardAnswered itself is idempotent so
+				// either order lands exactly one Answered note.
+				void this.vibeAIService.resolveAgentQuestion(questionId, text).then(resolved => {
+					if (resolved) {
+						this.markQuestionCardAnswered(card, text);
+					} else {
+						steerFallback();
+					}
+				});
+		} else {
+			// No gate id on the card (defensive) — Phase 121 steer path.
+			steerFallback();
+		}
+	}
+
+	/**
+	 * Phase 237: folds a question card to its answered state — the answer
+	 * reached the gate (the turn continues with it as the tool's result).
+	 * The sent content (picks + notes) shows under the note so the user
+	 * can confirm at a glance what went out; the picked chip keeps its
+	 * highlight. Phase 243: idempotent at the SOURCE — the resolve POST's
+	 * response and the agent_question_answered SSE event race each other
+	 * (either can land first; the event usually wins), so the first fold
+	 * claims the card's `answered` class and every later call is a no-op
+	 * (the first answer text stays; a duplicate note is never appended).
+	 */
+	private markQuestionCardAnswered(card: HTMLElement, answer: string): void {
+		if (card.classList.contains('answered')) {
+			return;
+		}
+		card.classList.add('answered');
+		card.querySelector('.vibe-ai-questions-answer')?.remove();
+		const note = DOM.append(card, $('.vibe-ai-questions-note'));
+		note.textContent = localize('vibeAIChat.agentQuestionsAnswered', "Answered — the agent continues with your answer");
+		if (answer.length > 0) {
+			const sent = DOM.append(card, $('.vibe-ai-questions-sent'));
+			sent.textContent = answer;
+		}
+	}
+
+	/**
+	 * Phase 237: the gate woke with the user's answer (`agent_question_
+	 * answered` event, id = the gate's pending id) — fold the matching
+	 * card. Idempotent: the card's own Send already folded it; this
+	 * catches answers sent from another surface (Agents Hub / Agent
+	 * Window) or a resolve response that lost the race with the event.
+	 */
+	private handleAgentQuestionAnswered(conversation: VibeAIConversation, data: IVibeAIStreamData): void {
+		const state = conversation.stream;
+		const answered = data.questionAnswered;
+		if (!state || !state.currentAssistantRow || !answered || answered.id.length === 0) {
+			return;
+		}
+		const card = state.currentAssistantRow.querySelector(`.vibe-ai-questions-card[data-questions-id="${answered.id}"]`) as HTMLElement | null;
+		if (!card || card.classList.contains('answered')) {
+			return;
+		}
+		this.markQuestionCardAnswered(card, answered.answer);
 	}
 
 	/**
@@ -3643,10 +4674,15 @@ export class VibeAIChatPane extends ViewPane {
 	 */
 	private executePlanFromCard(conversation: VibeAIConversation, plan: IVibeAIPlan): void {
 		const state = conversation.stream;
+		// Phase 219: the doc editor's approval widget dies with the pick —
+		// the executing plan card in the chat takes the progress over.
+		this.disposePlanApprovalWidget(state);
 		if (state && state.planPhase === 'awaiting' && state.pendingPlan === plan && state.currentAssistantRow) {
-			// Live awaiting turn: keep streaming the execute phase into it
-			// (the identity check binds the card's own plan — a stale
-			// restored card's plan opens a fresh turn below instead).
+			// The card-to-done window (Phase 222: the plan turn finishes the
+			// moment the card lands — this live branch only catches a Build
+			// click before the done event arrives): keep streaming the
+			// execute phase into it (the identity check binds the card's own
+			// plan — a stale restored card's plan opens a fresh turn below).
 			const requestId = `vibe-${++this.requestCounter}`;
 			state.requestId = requestId;
 			state.pendingPlan = plan;
@@ -3660,8 +4696,9 @@ export class VibeAIChatPane extends ViewPane {
 			this.renderTabs();
 			this.dispatchPlanExecute(conversation, requestId, plan);
 		} else {
-			// Restored awaiting card: the original turn has no live stream
-			// — a fresh assistant turn renders the execute phase.
+			// Phase 222 (the norm): the plan turn already ended at the card —
+			// Build opens a fresh assistant turn rendering the execute phase
+			// (same path a restored awaiting card always took).
 			const requestId = `vibe-${++this.requestCounter}`;
 			this.startAssistantTurn(conversation, requestId, '', undefined);
 			const fresh = conversation.stream;
@@ -3681,17 +4718,50 @@ export class VibeAIChatPane extends ViewPane {
 	}
 
 	/**
+	 * Phase 226: the plan doc pane's Build — executes the plan on its
+	 * OWNING agent (the conversation whose plan doc this file is: activate
+	 * its tab, then the same fresh-turn path the decision card's Build
+	 * takes). A doc without an owning conversation (a plan file opened
+	 * standalone) spawns a fresh agent via the hub send path.
+	 */
+	async buildPlanFromDoc(docPath: string, plan: IVibeAIPlan): Promise<void> {
+		const normalized = docPath.replace(/\\/g, '/').toLowerCase();
+		const owner = this.conversations.find(c => {
+			if (!c.planDocPath) {
+				return false;
+			}
+			const rel = c.planDocPath.replace(/\\/g, '/').toLowerCase();
+			return normalized === rel || normalized.endsWith(`/${rel}`);
+		});
+		if (owner) {
+			this.setActiveConversation(owner.id);
+			this.executePlanFromCard(owner, plan);
+			return;
+		}
+		await this.sendFromHub(
+			localize('vibeAIChat.planTodosSpawn',
+				"Execute the plan in {0}: work through its to-dos in order, one at a time.", docPath),
+			this.activeWorkspaceRoot()
+		);
+	}
+
+	/**
 	 * Phase 71: renders a restored plan card from a persisted turn record
 	 * (history restore): executed plans show the recorded per-step
 	 * results, cancelled ones their gray state — an `awaiting` status
-	 * (never persisted in practice, defensive) keeps the buttons so the
-	 * plan can still be executed after a reload.
+	 * (persisted since Phase 222: the plan turn ends at the decision
+	 * card) renders the Created Plan decision card so the plan can still
+	 * be executed after a reload.
 	 */
 	private renderRestoredPlanCard(conversation: VibeAIConversation, row: HTMLElement, turn: IVibeAIPersistedTurn): void {
 		if (!turn.plan || turn.plan.steps.length === 0) {
 			return;
 		}
 		const status: VibeAIPlanCardStatus = turn.planStatus ?? 'executed';
+		if (status === 'awaiting') {
+			this.renderPlanApprovalBar(conversation, row, turn.plan);
+			return;
+		}
 		this.renderPlanCard(conversation, row, turn.plan, status, turn.planResults);
 	}
 
@@ -3750,6 +4820,11 @@ export class VibeAIChatPane extends ViewPane {
 			// execute phase (if any) — a re-execution keeps the backend's
 			// plan-file record in sync; the inline plan object still wins.
 			...(conversation.planPath ? { planFile: conversation.planPath } : {}),
+			// Phase 218: the plan doc streamed to disk during the plan
+			// phase — the execute phase skips its approval-time rewrite
+			// (a rewrite would wipe checkboxes ticked while awaiting).
+			// planFile wins on the backend when both are present.
+			...(conversation.planDocPath ? { planDocPath: conversation.planDocPath } : {}),
 			// Phase 147: the editor's opened folder (same semantics as the
 			// chat request's workspaceRoot). Phase 177: conversation-bound
 			// folder wins (Agent Window).
@@ -3769,21 +4844,48 @@ export class VibeAIChatPane extends ViewPane {
 			return;
 		}
 		state.planPhase = undefined;
-		// Phase 151: clear the backend turn state with the flag — this
-		// path finishes the turn normally (interrupted=false) and a stale
-		// awaiting_plan_approval would keep it open via the state-driven
-		// guard in finishStreaming.
+		// Phase 222: the awaiting hold is retired — a live awaiting state
+		// only exists in the card-to-done window; clearing is defensive.
 		state.turnState = undefined;
-		// Fold the card to its cancelled state (actions removed).
-		if (state.planCardRoot) {
-			state.planCardRoot.classList.remove('vibe-ai-plan-awaiting');
-			state.planCardRoot.classList.add('vibe-ai-plan-cancelled');
-			state.planCardRoot.querySelector('.vibe-ai-plan-actions')?.remove();
-		}
+		// Phase 219: the doc editor's approval widget folds with the bar.
+		this.disposePlanApprovalWidget(state);
+		// Fold the bar/card to its cancelled state (actions removed, note).
+		this.foldPlanAwaitingToCancelled(state.planCardRoot);
 		this.finishStreaming(conversation, state.requestId);
 	}
 
 	/** Phase 71: the execute phase kicked off — the card becomes progress. */
+	/**
+	 * Phase 231: the container the CURRENT plan step's activity appends
+	 * into — the active step group's steps container during plan execution
+	 * (narration, Thought blocks, tool cards, steers, approval gates all
+	 * land inside their step's group), the Worked shell's steps otherwise.
+	 * Undefined with no shell yet (the row stays the fallback — unchanged
+	 * for ask/agent turns, which never open a group).
+	 */
+	private planActivityRoot(state: VibeAIStreamState): HTMLElement | undefined {
+		return state.planStepGroup?.steps ?? state.workSteps;
+	}
+
+	/**
+	 * Phase 231: settles an active step group at a turn boundary — the
+	 * spinner would freeze mid-run otherwise. plan_done / finishStreaming
+	 * (interrupt, transport death) call this: the icon drops to the
+	 * cancelled mark, the duration freezes into the meta span. No fold —
+	 * the shell's own settle covers the collapse; the group keeps its
+	 * activity for re-expansion.
+	 */
+	private settleActivePlanStepGroup(conversation: VibeAIConversation): void {
+		const state = conversation.stream;
+		const group = state?.planStepGroup;
+		if (!state || !group) {
+			return;
+		}
+		state.planStepGroup = undefined;
+		group.icon.className = 'codicon vibe-ai-plan-step-group-icon codicon-circle-slash';
+		group.meta.textContent = localize('vibeAIChat.worked', "Worked for {0}", getDurationString(Date.now() - group.startedAt));
+	}
+
 	private handlePlanStart(conversation: VibeAIConversation, data: IVibeAIStreamData): void {
 		const state = conversation.stream;
 		const row = state?.currentAssistantRow;
@@ -3791,6 +4893,9 @@ export class VibeAIChatPane extends ViewPane {
 			return;
 		}
 		state.planPhase = 'executing';
+		// Phase 219: defensive — an approval widget still up when execution
+		// begins folds with the card swap (no approval picks mid-execution).
+		this.disposePlanApprovalWidget(state);
 		// Phase 157: capture the persisted plan file (Cursor plan-as-file
 		// parity) — the conversation keeps carrying it as planFile so
 		// later agent turns work off the settled plan (restore parity via
@@ -3798,6 +4903,24 @@ export class VibeAIChatPane extends ViewPane {
 		if (data.planPath) {
 			conversation.planPath = data.planPath;
 			this.sessionStore.setPlanPath(conversation.sessionId, data.planPath);
+		}
+		// Phase 213: capture the plan doc (PLAN.md at the project root,
+		// Cursor-parity plan-as-doc) — the plan card links to it.
+		// Phase 232: persist it (like the agreed plan file) so a restored
+		// tab keeps ticking progress on the SAME doc after a restart.
+		if (data.planDocPath) {
+			conversation.planDocPath = data.planDocPath;
+			this.sessionStore.setPlanDocPath(conversation.sessionId, data.planDocPath);
+		}
+		// Phase 215: re-open the Worked shell the research settle folded —
+		// the steps' tool cards keep appending into it. Fresh "Working…"
+		// label (textContent assignment also drops the research settle's
+		// counts suffix); the frozen duration clears so the plan_done
+		// settle covers the whole turn (research + execution).
+		if (state.workShell && state.workLabel) {
+			state.workFoldedMs = undefined;
+			state.workLabel.textContent = localize('vibeAIChat.working', "Working…");
+			state.workShell.open = true;
 		}
 		const plan = data.plan ?? state.pendingPlan;
 		if (plan) {
@@ -3819,12 +4942,52 @@ export class VibeAIChatPane extends ViewPane {
 		if (!state || !step) {
 			return;
 		}
+		// Phase 215: fold the previous step's open tool cards — each step's
+		// activity collapses when the next begins (a failed step's cards
+		// stay open through its own run for debugging; its row keeps the
+		// error mark).
+		this.foldOpenToolCards(conversation);
+		// Phase 231: the step's activity collects in its own collapsible
+		// group inside the Worked shell — plan_step_done folds the whole
+		// step to its summary row ("Step N — title · Worked for Xs ·
+		// counts"). The shell may not exist yet (the fresh execute turn's
+		// first step) — create it; the eager thinking run and the plan card
+		// move inside ahead of the group, arrival order kept.
+		this.ensureWorkShell(conversation);
+		if (state.workSteps) {
+			const root = DOM.append(state.workSteps, $('details.vibe-ai-plan-step-group')) as HTMLDetailsElement;
+			root.open = true;
+			root.classList.add('running');
+			const summary = DOM.append(root, $('summary'));
+			const chevron = DOM.append(summary, $('span.codicon.codicon-chevron-right.vibe-ai-plan-step-group-chevron'));
+			chevron.setAttribute('aria-hidden', 'true');
+			// Phase 235：補 codicon-modifier-spin——1.142 基底 codicon CSS 只給
+			// 「.codicon-loading.codicon-modifier-spin」配對動畫，裸 codicon-loading
+			// 是靜態弧線（plan 卡步驟圈圈從未轉過的根因）；1.145 同步雖補了裸規則，
+			// 配對寫法對新舊兩代 CSS 都成立
+			const icon = DOM.append(summary, $('span.codicon.codicon-loading.codicon-modifier-spin.vibe-ai-plan-step-group-icon'));
+			icon.setAttribute('aria-hidden', 'true');
+			const label = DOM.append(summary, $('span.vibe-ai-plan-step-group-label'));
+			label.textContent = localize('vibeAIChat.planStepGroupLabel', "Step {0} — {1}", step.step, step.title ?? '');
+			const meta = DOM.append(summary, $('span.vibe-ai-plan-step-group-meta'));
+			const steps = DOM.append(root, $('.vibe-ai-plan-step-group-steps'));
+			state.planStepGroup = { root, steps, icon, label, meta, stepId: step.step, startedAt: Date.now() };
+		}
 		const row = state.planStepRows?.get(step.step);
 		if (row) {
 			row.classList.add('running');
 			const icon = row.querySelector('.vibe-ai-plan-step-icon');
 			if (icon) {
-				icon.className = 'codicon codicon-loading vibe-ai-plan-step-icon';
+				icon.className = 'codicon codicon-loading codicon-modifier-spin vibe-ai-plan-step-icon';
+			}
+		}
+		// Phase 224: the plan doc's To-dos block mirrors the running state.
+		const todoRow = conversation.planTodos?.rows.get(step.step);
+		if (todoRow) {
+			todoRow.classList.add('running');
+			const todoIcon = todoRow.querySelector('.vibe-ai-plan-todos-icon');
+			if (todoIcon) {
+				todoIcon.className = 'codicon codicon-loading codicon-modifier-spin vibe-ai-plan-todos-icon';
 			}
 		}
 		if (step.index !== undefined && step.total !== undefined) {
@@ -3851,8 +5014,45 @@ export class VibeAIChatPane extends ViewPane {
 				icon.className = `codicon vibe-ai-plan-step-icon ${failed ? 'codicon-error' : 'codicon-check'}`;
 			}
 		}
+		// Phase 224: the plan doc's To-dos block mirrors the final state.
+		const todoRow = conversation.planTodos?.rows.get(step.step);
+		if (todoRow) {
+			todoRow.classList.remove('running');
+			todoRow.classList.toggle('failed', failed);
+			const todoIcon = todoRow.querySelector('.vibe-ai-plan-todos-icon');
+			if (todoIcon) {
+				todoIcon.className = `codicon vibe-ai-plan-todos-icon ${failed ? 'codicon-error' : 'codicon-check'}`;
+			}
+		}
 		if (step.total !== undefined) {
 			this.updatePlanProgress(conversation, undefined, step.total);
+		}
+		// Phase 231: the step's activity group settles — a clean step folds
+		// to its summary row ("Step N — title · Worked for Xs · Read N
+		// files"); a failed step's group stays OPEN (收合不藏答案 — the
+		// failed run's cards keep their error state visible until the next
+		// step_start folds the cards).
+		const group = state.planStepGroup;
+		if (group && group.stepId === step.step) {
+			state.planStepGroup = undefined;
+			group.root.classList.remove('running');
+			group.root.classList.toggle('failed', failed);
+			group.icon.className = `codicon vibe-ai-plan-step-group-icon ${failed ? 'codicon-error' : 'codicon-check'}`;
+			group.meta.textContent = localize('vibeAIChat.worked', "Worked for {0}", getDurationString(Date.now() - group.startedAt));
+			this.appendWorkedCountsSuffix(group.meta, group.steps, state.toolCards);
+			if (!failed) {
+				// The fold is a scroll event (Phase 172's rule) — preserve
+				// the thread anchor across the collapse.
+				this.preserveScrollAcrossFold(conversation, group.root, group.steps, () => {
+					group.root.open = false;
+				});
+			}
+		}
+		if (!failed) {
+			// Phase 215: a clean step folds its open tool cards (ask/agent
+			// parity — activity folds at completion); a failed step keeps
+			// them open for debugging, the next step_start folds them.
+			this.foldOpenToolCards(conversation);
 		}
 		this.scrollBottom(conversation);
 	}
@@ -3870,6 +5070,13 @@ export class VibeAIChatPane extends ViewPane {
 			conversation.planPath = data.planPath;
 			this.sessionStore.setPlanPath(conversation.sessionId, data.planPath);
 		}
+		// Phase 232: defensive planDocPath capture (same rationale) — the
+		// execute phase ticks progress on this doc, so a restored/reloaded
+		// pane must not lose it.
+		if (data.planDocPath && !conversation.planDocPath) {
+			conversation.planDocPath = data.planDocPath;
+			this.sessionStore.setPlanDocPath(conversation.sessionId, data.planDocPath);
+		}
 		state.planResults = summary
 			? { stepsDone: [...summary.stepsDone], stepsFailed: [...summary.stepsFailed] }
 			: { stepsDone: [], stepsFailed: [] };
@@ -3877,7 +5084,122 @@ export class VibeAIChatPane extends ViewPane {
 			this.applyPlanResults(state.planCardRoot, state.pendingPlan, state.planResults);
 		}
 		this.updatePlanProgress(conversation, summary?.stepsDone.length, summary?.steps ?? 0);
+		// Phase 231: defensive — the last step_done normally cleared the
+		// group; an anomaly path that lands here with one active settles it
+		// before the shell folds (no frozen spinner on re-expansion).
+		this.settleActivePlanStepGroup(conversation);
+		// Phase 215: execution finished — fold the open tool cards and
+		// settle the Worked shell. Phase 236: the settle is plan-specific —
+		// the shell stays OPEN with the summary row removed (the plan card
+		// plus per-step groups ARE the completed look; the ask/agent
+		// collapse-to-one-row no longer applies, user ruling).
+		this.foldOpenToolCards(conversation);
+		this.settlePlanWorkShell(conversation);
 		this.scrollBottom(conversation);
+	}
+
+	/**
+	 * Phase 241 (living plan, Cursor 邊走邊改 parity): the executor called
+	 * update_plan mid-run — the remaining steps were revised (settled
+	 * steps are a contiguous prefix, ids/titles intact). Syncs three
+	 * surfaces: the Worked timeline gets a slim revision row at shell top
+	 * level (the step group's fold never hides it), the plan card's step
+	 * list grows/shrinks in place (settled rows keep their check icons,
+	 * new steps render pending until their plan_step_start), and the plan
+	 * doc's To-dos block gains/loses the matching rows. The doc's checkbox
+	 * lines are rewritten by the backend; the doc pane re-renders from the
+	 * file on its own (onDidChangeContent).
+	 */
+	private handlePlanRevision(conversation: VibeAIConversation, data: IVibeAIStreamData): void {
+		const state = conversation.stream;
+		const revision = data.planRevision;
+		if (!state || !revision || revision.steps.length === 0) {
+			return;
+		}
+		// The pending plan the card re-renders / plan_done roll-up reads —
+		// swapped to the revised list (summary carried over).
+		if (state.pendingPlan) {
+			state.pendingPlan = { summary: state.pendingPlan.summary, steps: revision.steps };
+		}
+		this.ensureWorkShell(conversation);
+		if (state.workSteps) {
+			const row = DOM.append(state.workSteps, $('.vibe-ai-plan-revision'));
+			const icon = DOM.append(row, $('span.codicon.codicon-sync.vibe-ai-plan-revision-icon'));
+			icon.setAttribute('aria-hidden', 'true');
+			const label = DOM.append(row, $('span.vibe-ai-plan-revision-label'));
+			label.textContent = revision.reason
+				? localize('vibeAIChat.planRevisionReason', "Plan revised: {0} ({1} steps)", revision.reason, revision.steps.length)
+				: localize('vibeAIChat.planRevision', "Plan revised ({0} steps)", revision.steps.length);
+		}
+		// Plan card: grow/shrink the step list in place — existing rows keep
+		// their live state (the running step's spinner, settled checks);
+		// rows for dropped ids go, rows for new ids render pending.
+		const stepsRoot = state.planCardRoot?.querySelector<HTMLElement>('.vibe-ai-plan-steps');
+		if (stepsRoot && state.planStepRows) {
+			const keep = new Set(revision.steps.map(step => step.id));
+			for (const [id, row] of Array.from(state.planStepRows)) {
+				if (!keep.has(id)) {
+					row.remove();
+					state.planStepRows.delete(id);
+				}
+			}
+			for (const step of revision.steps) {
+				if (state.planStepRows.has(step.id)) {
+					continue;
+				}
+				const stepRow = DOM.append(stepsRoot, $('.vibe-ai-plan-step'));
+				stepRow.dataset['step'] = String(step.id);
+				const stepIcon = DOM.append(stepRow, $('span.codicon.vibe-ai-plan-step-icon'));
+				stepIcon.setAttribute('aria-hidden', 'true');
+				const stepTitle = DOM.append(stepRow, $('span.vibe-ai-plan-step-title'));
+				stepTitle.textContent = step.title;
+				stepIcon.classList.add('codicon-circle-large-outline');
+				state.planStepRows.set(step.id, stepRow);
+			}
+		}
+		// Plan doc's To-dos block: same grow/shrink (appended rows render
+		// pending; their plan_step_start ticks them like mounted ones).
+		const todos = conversation.planTodos;
+		if (todos) {
+			const todoKeep = new Set(revision.steps.map(step => step.id));
+			for (const [id, row] of Array.from(todos.rows)) {
+				if (!todoKeep.has(id)) {
+					row.remove();
+					todos.rows.delete(id);
+				}
+			}
+			for (const step of revision.steps) {
+				if (todos.rows.has(step.id)) {
+					continue;
+				}
+				const todoRow = DOM.append(todos.list, $('.vibe-ai-plan-todos-item'));
+				todoRow.dataset['step'] = String(step.id);
+				const todoIcon = DOM.append(todoRow, $('span.codicon.vibe-ai-plan-todos-icon'));
+				todoIcon.setAttribute('aria-hidden', 'true');
+				todoIcon.classList.add('codicon-circle-large-outline');
+				const todoLabel = DOM.append(todoRow, $('span.vibe-ai-plan-todos-label'));
+				todoLabel.textContent = step.title;
+				todos.rows.set(step.id, todoRow);
+			}
+		}
+		this.scrollBottom(conversation);
+	}
+
+	/**
+	 * Phase 215: folds every open tool card inside the Worked shell —
+	 * mutating cards keep their body after completion (Phase 148), but at
+	 * plan step boundaries the bodies are noise (ask/agent turns fold the
+	 * same cards at the same moments, Phase 140/141). A card's own
+	 * chevron/header re-opens it.
+	 */
+	private foldOpenToolCards(conversation: VibeAIConversation): void {
+		const state = conversation.stream;
+		if (!state?.workSteps) {
+			return;
+		}
+		for (const card of Array.from(state.workSteps.querySelectorAll('details.vibe-ai-tool-card[open]'))) {
+			(card as HTMLDetailsElement).open = false;
+		}
 	}
 
 	/** Phase 71: updates the plan card's header progress label. */
@@ -3962,7 +5284,9 @@ export class VibeAIChatPane extends ViewPane {
 		}
 		state.toolsRunToolIds.push(id);
 		state.workAnyTool = true;
-		state.workSteps?.appendChild(card.element);
+		// Phase 231: an active plan step's cards append into that step's
+		// group container (planActivityRoot).
+		this.planActivityRoot(state)?.appendChild(card.element);
 		if (data.tool?.name === 'write_file') {
 			state.pendingWriteCardId = id;
 		}
@@ -3986,14 +5310,18 @@ export class VibeAIChatPane extends ViewPane {
 		// timeline never references the removed card.
 		if (data.tool?.status === 'error') {
 			const card = state.toolCards.get(id);
+			// Phase 231: consolidate within the card's OWN container (a step
+			// group during plan execution) — the shell-level sweep misses
+			// group-internal adjacency.
+			const thoughtParent = card?.element.parentElement ?? state.workSteps;
 			card?.dispose();
 			card?.element.remove();
 			state.toolCards.delete(id);
 			state.toolsRunToolIds = state.toolsRunToolIds.filter(toolId => toolId !== id);
 			// Phase 162: the removed card may have sat between two Thought
 			// rows — newly adjacent settled blocks merge (the regroup rule).
-			if (state.workSteps) {
-				this.consolidateThoughtBlocks(state.workSteps);
+			if (thoughtParent) {
+				this.consolidateThoughtBlocks(thoughtParent);
 			}
 		} else {
 			state.toolCards.get(id)?.setResult(data.tool?.status, data.tool?.result, data.tool?.codeChange, data.tool?.output, data.tool?.read);
@@ -4269,7 +5597,8 @@ export class VibeAIChatPane extends ViewPane {
 		// The Steered bubble inside the Working timeline (arrival order =
 		// workflow order). NOT a .vibe-ai-turn-user row — the truncate /
 		// turn-record alignment maps those 1:1 onto dispatched turns.
-		const row = DOM.append(state.workSteps ?? state.currentAssistantRow, $('.vibe-ai-turn-steered'));
+		// Phase 231: a steer injected mid-step lands in that step's group.
+		const row = DOM.append(this.planActivityRoot(state) ?? state.currentAssistantRow, $('.vibe-ai-turn-steered'));
 		const meta = DOM.append(row, $('.vibe-ai-steered-meta'));
 		const icon = DOM.append(meta, $('span.codicon.codicon-arrow-swap.vibe-ai-steered-icon'));
 		icon.setAttribute('aria-hidden', 'true');
@@ -4400,8 +5729,11 @@ export class VibeAIChatPane extends ViewPane {
 	/**
 	 * Phase 51: the backend round hit its per-round output budget
 	 * (finish_reason=length — long reasoning on thinking models squeezes
-	 * out the answer/tool arguments). Surface a subtle truncation note
-	 * (Cursor-style transparency) instead of a silent "(no response)".
+	 * out the answer/tool arguments). Surface a truncation note with a
+	 * Continue chip (Phase 201, styled like the limit-reached chip)
+	 * instead of a silent "(no response)". Phase 200 makes the backend
+	 * auto-continue truncated rounds first — this note now means the
+	 * continuation budget is exhausted and the reply really needs help.
 	 */
 	private handleOutputTruncated(conversation: VibeAIConversation): void {
 		const state = conversation.stream;
@@ -4410,16 +5742,71 @@ export class VibeAIChatPane extends ViewPane {
 		}
 		// Remember for the turn record (persisted — restore parity below).
 		state.outputTruncated = true;
-		// Immediate note below the in-flight answer; an empty answer says it
-		// in the finish placeholder instead (no duplicate note).
+		// Note + chip below the in-flight answer; an empty answer says it
+		// in the finish placeholder (with the chip) instead (no duplicate).
 		if (state.turn.text.length > 0 && state.currentAssistantRow) {
-			const note = DOM.append(state.currentAssistantRow, $('.vibe-ai-output-truncated-note'));
-			note.textContent = localize(
-				'vibeAIChat.outputTruncated',
-				"Response truncated — the model hit its per-round output budget (raise backend LLM_AGENT_MAX_TOKENS)"
-			);
+			this.appendOutputTruncatedNote(conversation, state.currentAssistantRow);
 			this.scrollBottom(conversation);
 		}
+	}
+
+	/**
+	 * Phase 201: the truncation note + Continue chip — Phase 202 styles it
+	 * exactly like the Phase 193 error card (same shape, rounded border,
+	 * warning icon, action pill on the right) but in the warning yellow:
+	 * the reply was cut, not an error. The chip lives on the turn-record
+	 * disposables — it stays functional across later turns and dies with
+	 * the tab / thread rebuild.
+	 */
+	private appendOutputTruncatedNote(conversation: VibeAIConversation, row: HTMLElement): void {
+		const note = DOM.append(row, $('.vibe-ai-output-truncated-note'));
+		const icon = DOM.append(note, $('span.codicon.codicon-warning.vibe-ai-truncated-icon'));
+		icon.setAttribute('aria-hidden', 'true');
+		const label = DOM.append(note, $('span.vibe-ai-output-truncated-text'));
+		label.textContent = localize(
+			'vibeAIChat.outputTruncated',
+			"Response truncated — the model hit its per-round output budget"
+		);
+		label.title = localize(
+			'vibeAIChat.outputTruncatedTitle',
+			"The backend already auto-continued this reply (up to LLM_AGENT_MAX_CONTINUATIONS attempts) and the budget is still exhausted. Continue keeps writing from here; raise backend LLM_AGENT_MAX_TOKENS for a bigger per-round budget."
+		);
+		this.appendTruncationChip(conversation, note);
+	}
+
+	/**
+	 * Phase 201: the truncation Continue chip — Phase 202 renders it as
+	 * the error card's Retry pill (same shape, yellow tint). Shared by the
+	 * note and the empty-answer finish path (pill-only under the
+	 * placeholder).
+	 */
+	private appendTruncationChip(conversation: VibeAIConversation, container: HTMLElement): void {
+		const pill = DOM.append(container, $('span.vibe-ai-truncated-continue'));
+		pill.setAttribute('role', 'button');
+		pill.title = localize('vibeAIChat.truncationContinueTitle', "Continue the reply exactly from where it stopped");
+		DOM.append(pill, $('span.codicon.codicon-refresh'));
+		const pillLabel = DOM.append(pill, $('span'));
+		pillLabel.textContent = localize('vibeAIChat.limitContinue', "Continue");
+		// Same store as the limit-reached chip: the record store — the chip
+		// must survive turn teardown and keep working after later turns.
+		conversation.turnRecordDisposables.add(DOM.addDisposableListener(pill, DOM.EventType.CLICK, e => {
+			e.preventDefault();
+			e.stopPropagation();
+			this.continueAfterTruncation(conversation);
+		}));
+	}
+
+	/**
+	 * Phase 201: the truncation Continue — sends a follow-up that resumes
+	 * the reply from where it stopped (same continuation contract as the
+	 * backend's Phase 200 seed). Same dispatch path as send(): the
+	 * follow-up rides the conversation history the model already sees.
+	 */
+	private continueAfterTruncation(conversation: VibeAIConversation): void {
+		this.continueWithPrompt(conversation, localize(
+			'vibeAIChat.truncationContinuePrompt',
+			"Continue the previous reply exactly from where it stopped — do not repeat content you already produced; finish the remaining part."
+		));
 	}
 
 	/**
@@ -4443,23 +5830,55 @@ export class VibeAIChatPane extends ViewPane {
 		if (!row) {
 			return;
 		}
-		this.appendLimitReachedNote(conversation, row, data.limitReached?.reason);
+		this.appendLimitReachedNote(conversation, row, data.limitReached);
 		this.scrollBottom(conversation);
 	}
 
 	/**
-	 * Phase 103: the limit-reached note + Continue chip. `reason` picks
-	 * the label (context window vs tool-call budget). The chip lives on
+	 * Phase 103: the limit-reached note + Continue chip. `detail` picks
+	 * the label (context window vs tool-call budget vs loop detection,
+	 * Phase 239) and carries the budget numbers the live chip displays
+	 * ("used/total rounds · segments") so budget exhaustion is tellable
+	 * from an early looping stop at a glance. The chip lives on
 	 * the turn-record disposables — it stays functional across later
 	 * turns (Cursor-parity: old Continue chips keep working) and dies
-	 * with the tab / thread rebuild.
+	 * with the tab / thread rebuild. Restored turns pass no detail and
+	 * render the generic labels (the boolean flag is what's persisted).
 	 */
-	private appendLimitReachedNote(conversation: VibeAIConversation, row: HTMLElement, reason?: string): void {
+	private appendLimitReachedNote(
+		conversation: VibeAIConversation,
+		row: HTMLElement,
+		detail?: IVibeAIStreamData['limitReached']
+	): void {
 		const note = DOM.append(row, $('.vibe-ai-limit-reached-note'));
 		const label = DOM.append(note, $('span.vibe-ai-limit-reached-text'));
-		label.textContent = reason === 'context'
-			? localize('vibeAIChat.limitReachedContext', "Context limit reached — the task may be incomplete")
-			: localize('vibeAIChat.limitReachedRounds', "Tool-call limit reached — the task may be incomplete");
+		if (detail?.reason === 'context') {
+			label.textContent = localize(
+				'vibeAIChat.limitReachedContextBudget',
+				"Context limit reached ({0} tool rounds across {1} segments) — the task may be incomplete",
+				detail.rounds,
+				detail.segments
+			);
+		} else if (detail?.reason === 'looping') {
+			label.textContent = localize(
+				'vibeAIChat.limitReachedLooping',
+				"Agent looping detected — stopped early after {0} of {1} tool rounds to avoid wasting budget",
+				detail.rounds,
+				detail.budget ?? detail.rounds
+			);
+		} else if (detail?.budget) {
+			label.textContent = localize(
+				'vibeAIChat.limitReachedRoundsBudget',
+				"Tool-call limit reached ({0}/{1} tool rounds across {2} segments) — the task may be incomplete",
+				detail.rounds,
+				detail.budget,
+				detail.segments
+			);
+		} else {
+			label.textContent = detail?.reason === 'context'
+				? localize('vibeAIChat.limitReachedContext', "Context limit reached — the task may be incomplete")
+				: localize('vibeAIChat.limitReachedRounds', "Tool-call limit reached — the task may be incomplete");
+		}
 		const button = DOM.append(note, $('button.vibe-ai-limit-continue')) as HTMLButtonElement;
 		button.type = 'button';
 		button.textContent = localize('vibeAIChat.limitContinue', "Continue");
@@ -4483,6 +5902,21 @@ export class VibeAIChatPane extends ViewPane {
 	 * prompt-edit resend (active conversation only, no running turn).
 	 */
 	private continueAfterLimit(conversation: VibeAIConversation): void {
+		this.continueWithPrompt(conversation, localize(
+			'vibeAIChat.limitContinuePrompt',
+			"Continue the task from the progress gathered above; complete the remaining work."
+		));
+	}
+
+	/**
+	 * Phase 201: the shared Continue dispatch behind both chips (limit-
+	 * reached and output-truncated). Same dispatch path as send(): the
+	 * follow-up rides the conversation history the model already sees,
+	 * and a fresh agent loop picks up from the progress above. Guards
+	 * mirror the prompt-edit resend (active conversation only, no running
+	 * turn).
+	 */
+	private continueWithPrompt(conversation: VibeAIConversation, text: string): void {
 		if (conversation.id !== this.activeConversationId) {
 			// dispatchTurn reads the ACTIVE conversation's mirrors —
 			// non-active chips stay inert (Cursor-parity focus behavior).
@@ -4492,10 +5926,6 @@ export class VibeAIChatPane extends ViewPane {
 			// A newer turn is already running — nothing to resume.
 			return;
 		}
-		const text = localize(
-			'vibeAIChat.limitContinuePrompt',
-			"Continue the task from the progress gathered above; complete the remaining work."
-		);
 		this.history.push({ role: 'user', content: text });
 		const userRow = this.renderUserTurn(conversation, text, undefined);
 		this.dispatchTurn(conversation, text, userRow);
@@ -4645,19 +6075,15 @@ export class VibeAIChatPane extends ViewPane {
 		return allOk;
 	}
 
-	private renderUserTurn(conversation: VibeAIConversation, text: string, images?: string[]): HTMLElement {
+	private renderUserTurn(conversation: VibeAIConversation, text: string, images?: string[], files?: IVibeAIFileContext[]): HTMLElement {
 		const row = DOM.append(conversation.container, $('.vibe-ai-turn.vibe-ai-turn-user'));
 		// Phase 61: sent images render as a thumbnail strip ABOVE the
 		// bubble (the bubble stays text-only — the prompt-edit delegation
 		// replaces its content with the edit composer, which is text-only).
-		if (images && images.length > 0) {
-			const thumbs = DOM.append(row, $('.vibe-ai-user-images'));
-			for (const dataUrl of images) {
-				const img = DOM.append(thumbs, $('img.vibe-ai-user-image')) as HTMLImageElement;
-				img.src = dataUrl;
-				img.alt = '';
-			}
-		}
+		// Phase 184: file/folder chips join the same strip (unified above
+		// the message, Cursor parity) and the strip re-renders from the
+		// edited attachment set after a prompt-edit resend.
+		this.renderUserAttachmentStrip(row, images, files);
 		const bubble = DOM.append(row, $('.vibe-ai-user-bubble'));
 		// An image-only message has no text — skip the empty bubble.
 		if (text.length > 0) {
@@ -4670,6 +6096,53 @@ export class VibeAIChatPane extends ViewPane {
 		// User action — jump to the bottom regardless of follow-latest.
 		this.scrollBottom(conversation, true);
 		return row;
+	}
+
+	/**
+	 * Phase 184: the sent message's attachment strip — image thumbnails +
+	 * file/folder chips, unified above the bubble (Cursor parity: the
+	 * message carries its attachments; thumbnails shrunk so the thread
+	 * stays compact). Display-only: editing happens in the prompt edit
+	 * box (chip ✕ there). Renders into the row's existing strip element
+	 * when present (post-edit re-render), otherwise prepends a fresh one
+	 * before the bubble.
+	 */
+	private renderUserAttachmentStrip(row: HTMLElement, images?: string[], files?: IVibeAIFileContext[], bubble?: HTMLElement): HTMLElement | undefined {
+		const hasImages = !!images && images.length > 0;
+		const hasFiles = !!files && files.length > 0;
+		let strip = row.querySelector<HTMLElement>(':scope > .vibe-ai-user-attachments') ?? undefined;
+		if (!hasImages && !hasFiles) {
+			strip?.remove();
+			return undefined;
+		}
+		if (!strip) {
+			strip = $('.vibe-ai-user-attachments');
+			if (bubble) {
+				row.insertBefore(strip, bubble);
+			} else {
+				const first = row.firstElementChild;
+				if (first && first.classList.contains('vibe-ai-user-bubble')) {
+					row.insertBefore(strip, first);
+				} else {
+					row.prepend(strip);
+				}
+			}
+		}
+		DOM.clearNode(strip);
+		for (const dataUrl of images ?? []) {
+			const img = DOM.append(strip, $('img.vibe-ai-user-image')) as HTMLImageElement;
+			img.src = dataUrl;
+			img.alt = '';
+		}
+		for (const file of files ?? []) {
+			const chip = DOM.append(strip, $('.vibe-ai-user-att-chip'));
+			const icon = DOM.append(chip, $('span.codicon' + (file.kind === 'folder' ? '.codicon-symbol-folder' : '.codicon-symbol-file')));
+			icon.setAttribute('aria-hidden', 'true');
+			const name = DOM.append(chip, $('span.vibe-ai-user-att-name'));
+			name.textContent = file.path;
+			name.title = file.path;
+		}
+		return strip;
 	}
 
 	// ==================== Phase 47: sent-prompt edit (Cursor parity) ====================
@@ -4694,15 +6167,36 @@ export class VibeAIChatPane extends ViewPane {
 			downX = e.clientX;
 			downY = e.clientY;
 		}));
+		// Pane-lifetime document-capture reset — runs BEFORE any open edit's
+		// outside-press cancel (both document-capture, this one registered
+		// first): a fresh press clears the suppression, then the cancel
+		// re-sets it when the press is outside the edit shell. The click of
+		// that same gesture is therefore swallowed exactly once.
+		this._register(DOM.addDisposableListener(this.messagesContainer.ownerDocument, 'pointerdown', () => {
+			this.promptEditReopenSuppressed = false;
+		}, true));
 		this._register(DOM.addDisposableListener(this.messagesContainer, DOM.EventType.CLICK, e => {
+			// The press that just closed an open edit must not re-open one
+			// (Cursor parity: click-outside exits; a fresh click edits again).
+			if (this.promptEditReopenSuppressed) {
+				return;
+			}
 			const target = e.target as HTMLElement | null;
-			const bubble = target?.closest<HTMLElement>('.vibe-ai-user-bubble');
-			if (!bubble) {
+			// Phase 184: the attachment strip belongs to the message too —
+			// clicking a sent chip/thumbnail opens the same edit box (the
+			// image-only message's only target is its strip).
+			const hit = target?.closest<HTMLElement>('.vibe-ai-user-bubble, .vibe-ai-user-attachments');
+			if (!hit) {
 				return;
 			}
 			// A text-selection drag (the pointer moved while selecting) is
 			// not an edit click — keep the selection.
 			if (Math.abs(e.clientX - downX) > 4 || Math.abs(e.clientY - downY) > 4) {
+				return;
+			}
+			const row = hit.closest<HTMLElement>('.vibe-ai-turn-user');
+			const bubble = row?.querySelector<HTMLElement>(':scope > .vibe-ai-user-bubble');
+			if (!row || !bubble) {
 				return;
 			}
 			// Already editing this box — let the textarea handle the click
@@ -4717,6 +6211,52 @@ export class VibeAIChatPane extends ViewPane {
 			}
 			this.enterPromptEdit(conversation, bubble);
 		}));
+	}
+
+	/**
+	 * Phase 184: the history user message a thread's user-turn row maps
+	 * to — the turnIndex'th dispatched (non-steered) user message, the
+	 * same counting {@link truncateFromUserTurn} uses for the history cut.
+	 * The prompt edit seeds its attachment set from it.
+	 */
+	private userTurnMessage(conversation: VibeAIConversation, userRow: HTMLElement): IVibeAIMessage | undefined {
+		const userRows = Array.from(conversation.container.querySelectorAll('.vibe-ai-turn-user'));
+		const turnIndex = userRows.indexOf(userRow);
+		if (turnIndex === -1) {
+			return undefined;
+		}
+		let seen = -1;
+		for (const message of conversation.history) {
+			if (message.role === 'user' && !message.steered) {
+				seen++;
+				if (seen === turnIndex) {
+					return message;
+				}
+			}
+		}
+		return undefined;
+	}
+
+	/**
+	 * Phase 218: the assistant reply text following the k-th dispatched
+	 * (non-steered) user message — the plain pair a backfilled placeholder
+	 * turn record carries when a session's stored turns are missing (the
+	 * size guard's stripping / an alignment-broken save). Steered messages
+	 * in between ride the same turn (they were injected mid-turn).
+	 */
+	private assistantTextAfterUserMessage(messages: IVibeAIMessage[], userOrdinal: number): string {
+		let seen = -1;
+		const parts: string[] = [];
+		for (const message of messages) {
+			if (message.role === 'user' && !message.steered) {
+				seen++;
+				continue;
+			}
+			if (seen === userOrdinal && message.role === 'assistant') {
+				parts.push(message.content);
+			}
+		}
+		return parts.join('\n\n');
 	}
 
 	/**
@@ -4743,6 +6283,15 @@ export class VibeAIChatPane extends ViewPane {
 		// container — so it is pixel-identical to the input below and the
 		// mode/model dropdowns stay in sync (shared pane state).
 		const shell = DOM.append(bubble, $('.vibe-ai-input-container.vibe-ai-user-edit-shell'));
+		// Phase 184: the edit box is a full composer — same drop veil as
+		// the main input (toggled by the shell's dragover class below).
+		const dropOverlay = DOM.append(shell, $('.vibe-ai-drop-overlay'));
+		const dropOverlayIcon = DOM.append(dropOverlay, $('span.codicon.codicon-files'));
+		dropOverlayIcon.setAttribute('aria-hidden', 'true');
+		DOM.append(dropOverlay, $('span.vibe-ai-drop-overlay-label')).textContent = localize(
+			'vibeAIChat.dropOverlayEdit',
+			"Release to attach as context"
+		);
 		const chipsRow = DOM.append(shell, $('.vibe-ai-input-chips'));
 		chipsRow.style.display = 'none';
 		const textarea = DOM.append(shell, $('textarea.vibe-ai-input.vibe-ai-user-edit')) as HTMLTextAreaElement;
@@ -4763,6 +6312,13 @@ export class VibeAIChatPane extends ViewPane {
 			chipsListeners,
 			shell,
 			chipsRow,
+			// Phase 184: the edit box's OWN attachment set — seeded from the
+			// edited message's sent attachments (chips/thumbnails above the
+			// bubble), never the main input's pending state.
+			files: [],
+			images: [],
+			pendingFileReads: new Map<string, Promise<void>>(),
+			pendingImageReads: new Set<Promise<void>>(),
 			modeButton: undefined,
 			modeIcon: undefined,
 			modeLabel: undefined,
@@ -4774,14 +6330,24 @@ export class VibeAIChatPane extends ViewPane {
 			stopButton: undefined,
 			micButton: undefined,
 		};
+		const editedMessage = this.userTurnMessage(conversation, row);
+		if (editedMessage?.images) {
+			edit.images.push(...editedMessage.images);
+		}
+		if (editedMessage?.files) {
+			edit.files.push(...editedMessage.files);
+		}
 		this.promptEdit = edit;
 		// The toolbar comes from the same builder the main input uses; its
 		// refs live on the edit state and die with it (listeners included).
+		// Phase 184: the paperclip attaches to the EDIT set (the open
+		// message's own attachments), not the input below.
 		const toolbar = this.buildInputToolbar(shell, listeners, {
 			sendTitle: localize('vibeAIChat.resend', "Re-send (Enter)"),
-			onSend: () => this.commitPromptEdit(),
+			onSend: () => void this.commitPromptEdit(),
 			// Phase 50: no context usage ring on a resent prompt.
 			showContextRing: false,
+			onAttach: () => this.attachActiveFile(this.editAttachmentSink(edit)),
 		});
 		edit.modeButton = toolbar.modeButton;
 		edit.modeIcon = toolbar.modeIcon;
@@ -4793,6 +6359,32 @@ export class VibeAIChatPane extends ViewPane {
 		edit.sendButton = toolbar.sendButton;
 		edit.stopButton = toolbar.stopButton;
 		edit.micButton = toolbar.micButton;
+		// Phase 184: the edit box is a full composer — image paste (same
+		// contract as the main input) and drag-drop attach onto the shell,
+		// both routing into the edit's own attachment set.
+		listeners.add(DOM.addDisposableListener(textarea, DOM.EventType.PASTE, e => {
+			this.handleImagePaste(e, this.editAttachmentSink(edit));
+		}));
+		listeners.add(DOM.addDisposableListener(shell, 'dragover', e => {
+			if (!this.canDropIntoInput(e)) {
+				shell.classList.remove('vibe-ai-dragover');
+				return;
+			}
+			e.preventDefault();
+			if (e.dataTransfer) {
+				e.dataTransfer.dropEffect = 'copy';
+			}
+			shell.classList.add('vibe-ai-dragover');
+		}));
+		listeners.add(DOM.addDisposableListener(shell, 'dragleave', e => {
+			if (!shell.contains(e.relatedTarget as Node)) {
+				shell.classList.remove('vibe-ai-dragover');
+			}
+		}));
+		listeners.add(DOM.addDisposableListener(shell, 'drop', e => {
+			shell.classList.remove('vibe-ai-dragover');
+			void this.handleDrop(e, this.editAttachmentSink(edit));
+		}));
 		// Mirror the shared state into the fresh toolbar (mode/model
 		// labels, attached chips, action buttons) — identical to the
 		// input below at the moment the edit opens.
@@ -4847,6 +6439,9 @@ export class VibeAIChatPane extends ViewPane {
 				return;
 			}
 			this.cancelPromptEdit();
+			// This gesture's click must not re-open an edit (same message's
+			// attachment strip / another bubble) — click-outside means exit.
+			this.promptEditReopenSuppressed = true;
 		}, true));
 	}
 
@@ -4876,12 +6471,17 @@ export class VibeAIChatPane extends ViewPane {
 	/**
 	 * Enter on the in-place prompt edit: discards the edited turn and
 	 * everything after it (Cursor parity — a resubmit never appends) and
-	 * re-sends the edited prompt as a fresh turn. An empty edit is
-	 * treated as a cancel. Phase 109: the discard first reverts ALL file
-	 * changes from the already-executed turns (async disk restores) and
-	 * the resend dispatches only after the revert settles.
+	 * re-sends the edited prompt as a fresh turn. An empty edit with no
+	 * attachments is treated as a cancel (Phase 184: an attachment-only
+	 * edit sends, main-input parity). Phase 109: the discard first reverts
+	 * ALL file changes from the already-executed turns (async disk
+	 * restores) and the resend dispatches only after the revert settles.
+	 * Phase 184: the edit box's OWN attachment set (seeded from the sent
+	 * message, edited in place) rides the resend — images on the history
+	 * message, files as the request's context.files — and the turn's
+	 * static strip re-renders from the edited set.
 	 */
-	private commitPromptEdit(): void {
+	private async commitPromptEdit(): Promise<void> {
 		const edit = this.promptEdit;
 		if (!edit || edit.committing) {
 			// Re-entry guard: the commit is async now (the revert awaits
@@ -4890,7 +6490,7 @@ export class VibeAIChatPane extends ViewPane {
 			return;
 		}
 		const text = edit.textarea.value.trim();
-		if (text.length === 0) {
+		if (text.length === 0 && edit.images.length === 0 && edit.files.length === 0) {
 			// An empty prompt never sends (main-input parity) — cancel.
 			this.cancelPromptEdit();
 			return;
@@ -4905,10 +6505,14 @@ export class VibeAIChatPane extends ViewPane {
 			this.cancelPromptEdit();
 			return;
 		}
-		// Discard this and every later turn from view + state (also aborts
-		// the conversation's in-flight stream) — returns the turn's index.
-		// Phase 109: the discard reverts the discarded turns' file changes
-		// before resolving.
+		// Phase 184: a drop still reading (spinner chip) settles before the
+		// capture below — the file lands on THIS resend instead of silently
+		// missing it (the main send()'s wait contract, edit-scoped).
+		if (edit.pendingFileReads.size > 0 || edit.pendingImageReads.size > 0) {
+			await Promise.allSettled([...edit.pendingFileReads.values(), ...edit.pendingImageReads]);
+		}
+		const images = edit.images.length > 0 ? [...edit.images] : undefined;
+		const files = edit.files.length > 0 ? [...edit.files] : undefined;
 		void this.truncateFromUserTurn(conversation, row).then(turnIndex => {
 			if (turnIndex === -1 || this.promptEdit !== edit) {
 				// Not a thread row, or the edit was cancelled / replaced
@@ -4926,18 +6530,34 @@ export class VibeAIChatPane extends ViewPane {
 			// static bubble with the edited text (tears the edit box down).
 			bubble.classList.remove('vibe-ai-user-editing');
 			bubble.textContent = text;
-			// Push the edited prompt as the turn's (new) user message.
-			this.history.push({ role: 'user', content: text });
+			// Phase 184: the strip re-renders from the edited attachment set
+			// (chips added/removed in the edit box are reflected on the sent
+			// message, not just on the re-run).
+			this.renderUserAttachmentStrip(row, images, files, bubble);
+			// Push the edited prompt as the turn's (new) user message —
+			// its (edited) attachments ride along so a later edit of the
+			// same message seeds from them again.
+			this.history.push({
+				role: 'user',
+				content: text,
+				...(images ? { images } : {}),
+				...(files ? { files } : {}),
+			});
 			// Cursor-parity tab title: when the first prompt was edited, the
 			// title may still be derived from the old text — re-derive it.
 			if (turnIndex === 0) {
 				this.sessionTitle = this.deriveSessionTitle(text);
+				// Phase 227: the AI summary (if any) described the old
+				// wording — drop it and let the re-dispatched first turn
+				// request a fresh one from the edited prompt.
+				conversation.titleRequested = false;
+				this.sessionStore.resetSessionTitle(conversation.sessionId);
 				this.updateTabTitle();
 			}
 			// Re-send from the edited turn — the discarded turns' file
 			// changes were reverted first (Phase 109: a resend defaults to
 			// a clean slate, the re-run starts over).
-			this.dispatchTurn(conversation, text, row);
+			this.dispatchTurn(conversation, text, row, files ?? []);
 		});
 	}
 
@@ -5040,6 +6660,10 @@ export class VibeAIChatPane extends ViewPane {
 		// Per-turn listeners (footer / files summary) die with the next
 		// turn in THIS conversation — other tabs' turns are untouched.
 		conversation.turnDisposables.clear();
+		// Phase 218: the previous turn's failed-turn stash dies with it (a
+		// retry credential belongs to the turn that failed; from here on a
+		// fresh error re-stashes).
+		conversation.lastFailedTurn = undefined;
 
 		// Phase 140: the previous turns' Worked shells collapse here as a
 		// backstop — the answer completing already folds the turn's shell
@@ -5107,6 +6731,13 @@ export class VibeAIChatPane extends ViewPane {
 			pendingSteer: undefined,
 			// Phase 150: no backend turn state announced yet.
 			turnState: undefined,
+			// Phase 245: no turn transcript id yet (the turn_start event
+			// stamps it — the resume-retry credential).
+			turnId: undefined,
+			// Phase 246: fresh turns are never resumes (the resume dispatch
+			// flips this before the stream opens).
+			isResume: false,
+			resumeDivider: undefined,
 			// Phase 71: Plan mode state — no plan is pending yet.
 			planPhase: undefined,
 			pendingPlan: undefined,
@@ -5114,6 +6745,13 @@ export class VibeAIChatPane extends ViewPane {
 			planCardRoot: undefined,
 			planProgress: undefined,
 			planStepRows: undefined,
+			// Phase 231: no per-step activity group open yet (plan execution
+			// creates one per plan_step_start).
+			planStepGroup: undefined,
+			// Phase 218: no plan doc streaming into the editor yet.
+			planDocStream: undefined,
+			// Phase 219: no approval widget in the doc's editor yet.
+			planApproval: undefined,
 			// Phase 60: chronological block runs — no run is open yet; the
 			// first event of any kind opens one (see handleStreamData).
 			lastBlockKind: undefined,
@@ -5126,6 +6764,7 @@ export class VibeAIChatPane extends ViewPane {
 			streamingMermaidParts: [],
 			markdownRenderTimer: undefined,
 			lastMarkdownRender: 0,
+			smoothedLen: 0,
 			renderedMarkdown: undefined,
 		};
 
@@ -5199,16 +6838,50 @@ export class VibeAIChatPane extends ViewPane {
 		// precedes the answer text (post-tool rounds' text is held
 		// backend-side), so the shell is already folded when this body
 		// opens.
-		// Throttled markdown re-render while streaming (full parse per delta
-		// would stutter on long answers).
+		// r22: the answer paints through the smoothing pump, not a one-shot
+		// throttled render — deltas accumulate in `turn.text` and the pump
+		// paints a few more characters per tick, so bursty arrivals stream
+		// as a steady typewriter flow. closeTextRun / finishStreaming cancel
+		// the pump and render the full text directly.
 		if (state.markdownRenderTimer !== undefined) {
 			return;
 		}
-		const elapsed = Date.now() - state.lastMarkdownRender;
-		const delay = Math.max(0, MARKDOWN_RENDER_THROTTLE_MS - elapsed);
+		this.pumpSmoothText(conversation);
+	}
+
+	/**
+	 * r22: the streaming paint pump — one tick advances `smoothedLen`
+	 * toward the received text by a proportional step (bounded below) and
+	 * re-renders the run's painted slice. The tick coarsens on long runs (a
+	 * full markdown re-parse per paint scales with length — keep the pump's
+	 * cost at or below the old 120ms throttle's). It stops when it catches
+	 * up (the next delta restarts it via updateTextElement) and
+	 * clearStreamMarkdownTimer cancels it on run close / turn finish / abort.
+	 */
+	private pumpSmoothText(conversation: VibeAIConversation): void {
+		const state = conversation.stream;
+		if (!state || !state.currentBody) {
+			return;
+		}
+		const painted = state.smoothedLen - state.textRunStart;
+		const delay = painted > 12000 ? SMOOTH_STREAM_TICK_MS * 3 : SMOOTH_STREAM_TICK_MS;
 		state.markdownRenderTimer = DOM.getWindow(state.currentBody).setTimeout(() => {
 			state.markdownRenderTimer = undefined;
-			this.renderMarkdownNow(conversation, true);
+			if (!state.currentBody) {
+				return; // the run closed while the tick was pending
+			}
+			const target = state.turn.text.length;
+			if (state.smoothedLen < target) {
+				const backlog = target - state.smoothedLen;
+				state.smoothedLen = Math.min(
+					target,
+					state.smoothedLen + Math.max(SMOOTH_STREAM_MIN_CHARS, Math.ceil(backlog / SMOOTH_STREAM_CATCHUP_DIVISOR))
+				);
+				this.renderMarkdownNow(conversation, true);
+			}
+			if (state.smoothedLen < state.turn.text.length) {
+				this.pumpSmoothText(conversation);
+			}
 		}, delay);
 	}
 
@@ -5234,6 +6907,12 @@ export class VibeAIChatPane extends ViewPane {
 		return {
 			fillInIncompleteTokens: streaming,
 			codeBlockHeader: true,
+			// URL-shaped inline code chips are clickable: click opens the
+			// built-in Simple Browser, Ctrl+Click the system default browser.
+			inlineCodeLinks: true,
+			// Phase 192: shell-family fences (powershell etc.) tokenize with
+			// the bash-proven shellscript grammar — see the const for why.
+			languageAliases: VIBE_AI_SHELL_LANGUAGE_ALIASES,
 			codeBlockRenderer: (languageId, value, rawInfo) => {
 				// Phase 85: streamed mermaid blocks are REUSED across the
 				// streaming pass's throttled re-renders — the i-th fence
@@ -5261,7 +6940,7 @@ export class VibeAIChatPane extends ViewPane {
 							return pending.element;
 						}
 						// Extension absent — editor-backed fallback.
-						return this.editorCodeBlockRenderer.renderCodeBlock(languageId, value, { codeBlockHeader: true }, rawInfo);
+						return this.editorCodeBlockRenderer.renderCodeBlock(languageId, value, { codeBlockHeader: true, languageAliases: VIBE_AI_SHELL_LANGUAGE_ALIASES }, rawInfo);
 					});
 				}
 				if (isMermaidCodeBlock(languageId)) {
@@ -5297,10 +6976,10 @@ export class VibeAIChatPane extends ViewPane {
 							}
 							return pending.element;
 						}
-						return this.editorCodeBlockRenderer.renderCodeBlock(languageId, value, { codeBlockHeader: true }, rawInfo);
+						return this.editorCodeBlockRenderer.renderCodeBlock(languageId, value, { codeBlockHeader: true, languageAliases: VIBE_AI_SHELL_LANGUAGE_ALIASES }, rawInfo);
 					});
 				}
-				return this.editorCodeBlockRenderer.renderCodeBlock(languageId, value, { codeBlockHeader: true }, rawInfo);
+				return this.editorCodeBlockRenderer.renderCodeBlock(languageId, value, { codeBlockHeader: true, languageAliases: VIBE_AI_SHELL_LANGUAGE_ALIASES }, rawInfo);
 			},
 			// Fires once every code block of this render resolved and the
 			// placeholders swapped — the non-streaming mermaid webviews
@@ -5380,6 +7059,18 @@ export class VibeAIChatPane extends ViewPane {
 		}));
 	}
 
+	/** r29: inline code naming a real local file opens it in the center editor area. */
+	private enhancePaneFileChips(el: HTMLElement): void {
+		enhanceFileChips(el, {
+			fileService: this.fileService,
+			resolveRoot: () => this.workspaceContextService.getWorkspace().folders[0]?.uri.fsPath,
+			onOpen: fsPath => { void this.commandService.executeCommand('vscode.open', URI.file(fsPath)); },
+			onMissing: (_fsPath, display) => {
+				this.notificationService.warn(localize('vibeAIChat.fileChipMissing', "{0} no longer exists on disk — it was deleted or removed by a rollback.", display));
+			},
+		});
+	}
+
 	private renderMarkdownNow(conversation: VibeAIConversation, streaming: boolean, textOverride?: string): void {
 		const state = conversation.stream;
 		if (!state || !state.currentBody) {
@@ -5391,7 +7082,10 @@ export class VibeAIChatPane extends ViewPane {
 		// Phase 84.4: a folded narration body over the cap renders its
 		// capped head instead (textOverride) — the persisted text and the
 		// timeline offsets are untouched.
-		const text = textOverride ?? state.turn.text.slice(state.textRunStart);
+		// r22: the pump's painted slice — streaming renders up to the
+		// smoothed index (a burst paints progressively); non-streaming
+		// renders (run close / turn finish / restore) show everything.
+		const text = textOverride ?? state.turn.text.slice(state.textRunStart, streaming ? state.smoothedLen : state.turn.text.length);
 		if (state.renderedMarkdown) {
 			state.renderedMarkdown.dispose();
 			state.renderedMarkdown = undefined;
@@ -5408,6 +7102,11 @@ export class VibeAIChatPane extends ViewPane {
 			state.renderedMarkdown = new DisposableStore();
 			const rendered = this.markdownRendererService.render(markdown, this.buildMarkdownRenderOptions(conversation, streaming), state.currentBody);
 			state.renderedMarkdown.add(rendered);
+			if (!streaming) {
+				// r29: closed runs get file chips — inline code naming a real
+				// local file opens it in the center editor area.
+				this.enhancePaneFileChips(state.currentBody);
+			}
 		}
 		state.currentBody.classList.toggle('vibe-ai-streaming', streaming);
 		// Phase 84.6: while streaming, the body is a bounded auto-follow
@@ -5467,7 +7166,9 @@ export class VibeAIChatPane extends ViewPane {
 		// Phase 61: once the turn's Worked shell exists (a tool already
 		// ran), thinking streams INSIDE it as a sub-entry; before that it
 		// renders at row level and moves in when the first tool arrives.
-		const thinkingDetails = DOM.append(state.workSteps ?? state.currentAssistantRow, $('details.vibe-ai-thinking')) as HTMLDetailsElement;
+		// Phase 231: an active plan step's thoughts stream into that step's
+		// group container (planActivityRoot).
+		const thinkingDetails = DOM.append(this.planActivityRoot(state) ?? state.currentAssistantRow, $('details.vibe-ai-thinking')) as HTMLDetailsElement;
 		const summary = DOM.append(thinkingDetails, $('summary'));
 		const chevron = DOM.append(summary, $('span.codicon.codicon-chevron-right.vibe-ai-thinking-chevron'));
 		chevron.setAttribute('aria-hidden', 'true');
@@ -5497,8 +7198,16 @@ export class VibeAIChatPane extends ViewPane {
 		if (!state || !state.currentAssistantRow) {
 			return;
 		}
-		state.currentBody = DOM.append(state.currentAssistantRow, $('.vibe-ai-chat-markdown.vibe-ai-streaming'));
+		// Phase 231: a plan step's narration streams INTO its step group
+		// (the group is the step's segment — plan_step_done folds it with
+		// the narration inside); ask/agent text stays row-level (Phase 102,
+		// the answer body lives outside the Worked shell).
+		state.currentBody = DOM.append(state.planStepGroup?.steps ?? state.currentAssistantRow, $('.vibe-ai-chat-markdown.vibe-ai-streaming'));
 		state.textRunStart = state.turn.text.length;
+		// r22: the pump's painted index jumps to the new run's start — chars
+		// before it belong to the closed run's body and must not delay this
+		// run's first paint.
+		state.smoothedLen = Math.max(state.smoothedLen, state.textRunStart);
 		state.lastMarkdownRender = 0;
 	}
 
@@ -5586,6 +7295,13 @@ export class VibeAIChatPane extends ViewPane {
 		if (!state || !state.workShell || !state.workLabel) {
 			return;
 		}
+		if (state.workShell.dataset.planSettled) {
+			// Phase 236: a completed plan turn's shell — the summary row is
+			// already removed and the shell stays open (settlePlanWorkShell);
+			// this backstop (the `done` event's finishStreaming) must not
+			// re-collapse it or resurrect the removed label.
+			return;
+		}
 		if (state.workFoldedMs === undefined) {
 			state.workFoldedMs = Date.now() - (state.turnStartedAt ?? Date.now());
 		}
@@ -5605,6 +7321,34 @@ export class VibeAIChatPane extends ViewPane {
 			// sweep remains as the backstop for manually re-expanded shells).
 			workShell.open = false;
 		});
+	}
+
+	/**
+	 * Phase 236: the completed plan turn's Worked shell settles DIFFERENTLY
+	 * from ask/agent turns (settleWorkShell collapses to one "Worked for
+	 * Xs" row) — the plan card plus the per-step groups already ARE the
+	 * completed look (user ruling: 完成後不用整個收起、總結列直接去掉).
+	 * The shell stays open and the <summary> row is removed entirely.
+	 * The marker lives on the DOM (dataset), not the stream state — both
+	 * later sweeps reach the shell through the thread's DOM: the
+	 * settleWorkShell backstop (the `done` event) must not re-collapse or
+	 * resurrect the label, and the next send's foldWorkShell sweep must
+	 * skip it — a summary-less <details> folded shut would hide its whole
+	 * content (plan card + step groups) permanently. workFoldedMs still
+	 * freezes (the turn record's duration stays in parity).
+	 */
+	private settlePlanWorkShell(conversation: VibeAIConversation): void {
+		const state = conversation.stream;
+		if (!state?.workShell) {
+			return;
+		}
+		const workShell = state.workShell;
+		workShell.dataset.planSettled = 'true';
+		if (state.workFoldedMs === undefined) {
+			state.workFoldedMs = Date.now() - (state.turnStartedAt ?? Date.now());
+		}
+		workShell.querySelector('summary')?.remove();
+		workShell.open = true;
 	}
 
 	/**
@@ -5679,6 +7423,12 @@ export class VibeAIChatPane extends ViewPane {
 	 */
 	private foldWorkShell(conversation: VibeAIConversation): void {
 		for (const shell of Array.from(conversation.container.querySelectorAll('details.vibe-ai-worked[open]')) as HTMLDetailsElement[]) {
+			// Phase 236: a completed plan turn's shell has no summary —
+			// folding it shut would hide the plan card and step groups
+			// permanently (no toggle row left to re-open with).
+			if (shell.dataset.planSettled) {
+				continue;
+			}
 			shell.open = false;
 		}
 	}
@@ -5699,7 +7449,16 @@ export class VibeAIChatPane extends ViewPane {
 		if (!state?.workSteps || state.toolCards.size === 0) {
 			return;
 		}
+		// Phase 231: step groups hold their step's cards — regroup within
+		// each group (same-file merges / count groups never cross a step
+		// boundary), then the shell's top level (pre-group activity).
 		regroupWorkedSteps(state.workSteps, state.toolCards);
+		for (const steps of Array.from(state.workSteps.querySelectorAll('.vibe-ai-plan-step-group-steps')) as HTMLElement[]) {
+			regroupWorkedSteps(steps, state.toolCards);
+			// Grouping may pull read-only cards out from between two Thought
+			// rows inside the group — newly adjacent settled blocks merge.
+			this.consolidateThoughtBlocks(steps);
+		}
 		// Phase 162: grouping pulls read-only cards out from between two
 		// Thought rows (into per-file rows / count groups) — newly adjacent
 		// settled blocks merge (durations sum, texts blank-line join).
@@ -5919,14 +7678,15 @@ export class VibeAIChatPane extends ViewPane {
 		}
 		if (state.currentBody) {
 			if (end > start) {
-				state.timeline.push({ kind: 'text', start, end });
-				// Phase 61: narration folds into the Worked shell (the
-				// body may already have been moved by ensureWorkShell —
-				// appendChild is a no-op reorder then).
-				if (intoWork && state.workSteps) {
-					state.workSteps.appendChild(state.currentBody);
-				}
-			} else {
+					state.timeline.push({ kind: 'text', start, end });
+					// Phase 61: narration folds into the Worked shell (the
+					// body may already have been moved by ensureWorkShell —
+					// appendChild is a no-op reorder then). Phase 231: an
+					// active plan step's narration folds into its group.
+					if (intoWork) {
+						this.planActivityRoot(state)?.appendChild(state.currentBody);
+					}
+				} else {
 				// An empty run (a text event with no text) leaves nothing
 				// behind — drop the body element entirely.
 				state.currentBody.remove();
@@ -5981,26 +7741,19 @@ export class VibeAIChatPane extends ViewPane {
 		// Phase 134: a lingering Retrying chip dies with the turn (the next
 		// real event normally clears it; this is the backstop).
 		this.clearRetryChip(conversation);
-		// Phase 71: a plan awaiting approval keeps the turn OPEN — the
-		// user builds (the execute phase streams into the same turn and
-		// its done finishes it) or cancels it (cancelPlan calls this).
-		// Phase 97: an interrupted turn finalizes anyway (the interrupt
-		// path folds the plan card to its cancelled state first).
-		// Phase 151: the backend's awaiting_plan_approval turn state
-		// (turn_state event) is the state-driven signal for the same
-		// condition — planPhase stays as the restored/local flag; either
-		// alone keeps the turn open.
-		if (state.turnState === 'awaiting_plan_approval' && !interrupted) {
-			this.flushStreamingMermaid(conversation);
-			return;
-		}
-		if (state.planPhase === 'awaiting' && !interrupted) {
-			// Phase 84: the runs stay open here, but the streamed diagrams
-			// mount anyway — the real finish re-renders the run and the new
-			// render pass re-mounts through its own callback.
-			this.flushStreamingMermaid(conversation);
-			return;
-		}
+		// Phase 218: a mid-stream death (interrupt / transport error before
+		// the `plan` event) settles the doc stream here — the normal path
+		// already settled it in handlePlanReady (no-op).
+		this.settlePlanDocStream(state);
+		// Phase 231: an interrupt mid-step freezes the step group's spinner
+		// (cancelled mark + duration) before the shell settles below.
+		this.settleActivePlanStepGroup(conversation);
+		// Phase 222: the plan turn ENDS at the decision card (user spec:
+		// Cursor parity — the card appears when the final answer is done and
+		// the conversation is finished; Build on the card opens a fresh
+		// turn). Phase 150/151's awaiting hold (turnState /
+		// planPhase === 'awaiting' keeping the turn open) is retired — the
+		// backend's awaiting_plan_approval turnState stays informational.
 
 		// Persist the assistant text to history (thinking is not sent back).
 		// Phase 97: an interrupted turn keeps its partial answer, marked so
@@ -6114,11 +7867,17 @@ export class VibeAIChatPane extends ViewPane {
 			placeholder.textContent = state.outputTruncated
 				? localize(
 					'vibeAIChat.truncatedNoResponse',
-					"(response truncated — the reasoning used up the output budget; raise backend LLM_AGENT_MAX_TOKENS)"
+					"(response truncated — the reasoning used up the output budget)"
 				)
 				: localize('vibeAIChat.emptyResponse', "(no response)");
 			placeholder.style.color = 'var(--vscode-descriptionForeground)';
 			placeholder.style.fontStyle = 'italic';
+			// Phase 201: the truncated reminder carries a Continue chip (same
+			// as the note) — the empty answer is no exception.
+			if (state.outputTruncated) {
+				const chipRow = DOM.append(state.currentAssistantRow, $('.vibe-ai-output-truncated-note'));
+				this.appendTruncationChip(conversation, chipRow);
+			}
 		}
 
 		// Phase 97: the interrupted turn's note — the progress above stays
@@ -6180,13 +7939,19 @@ export class VibeAIChatPane extends ViewPane {
 			routedModel: state.routedModel,
 			// Phase 71: the plan + its final state (Plan mode turns) — the
 			// record is captured when the turn finishes, i.e. after the
-			// execute phase (executed) or on cancel (cancelled).
+			// execute phase (executed), on cancel (cancelled), or at the
+			// decision card (Phase 222: the turn ends there — 'awaiting'
+			// persists so the restored card still offers Build / Cancel).
 			...(state.pendingPlan ? {
 				plan: state.pendingPlan,
-				planStatus: (state.planPhase === 'executing' ? 'executed' : 'cancelled') as VibeAIPlanCardStatus,
+				planStatus: (state.planPhase === 'executing' ? 'executed' : state.planPhase === 'awaiting' ? 'awaiting' : 'cancelled') as VibeAIPlanCardStatus,
 				planResults: state.planResults,
 			} : {}),
 			error: state.lastError,
+			// Phase 245: the turn transcript id (the turn_start event) —
+			// persisted for the resume-from-failed-step retry (restore
+			// parity: a reloaded failed turn still resumes).
+			turnId: state.turnId,
 			// Phase 97: the turn was interrupted by the next send (persisted
 			// — the restore path renders the interruption note).
 			interrupted: interrupted || undefined,
@@ -6200,7 +7965,15 @@ export class VibeAIChatPane extends ViewPane {
 			// Retry button re-dispatches the failed turn through it).
 			userRow: state.userRow,
 		};
-		if (aligned) {
+		if (state.isResume) {
+			// Phase 246: a resume retry merges into the failed turn's own
+			// record (same user row — no second record for the turn); with
+			// no matching record (stash-only credential) fall back to the
+			// normal capture path.
+			if (!this.mergeResumedTurnRecord(conversation, state, turnRecord) && aligned) {
+				conversation.turns.push(turnRecord);
+			}
+		} else if (aligned) {
 			conversation.turns.push(turnRecord);
 		}
 
@@ -6296,6 +8069,9 @@ export class VibeAIChatPane extends ViewPane {
 			planStatus: turn.planStatus,
 			planResults: turn.planResults,
 			error: turn.error,
+			// Phase 245: the turn transcript id rides the record (the
+			// restored failed turn's Retry resumes instead of re-sending).
+			turnId: turn.turnId,
 			// Phase 97: the interrupted marker rides the record (restore
 			// renders the interruption note).
 			interrupted: turn.interrupted,
@@ -6310,9 +8086,10 @@ export class VibeAIChatPane extends ViewPane {
 	}
 
 	/**
-	 * Cancels a pending throttled markdown render of a turn. Uses the
-	 * turn's own markdown body for the window lookup while it is still
-	 * attached (falls back to the messages holder).
+	 * Cancels a pending smoothing-pump tick of a streaming turn (r22 — the
+	 * pump reuses the old throttled-render timer handle). Uses the turn's
+	 * own markdown body for the window lookup while it is still attached
+	 * (falls back to the messages holder).
 	 */
 	private clearStreamMarkdownTimer(state: VibeAIStreamState): void {
 		if (state.markdownRenderTimer === undefined) {
@@ -6334,6 +8111,11 @@ export class VibeAIChatPane extends ViewPane {
 	 */
 	private teardownStream(conversation: VibeAIConversation, state: VibeAIStreamState): void {
 		this.clearStreamMarkdownTimer(state);
+		// Phase 218: the conversation is being deleted/reset — release the
+		// plan doc's model reference if a stream was mid-flight.
+		this.settlePlanDocStream(state);
+		// Phase 219: the doc editor's approval widget dies with the stream.
+		this.disposePlanApprovalWidget(state);
 		if (state.renderedMarkdown) {
 			state.renderedMarkdown.dispose();
 			state.renderedMarkdown = undefined;
@@ -6418,7 +8200,7 @@ export class VibeAIChatPane extends ViewPane {
 	 * on the clipboard, and the relative time of the turn. Rendered from
 	 * both the live stream state and a restored turn record.
 	 */
-	private renderTurnFooterInto(conversation: VibeAIConversation, assistantRow: HTMLElement, changes: IVibeAICodeChange[], turnStartedAt: number, turnIndex: number, answerText: string): void {
+	private renderTurnFooterInto(conversation: VibeAIConversation, assistantRow: HTMLElement, changes: IVibeAICodeChange[], turnStartedAt: number, turnIndex: number, answerText: string, rolledBack?: boolean): void {
 		const disposables = conversation.turnRecordDisposables;
 		const footer = DOM.append(assistantRow, $('.vibe-ai-turn-footer'));
 
@@ -6438,9 +8220,27 @@ export class VibeAIChatPane extends ViewPane {
 			"Restore checkpoint — revert this and all later rounds' file changes ({0} file(s))",
 			rollbackCount
 		);
-		if (rollbackCount === 0) {
+		// Phase 247: the click handler attaches UNCONDITIONALLY for tracked
+		// turns — the count is a render-time snapshot, and the transcript
+		// reconciliation (restoreCheckpoint) may still surface changes the
+		// SSE never delivered. A zero-count button dims (`.dim`) instead of
+		// hard-disabling so the click explains itself (info notification)
+		// instead of silently no-oping — the dead button WAS the original
+		// confusion. Only the unaligned no-changes fallback (no turnId to
+		// reconcile, nothing captured) stays hard-disabled.
+		if (rolledBack) {
+			// Phase 247: a RELOADED already-rolled-back turn keeps its
+			// restored state — the button renders disabled ("Checkpoint
+			// restored") instead of re-arming a finished rollback (the
+			// live path applies the same state at restoreCheckpoint).
+			undoBtn.classList.add('disabled');
+			undoBtn.title = localize('vibeAIChat.checkpointRolledBack', "Checkpoint restored");
+		} else if (turnIndex < 0 && rollbackCount === 0) {
 			undoBtn.classList.add('disabled');
 		} else {
+			if (rollbackCount === 0) {
+				undoBtn.classList.add('dim');
+			}
 			disposables.add(DOM.addDisposableListener(undoBtn, DOM.EventType.CLICK, () => {
 				if (undoBtn.classList.contains('disabled')) {
 					return;
@@ -6500,13 +8300,55 @@ export class VibeAIChatPane extends ViewPane {
 	 * could otherwise clobber the restored files); the affected turns are
 	 * marked rolled-back and their restore buttons disabled. The
 	 * rollback is persisted so it survives reloads.
+	 *
+	 * Phase 247: before reverting, each affected turn's record is
+	 * reconciled against the server-side turn-transcript ledger
+	 * (getTurnChanges) — rounds executed after a dead SSE connection
+	 * never delivered their tool_result events, and without the merge
+	 * the rollback would silently miss their file changes.
 	 */
 	private async restoreCheckpoint(conversation: VibeAIConversation, turnIndex: number): Promise<void> {
 		if (conversation.stream) {
 			this.abortStream(conversation);
 		}
 		const affected = conversation.turns.slice(turnIndex);
+		// Phase 247: reconcile each affected turn's captured changes against
+		// the server-side transcript ledger before reverting. Tool rounds
+		// executed after the SSE connection died (the fetch's "TypeError:
+		// terminated") never delivered their tool_result events, so the
+		// local record can be incomplete even though the files changed on
+		// disk — the transcript (flushed at every tool boundary) holds them.
+		// consolidateChanges merges both views keeping the FIRST oldContent
+		// (pre-turn baseline) and the LAST action per file; unreliable
+		// transcript entries (trimmed old_content) are skipped server-side
+		// and null (transcript gone / backend down) keeps the local record.
+		for (const record of affected) {
+			if (record.rolledBack || !record.turnId) {
+				continue;
+			}
+			try {
+				const remote = await this.vibeAIService.getTurnChanges(conversation.sessionId, record.turnId, this.conversationWorkspaceRoot(conversation));
+				if (remote && remote.changes.length > 0) {
+					record.turnChanges = consolidateChanges([...record.turnChanges, ...remote.changes]);
+				}
+			} catch (err) {
+				this.logService.error('[VibeAI] turn-changes reconciliation failed', err);
+			}
+		}
+		const rolledBackBefore = affected.filter(record => record.rolledBack).length;
 		const allOk = await this.revertTurnRecordsNewestFirst(affected);
+		// Phase 247: a reconcile-verified empty revert is no longer a silent
+		// no-op — nothing was tracked for these turns (a read-only run, or
+		// changes made outside write/edit/delete tools, e.g. terminal
+		// commands). The dead button LOOK was the original confusion.
+		const newlyRolled = affected.filter(record => record.rolledBack).length - rolledBackBefore;
+		if (newlyRolled === 0 && allOk) {
+			this.notificationService.info(localize(
+				'vibeAIChat.checkpointNothingTracked',
+				"No tracked file changes to revert for this turn — only write / edit / delete tool calls are tracked (terminal-command side effects are not)."
+			));
+			return;
+		}
 		// Disable the restore (↺) button of every rolled-back turn and
 		// mark its footer. The copy button stays functional — the
 		// conversation text is kept, only the files were reverted.
@@ -6873,6 +8715,9 @@ export class VibeAIChatPane extends ViewPane {
 				options: {
 					selection: { startLineNumber: line, startColumn: 1, endLineNumber: end, endColumn: 1 },
 					revealIfOpened: true,
+					// Phase 225: a selection jump needs the raw text editor —
+					// bypass the markdown Preview default resolver.
+					override: DEFAULT_EDITOR_ASSOCIATION.id,
 				},
 			});
 		} else {
@@ -7094,16 +8939,22 @@ export class VibeAIChatPane extends ViewPane {
 	}
 
 	/** Resolves a backend path against the workspace root. */
-	private resolveWorkspacePath(path: string): URI | undefined {
+	private resolveWorkspacePath(path: string, root?: string): URI | undefined {
 		try {
 			if (/^([a-zA-Z]:[\\/]|\/)/.test(path)) {
 				return URI.file(path);
 			}
-			const folder = this.workspaceContextService.getWorkspace().folders[0];
-			if (!folder) {
+			// Phase 223: relative paths anchor to the conversation's project —
+			// explicit root first (the plan doc entry pins its conversation's
+			// root at doc-start), the active conversation's root otherwise
+			// (Agent Window parity: the neutral window workspace has no
+			// folders[0], the hub binds every conversation to a project),
+			// the window folder as the last resort.
+			const base = root ?? this.activeWorkspaceRoot();
+			if (!base) {
 				return undefined;
 			}
-			return URI.joinPath(folder.uri, path.replace(/\\/g, '/'));
+			return URI.joinPath(URI.file(base), path.replace(/\\/g, '/'));
 		} catch {
 			return undefined;
 		}
@@ -7257,6 +9108,7 @@ export class VibeAIChatPane extends ViewPane {
 
 	override dispose(): void {
 		this.closeModeMenu();
+		this.stopRestoreChase();
 		super.dispose();
 	}
 
@@ -7283,59 +9135,29 @@ export class VibeAIChatPane extends ViewPane {
 		if (!anchorElement) {
 			return;
 		}
-		// IAction[]: the Optimize For entry is a SubmenuAction (nested menu),
-		// which implements IAction rather than extending Action.
-		const actions: IAction[] = [
-			new Action('vibeAI.model.auto', localize('vibeAIChat.modelAuto', "Auto"), undefined, true, () => this.setModel('Auto')),
-		];
-		// Phase 70: Optimize For submenu (Cursor Router parity) — biases the
-		// Auto router's tier choice; persisted as `vibeAI.chat.autoMode`.
-		actions.push(new SubmenuAction(
-			'vibeAI.model.optimizeFor',
-			localize('vibeAIChat.optimizeFor', "Optimize For"),
-			[
-				new Action('vibeAI.model.optimizeFor.cost', localize('vibeAIChat.optimizeForCost', "Cost"), undefined, true, () => this.setAutoMode('cost')),
-				new Action('vibeAI.model.optimizeFor.balance', localize('vibeAIChat.optimizeForBalance', "Balance"), undefined, true, () => this.setAutoMode('balance')),
-				new Action('vibeAI.model.optimizeFor.intelligence', localize('vibeAIChat.optimizeForIntelligence', "Intelligence"), undefined, true, () => this.setAutoMode('intelligence')),
-			]
-		));
-		// Imported models (Settings → Models): label = display name, id = registry id.
-		// Disabled models (toggled off in settings) stay hidden here.
-		for (const model of this.modelStore.list()) {
-			if (model.disabled) {
-				continue;
-			}
-			actions.push(new Action(`vibeAI.model.${model.id}`, model.name, undefined, true, () => this.setModel(model.id)));
-		}
-		actions.push(new Action('vibeAI.model.customPick', localize('vibeAIChat.modelCustom', "Custom model…"), undefined, true, async () => {
-			try {
-				const value = await this.quickInputService.input({
-					title: localize('vibeAIChat.modelCustomTitle', "Custom model name"),
-					placeHolder: localize('vibeAIChat.modelCustomPlaceholder', "e.g. my-model (empty = Auto)"),
-					value: this.model !== 'Auto' ? this.model : '',
-				});
-				if (value !== undefined) {
-					const trimmed = value.trim();
-					this.setModel(trimmed.length > 0 ? trimmed : 'Auto');
-				}
-			} catch (err) {
-				this.logService.debug('[VibeAI] model input cancelled', err);
-			}
-		}));
 		// Reflect default/selection changes from the settings dialog live.
 		this.model = this.configurationService.getValue<string>('vibeAI.chat.model') || 'Auto';
-		for (const action of actions) {
-			action.checked = action.id === (this.model === 'Auto' ? 'vibeAI.model.auto' : `vibeAI.model.${this.model}`);
-		}
-		// Phase 70: the Optimize For submenu's checked state (Cursor parity:
-		// the current bias shows a checkmark). The parent SubmenuAction is
-		// never checked.
-		const optimizeFor = actions.find(action => action.id === 'vibeAI.model.optimizeFor') as SubmenuAction | undefined;
-		if (optimizeFor) {
-			for (const child of optimizeFor.actions) {
-				child.checked = child.id === `vibeAI.model.optimizeFor.${this.autoMode}`;
-			}
-		}
+		// Phase 227: the menu shape is shared with the plan doc pane's header
+		// dropdown (vibeAIModelMenu.ts) — persistence/focus stay here.
+		const actions = buildModelMenuActions({
+			modelStore: this.modelStore,
+			currentModel: this.model,
+			autoMode: this.autoMode,
+			setModel: model => this.setModel(model),
+			setAutoMode: mode => this.setAutoMode(mode),
+			inputCustomModel: async current => {
+				try {
+					return await this.quickInputService.input({
+						title: localize('vibeAIChat.modelCustomTitle', "Custom model name"),
+						placeHolder: localize('vibeAIChat.modelCustomPlaceholder', "e.g. my-model (empty = Auto)"),
+						value: current !== 'Auto' ? current : '',
+					});
+				} catch (err) {
+					this.logService.debug('[VibeAI] model input cancelled', err);
+					return undefined;
+				}
+			},
+		});
 		this.contextMenuService.showContextMenu({
 			getAnchor: () => anchorElement,
 			getActions: () => actions,
@@ -7378,8 +9200,10 @@ export class VibeAIChatPane extends ViewPane {
 	/**
 	 * Cursor-parity @ context: attaches the active editor file (path +
 	 * content, clipped) to the next request, surfaced as a removable chip.
+	 * Phase 184: routes into the given sink (an open edit box attaches to
+	 * its own per-message set); defaults to the main composer.
 	 */
-	private attachActiveFile(): void {
+	private attachActiveFile(sink: VibeAIAttachmentSink = this.mainAttachmentSink()): void {
 		const editor = this.codeEditorService.getFocusedCodeEditor() ?? this.codeEditorService.getActiveCodeEditor();
 		const model = editor?.getModel();
 		if (!model) {
@@ -7388,39 +9212,73 @@ export class VibeAIChatPane extends ViewPane {
 		const folder = this.workspaceContextService.getWorkspace().folders[0];
 		const relPath = folder ? relativePath(folder.uri, model.uri) : undefined;
 		const displayPath = relPath ?? basename(model.uri);
-		if (this.attachedFiles.some(f => f.path === displayPath)) {
+		if (sink.files.some(f => f.path === displayPath)) {
 			return;
 		}
 		const content = model.getValue();
-		this.attachedFiles.push({
+		sink.files.push({
 			path: displayPath,
 			content: content.length > FILE_CONTEXT_MAX_CHARS ? content.substring(0, FILE_CONTEXT_MAX_CHARS) : content,
 		});
-		this.renderChips();
+		sink.refresh();
+	}
+
+	/**
+	 * Phase 184: the main composer's attachment sink — wraps the pane-level
+	 * pending set (mirrored per conversation). Created per operation so a
+	 * tab switch mid-read never reroutes the writes (same contract as the
+	 * old `target` capture in attachDroppedResources).
+	 */
+	private mainAttachmentSink(): VibeAIAttachmentSink {
+		return {
+			files: this.attachedFiles,
+			images: this.attachedImages,
+			pendingFileReads: this.pendingFileReads,
+			pendingImageReads: this.pendingImageReads,
+			refresh: () => {
+				this.renderChips();
+				this.updateInputActions();
+			},
+		};
+	}
+
+	/** Phase 184: an open prompt edit's own attachment sink (per-message set). */
+	private editAttachmentSink(edit: VibeAIPromptEdit): VibeAIAttachmentSink {
+		return {
+			files: edit.files,
+			images: edit.images,
+			pendingFileReads: edit.pendingFileReads,
+			pendingImageReads: edit.pendingImageReads,
+			refresh: () => {
+				this.renderChips();
+				this.updateEditToolbarActions();
+			},
+		};
 	}
 
 	private renderChips(): void {
-		// Phase 48: chips render into the main input AND an open edit box
-		// — both composers show the same attachedFiles state (Cursor
-		// parity: the edit box is the input below).
-		this.renderChipsInto(this.chipsRow, this.chipsDisposables);
+		// Phase 48: chips render into the main input AND an open edit box.
+		// Phase 184: each composer renders its OWN attachment set — the
+		// edit box shows the edited message's attachments (removable,
+		// addable) and never mirrors the input below anymore.
+		this.renderChipsInto(this.chipsRow, this.chipsDisposables, this.mainAttachmentSink());
 		const edit = this.promptEdit;
 		if (edit?.chipsRow) {
-			this.renderChipsInto(edit.chipsRow, edit.chipsListeners);
+			this.renderChipsInto(edit.chipsRow, edit.chipsListeners, this.editAttachmentSink(edit));
 		}
 	}
 
-	/** Renders the attached-file chips into one composer's chips row. */
-	private renderChipsInto(row: HTMLElement | undefined, listeners: DisposableStore): void {
+	/** Renders one composer's attachment chips (its own sink) into its chips row. */
+	private renderChipsInto(row: HTMLElement | undefined, listeners: DisposableStore, sink: VibeAIAttachmentSink): void {
 		const rowEl = row;
 		if (!rowEl) {
 			return;
 		}
 		listeners.clear();
 		DOM.clearNode(rowEl);
-		rowEl.style.display = (this.attachedFiles.length > 0 || this.attachedImages.length > 0 || this.pendingImageReads.size > 0) ? 'flex' : 'none';
+		rowEl.style.display = (sink.files.length > 0 || sink.images.length > 0 || sink.pendingImageReads.size > 0) ? 'flex' : 'none';
 		// Phase 61: pasted-image chips — thumbnail + remove.
-		this.attachedImages.forEach((dataUrl, index) => {
+		sink.images.forEach((dataUrl, index) => {
 			const chip = DOM.append(rowEl, $('.vibe-ai-chip.vibe-ai-image-chip'));
 			const img = DOM.append(chip, $('img.vibe-ai-image-chip-thumb')) as HTMLImageElement;
 			img.src = dataUrl;
@@ -7428,23 +9286,22 @@ export class VibeAIChatPane extends ViewPane {
 			const remove = DOM.append(chip, $('button.codicon.codicon-close.vibe-ai-chip-remove')) as HTMLButtonElement;
 			remove.title = localize('vibeAIChat.chipRemove', "Remove from context");
 			listeners.add(DOM.addDisposableListener(remove, DOM.EventType.CLICK, () => {
-				this.attachedImages.splice(index, 1);
-				this.renderChips();
-				this.updateInputActions();
+				sink.images.splice(index, 1);
+				sink.refresh();
 			}));
 		});
 		// Phase 171: images still decoding render as dashed spinner tiles —
 		// the thumbnails replace them as each read settles.
-		for (let i = 0; i < this.pendingImageReads.size; i++) {
+		for (let i = 0; i < sink.pendingImageReads.size; i++) {
 			const chip = DOM.append(rowEl, $('.vibe-ai-chip.vibe-ai-image-chip.vibe-ai-image-loading'));
 			DOM.append(chip, $('span.codicon.codicon-loading.codicon-modifier-spin.vibe-ai-chip-spinner'));
 		}
-		for (const file of this.attachedFiles) {
+		for (const file of sink.files) {
 			// Phase 171: a read still in flight renders the chip with a
 			// spinner in place of the file icon; the content lands when it
 			// settles (finalizeDroppedFile) or the chip comes off with an
 			// error (dropPlaceholderFile).
-			const pending = this.pendingFileReads.has(file.path);
+			const pending = sink.pendingFileReads.has(file.path);
 			const chip = DOM.append(rowEl, $('.vibe-ai-chip' + (pending ? '.vibe-ai-chip-loading' : '')));
 			// Phase 105: dropped folders render the folder icon.
 			const icon = DOM.append(chip, $('span.codicon' + (pending
@@ -7457,9 +9314,14 @@ export class VibeAIChatPane extends ViewPane {
 			const remove = DOM.append(chip, $('button.codicon.codicon-close.vibe-ai-chip-remove')) as HTMLButtonElement;
 			remove.title = localize('vibeAIChat.chipRemove', "Remove from context");
 			listeners.add(DOM.addDisposableListener(remove, DOM.EventType.CLICK, () => {
-				this.attachedFiles = this.attachedFiles.filter(f => f.path !== file.path);
-				this.pendingFileReads.delete(file.path);
-				this.renderChips();
+				// Phase 184: in-place splice — the sink holds the live array
+				// (a reassignment would orphan the conversation mirror).
+				const index = sink.files.indexOf(file);
+				if (index >= 0) {
+					sink.files.splice(index, 1);
+				}
+				sink.pendingFileReads.delete(file.path);
+				sink.refresh();
 			}));
 		}
 	}
@@ -7712,6 +9574,9 @@ export class VibeAIChatPane extends ViewPane {
 				contextLimit,
 				// Ask mode estimates against the read-only tool subset.
 				readonly: this.mode !== 'agent',
+				// Phase 240: plan mode estimates against PLAN prompt + the
+				// plan whitelist (ask_questions included) — estimate = sent.
+				planMode: this.mode === 'plan',
 				// Phase 116: Side Chat — the `parent` row counts the same
 				// capped reference the turns actually send (estimate ≡
 				// sent). Main tabs omit it.
@@ -8631,6 +10496,10 @@ export class VibeAIChatPane extends ViewPane {
 		// keeps carrying it as planFile on agent turns (Cursor plan-as-file
 		// parity survives restarts).
 		conversation.planPath = session.planPath;
+		// Phase 232: the streamed plan doc rides along — the restored tab
+		// keeps ticking Build progress on the SAME doc (not a fresh
+		// PLAN.md fallback) after a restart.
+		conversation.planDocPath = session.planDocPath;
 		// Phase 177: the conversation's project folder rides along — the
 		// restored tab keeps sending the session's workspaceRoot even from
 		// the Agent Window (whose own workspace has no folder).
@@ -8642,10 +10511,12 @@ export class VibeAIChatPane extends ViewPane {
 		// Phase 61: images (data URLs) ride along on user messages — the
 		// restored thread shows the sent thumbnails again. Phase 113: the
 		// steered marker rides along too (steered bubbles restore with it).
+		// Phase 184: file/folder chips ride along too (sent chips restore).
 		conversation.history = session.messages.map(m => ({
 			role: m.role,
 			content: m.content,
 			...(m.images && m.images.length > 0 ? { images: m.images } : {}),
+			...(m.files && m.files.length > 0 ? { files: m.files } : {}),
 			...(m.steered ? { steered: true } : {}),
 		}));
 		conversation.attachedFiles = [];
@@ -8685,7 +10556,11 @@ export class VibeAIChatPane extends ViewPane {
 				// the restored turn renders the note + Continue chip).
 				limitReached: turn.limitReached,
 				error: turn.error,
-				turnChanges: [...(turn.turnChanges ?? [])],
+				// Phase 245: the resume credential rides along — a restored
+				// failed turn still retries from the failed step after a
+				// reload (the on-disk transcript outlives the app).
+				turnId: turn.turnId,
+					turnChanges: [...(turn.turnChanges ?? [])],
 				rolledBack: turn.rolledBack,
 				// Phase 88: kept turns (Keep clicked) restore the mark —
 				// the docked review bar never resurrects for them.
@@ -8707,19 +10582,62 @@ export class VibeAIChatPane extends ViewPane {
 				steeredPending: turn.steeredPending,
 				row: undefined,
 			}));
+			// Phase 218: alignment self-heal — backfill placeholder records
+			// for user turns the stored turns don't cover (the size guard's
+			// turns stripping, or a save from an alignment-broken build).
+			// Without them the Phase 47 alignment gate (turns.length ===
+			// userRowIndex) never holds again for this conversation — no
+			// further turn would ever be recorded (Retry / checkpoint
+			// restore die permanently). The placeholder carries the plain
+			// message pair only; the original record's artifacts (tools /
+			// timeline / error) are gone with it.
+			for (let index = conversation.turns.length; index < userMessages.length; index++) {
+				conversation.turns.push({
+					userText: userMessages[index].content,
+					tools: [],
+					answer: this.assistantTextAfterUserMessage(session.messages, index),
+					turnChanges: [],
+					row: undefined,
+				});
+			}
 			for (let index = 0; index < conversation.turns.length; index++) {
 				// Phase 61: the k-th turn ↔ the k-th user message — its
 				// images (if any) render as the turn's thumbnail strip.
-				this.renderUserTurn(conversation, conversation.turns[index].userText, userMessages[index]?.images);
+				// Phase 184: its file chips render into the same strip.
+				// Phase 193: the restored user row rides the record — the
+				// Retry pill on a restored failed turn re-dispatches through
+				// the same truncate-and-resend machinery as the live path
+				// (retryFailedTurn reads record.userRow).
+				conversation.turns[index].userRow = this.renderUserTurn(conversation, conversation.turns[index].userText, userMessages[index]?.images, userMessages[index]?.files);
 				this.renderAssistantFromTurn(conversation, conversation.turns[index], index);
 			}
 		} else {
 			for (const message of conversation.history) {
-				if (message.role === 'user') {
-					this.renderUserTurn(conversation, message.content, message.images);
-				} else {
+				// Phase 218: steered messages are NOT dispatched user turns —
+				// same exclusion as the turns branch above; rendering them as
+				// user rows would break the turn↔row↔history alignment the
+				// truncate / record machinery counts on.
+				if (message.role === 'user' && !message.steered) {
+					this.renderUserTurn(conversation, message.content, message.images, message.files);
+				} else if (message.role !== 'user') {
 					this.renderAssistantFromText(conversation, message.content);
 				}
+			}
+			// Phase 218: alignment self-heal (see the turns branch) — a
+			// session restored from a turns-less store backfills placeholder
+			// records so the next turns record (and Retry works) again.
+			// Plain pairs have no row refs to hand out; a retry of an error
+			// turn from THIS run rides the lastFailedTurn stash instead.
+			conversation.turns = [];
+			const plainUserMessages = conversation.history.filter(m => m.role === 'user' && !m.steered);
+			for (let index = 0; index < plainUserMessages.length; index++) {
+				conversation.turns.push({
+					userText: plainUserMessages[index].content,
+					tools: [],
+					answer: this.assistantTextAfterUserMessage(conversation.history, index),
+					turnChanges: [],
+					row: undefined,
+				});
 			}
 		}
 		// Phase 56: the docked review bar shows the restored conversation's
@@ -8785,13 +10703,13 @@ export class VibeAIChatPane extends ViewPane {
 		//     saved before Phase 60 predate the field and restore via the
 		//     older layouts below.
 		if (turn.timeline && turn.timeline.length > 0) {
-			this.renderAssistantFromTimeline(conversation, row, turn);
+			this.renderAssistantFromTimeline(conversation, row, turn, turnIndex);
 			// Phase 71: the plan card of a Plan-mode turn (after the
 			// activity blocks, before the footer — live parity).
 			this.renderRestoredPlanCard(conversation, row, turn);
 			// --- checkpoint footer (fully interactive) — Phase 56: the
 			//     files summary no longer renders per turn in the thread.
-			this.renderTurnFooterInto(conversation, row, turn.turnChanges ?? [], turn.turnStartedAt ?? Date.now(), turnIndex, this.getFinalAnswerText(turn.answer, turn.timeline));
+			this.renderTurnFooterInto(conversation, row, turn.turnChanges ?? [], turn.turnStartedAt ?? Date.now(), turnIndex, this.getFinalAnswerText(turn.answer, turn.timeline), turn.rolledBack);
 			return;
 		}
 
@@ -8859,10 +10777,16 @@ export class VibeAIChatPane extends ViewPane {
 			}
 		}
 		if (segments.length > 0) {
-			// --- error note (recorded when the turn errored)
+			// --- error note (recorded when the turn errored) — Phase 193
+			//     restyles it as the soft red card; Phase 195 (user ruling):
+			//     ANY stream error kills a running agent turn, so the Retry
+			//     pill re-arms from the error record itself — latest turn
+			//     only (earlier ones have later history riding on them).
 			if (turn.error) {
-				const errorRow = DOM.append(row, $('.vibe-ai-chat-error'));
-				errorRow.textContent = turn.error;
+				const retry = turnIndex === conversation.turns.length - 1
+					? () => this.retryFailedTurn(conversation)
+					: undefined;
+				this.appendErrorRow(row, turn.error, retry, conversation.turnRecordDisposables);
 			}
 			// --- interrupted note (Phase 97: the turn was cut short by the
 			//     next send — the partial progress above stays, the note
@@ -8872,12 +10796,13 @@ export class VibeAIChatPane extends ViewPane {
 				note.textContent = localize('vibeAIChat.turnInterrupted', "Interrupted — a new message was sent before this turn finished");
 			}
 			for (const segment of segments) {
-				const segText = turn.answer.slice(segment.textStart, segment.textEnd);
-				if (segText.length > 0) {
-					const segBody = DOM.append(row, $('.vibe-ai-chat-markdown'));
-					const rendered = this.markdownRendererService.render(new MarkdownString(segText, { isTrusted: true, supportThemeIcons: true, supportHtml: true }), this.buildMarkdownRenderOptions(conversation, false), segBody);
-					conversation.turnRecordDisposables.add(rendered);
-				}
+					const segText = turn.answer.slice(segment.textStart, segment.textEnd);
+					if (segText.length > 0) {
+						const segBody = DOM.append(row, $('.vibe-ai-chat-markdown'));
+						const rendered = this.markdownRendererService.render(new MarkdownString(segText, { isTrusted: true, supportThemeIcons: true, supportHtml: true }), this.buildMarkdownRenderOptions(conversation, false), segBody);
+						conversation.turnRecordDisposables.add(rendered);
+						this.enhancePaneFileChips(segBody);
+					}
 				// This segment's mutating cards, kept in tool order (tools
 				// without an id — the pre-id era — never reach this branch).
 				const segTools = segment.toolIds
@@ -8907,19 +10832,23 @@ export class VibeAIChatPane extends ViewPane {
 				placeholder.textContent = turn.outputTruncated
 					? localize(
 						'vibeAIChat.truncatedNoResponse',
-						"(response truncated — the reasoning used up the output budget; raise backend LLM_AGENT_MAX_TOKENS)"
+						"(response truncated — the reasoning used up the output budget)"
 					)
 					: localize('vibeAIChat.emptyResponse', "(no response)");
 				placeholder.style.color = 'var(--vscode-descriptionForeground)';
 				placeholder.style.fontStyle = 'italic';
+				// Phase 201: the truncated reminder carries a Continue chip
+				// (same as the note below the answer) — no exception here.
+				if (turn.outputTruncated) {
+					const chipRow = DOM.append(row, $('.vibe-ai-output-truncated-note'));
+					this.appendTruncationChip(conversation, chipRow);
+				}
 			}
-			// --- truncation note (recorded when the round hit the output budget)
+			// --- truncation note + Continue chip (Phase 201: same shape as
+			//     the limit-reached chip; Phase 200's auto-continuation
+			//     already ran — this note means the budget is exhausted).
 			if (turn.outputTruncated && turn.answer.length > 0) {
-				const note = DOM.append(row, $('.vibe-ai-output-truncated-note'));
-				note.textContent = localize(
-					'vibeAIChat.outputTruncated',
-					"Response truncated — the model hit its per-round output budget (raise backend LLM_AGENT_MAX_TOKENS)"
-				);
+				this.appendOutputTruncatedNote(conversation, row);
 			}
 			// --- limit-reached note + Continue chip (Phase 103: the loop
 			//     exhausted its rounds/segments or the context window —
@@ -8946,10 +10875,16 @@ export class VibeAIChatPane extends ViewPane {
 				}
 			}
 
-			// --- error note (recorded when the turn errored)
+			// --- error note (recorded when the turn errored) — Phase 193
+			//     restyles it as the soft red card; Phase 195 (user ruling):
+			//     ANY stream error kills a running agent turn, so the Retry
+			//     pill re-arms from the error record itself — latest turn
+			//     only (earlier ones have later history riding on them).
 			if (turn.error) {
-				const errorRow = DOM.append(row, $('.vibe-ai-chat-error'));
-				errorRow.textContent = turn.error;
+				const retry = turnIndex === conversation.turns.length - 1
+					? () => this.retryFailedTurn(conversation)
+					: undefined;
+				this.appendErrorRow(row, turn.error, retry, conversation.turnRecordDisposables);
 			}
 
 			// --- interrupted note (Phase 97: the turn was cut short by the
@@ -8965,25 +10900,30 @@ export class VibeAIChatPane extends ViewPane {
 			if (turn.answer.length > 0) {
 				const rendered = this.markdownRendererService.render(new MarkdownString(turn.answer, { isTrusted: true, supportThemeIcons: true, supportHtml: true }), this.buildMarkdownRenderOptions(conversation, false), body);
 				conversation.turnRecordDisposables.add(rendered);
+				this.enhancePaneFileChips(body);
 			} else if (!turn.interrupted) {
 				const placeholder = DOM.append(body, $('span.vibe-ai-chat-empty-response'));
 				placeholder.textContent = turn.outputTruncated
 					? localize(
 						'vibeAIChat.truncatedNoResponse',
-						"(response truncated — the reasoning used up the output budget; raise backend LLM_AGENT_MAX_TOKENS)"
+						"(response truncated — the reasoning used up the output budget)"
 					)
 					: localize('vibeAIChat.emptyResponse', "(no response)");
 				placeholder.style.color = 'var(--vscode-descriptionForeground)';
 				placeholder.style.fontStyle = 'italic';
+				// Phase 201: the truncated reminder carries a Continue chip
+				// (same as the note below the answer) — no exception here.
+				if (turn.outputTruncated) {
+					const chipRow = DOM.append(row, $('.vibe-ai-output-truncated-note'));
+					this.appendTruncationChip(conversation, chipRow);
+				}
 			}
 
-			// --- truncation note (recorded when the round hit the output budget)
+			// --- truncation note + Continue chip (Phase 201: same shape as
+			//     the limit-reached chip; Phase 200's auto-continuation
+			//     already ran — this note means the budget is exhausted).
 			if (turn.outputTruncated && turn.answer.length > 0) {
-				const note = DOM.append(row, $('.vibe-ai-output-truncated-note'));
-				note.textContent = localize(
-					'vibeAIChat.outputTruncated',
-					"Response truncated — the model hit its per-round output budget (raise backend LLM_AGENT_MAX_TOKENS)"
-				);
+				this.appendOutputTruncatedNote(conversation, row);
 			}
 			// --- limit-reached note + Continue chip (Phase 103: the loop
 			//     exhausted its rounds/segments or the context window —
@@ -9000,7 +10940,7 @@ export class VibeAIChatPane extends ViewPane {
 		// --- checkpoint footer (fully interactive) — Phase 56: the files
 		//     summary no longer renders per turn in the thread; the docked
 		//     review bar above the input shows the latest turn's changes.
-		this.renderTurnFooterInto(conversation, row, turn.turnChanges ?? [], turn.turnStartedAt ?? Date.now(), turnIndex, this.getFinalAnswerText(turn.answer, turn.timeline));
+		this.renderTurnFooterInto(conversation, row, turn.turnChanges ?? [], turn.turnStartedAt ?? Date.now(), turnIndex, this.getFinalAnswerText(turn.answer, turn.timeline), turn.rolledBack);
 	}
 
 	/**
@@ -9012,7 +10952,7 @@ export class VibeAIChatPane extends ViewPane {
 	 * renders outside as the answer body. A thinking-only turn keeps its
 	 * row-level "Thought for Xs" blocks (no shell).
 	 */
-	private renderAssistantFromTimeline(conversation: VibeAIConversation, row: HTMLElement, turn: IVibeAIPersistedTurn): void {
+	private renderAssistantFromTimeline(conversation: VibeAIConversation, row: HTMLElement, turn: IVibeAIPersistedTurn, turnIndex?: number): void {
 		// Phase 98: failed tools (status 'error') never render — dropped
 		// from the live Worked section before capture (and from pre-98
 		// records); timeline nodes referencing them skip on the id lookup.
@@ -9146,10 +11086,16 @@ export class VibeAIChatPane extends ViewPane {
 				this.appendRestoredTextBody(conversation, row, turn, nodes[answerIndex]);
 			}
 		}
-		// --- error note (recorded when the turn errored)
+		// --- error note (recorded when the turn errored) — Phase 193
+		//     restyles it as the soft red card; Phase 195 (user ruling):
+		//     ANY stream error kills a running agent turn, so the Retry
+		//     pill re-arms from the error record itself — latest turn
+		//     only (earlier ones have later history riding on them).
 		if (turn.error) {
-			const errorRow = DOM.append(row, $('.vibe-ai-chat-error'));
-			errorRow.textContent = turn.error;
+			const retry = turnIndex === conversation.turns.length - 1
+				? () => this.retryFailedTurn(conversation)
+				: undefined;
+			this.appendErrorRow(row, turn.error, retry, conversation.turnRecordDisposables);
 		}
 		// --- interrupted note (Phase 97: the turn was cut short by the next
 		//     send — the partial progress above stays, the note explains why
@@ -9182,19 +11128,23 @@ export class VibeAIChatPane extends ViewPane {
 			placeholder.textContent = turn.outputTruncated
 				? localize(
 					'vibeAIChat.truncatedNoResponse',
-					"(response truncated — the reasoning used up the output budget; raise backend LLM_AGENT_MAX_TOKENS)"
+					"(response truncated — the reasoning used up the output budget)"
 				)
 				: localize('vibeAIChat.emptyResponse', "(no response)");
 			placeholder.style.color = 'var(--vscode-descriptionForeground)';
 			placeholder.style.fontStyle = 'italic';
+			// Phase 201: the truncated reminder carries a Continue chip
+			// (same as the note below the answer) — no exception here.
+			if (turn.outputTruncated) {
+				const chipRow = DOM.append(row, $('.vibe-ai-output-truncated-note'));
+				this.appendTruncationChip(conversation, chipRow);
+			}
 		}
-		// --- truncation note (recorded when the round hit the output budget)
+		// --- truncation note + Continue chip (Phase 201: same shape as
+		//     the limit-reached chip; Phase 200's auto-continuation
+		//     already ran — this note means the budget is exhausted).
 		if (turn.outputTruncated && turn.answer.length > 0) {
-			const note = DOM.append(row, $('.vibe-ai-output-truncated-note'));
-			note.textContent = localize(
-				'vibeAIChat.outputTruncated',
-				"Response truncated — the model hit its per-round output budget (raise backend LLM_AGENT_MAX_TOKENS)"
-			);
+			this.appendOutputTruncatedNote(conversation, row);
 		}
 		// --- limit-reached note + Continue chip (Phase 103: the loop
 		//     exhausted its rounds/segments or the context window —
@@ -9274,6 +11224,7 @@ export class VibeAIChatPane extends ViewPane {
 		const segBody = DOM.append(parent, $('.vibe-ai-chat-markdown'));
 		const rendered = this.markdownRendererService.render(new MarkdownString(segText, { isTrusted: true, supportThemeIcons: true, supportHtml: true }), this.buildMarkdownRenderOptions(conversation, false), segBody);
 		conversation.turnRecordDisposables.add(rendered);
+		this.enhancePaneFileChips(segBody);
 	}
 
 	/**
@@ -9298,14 +11249,15 @@ export class VibeAIChatPane extends ViewPane {
 		return card;
 	}
 
-	/** Renders a completed assistant turn from plain text (history restore). */
-	private renderAssistantFromText(conversation: VibeAIConversation, text: string): void {
-		const row = DOM.append(conversation.container, $('.vibe-ai-turn.vibe-ai-turn-assistant'));
-		const body = DOM.append(row, $('.vibe-ai-chat-markdown'));
-		if (text.length > 0) {
-			const rendered = this.markdownRendererService.render(new MarkdownString(text, { isTrusted: true, supportThemeIcons: true, supportHtml: true }), this.buildMarkdownRenderOptions(conversation, false), body);
-			conversation.turnDisposables.add(rendered);
-		} else {
+		/** Renders a completed assistant turn from plain text (history restore). */
+		private renderAssistantFromText(conversation: VibeAIConversation, text: string): void {
+			const row = DOM.append(conversation.container, $('.vibe-ai-turn.vibe-ai-turn-assistant'));
+			const body = DOM.append(row, $('.vibe-ai-chat-markdown'));
+			if (text.length > 0) {
+				const rendered = this.markdownRendererService.render(new MarkdownString(text, { isTrusted: true, supportThemeIcons: true, supportHtml: true }), this.buildMarkdownRenderOptions(conversation, false), body);
+				conversation.turnDisposables.add(rendered);
+				this.enhancePaneFileChips(body);
+			} else {
 			body.textContent = localize('vibeAIChat.emptyResponse', "(no response)");
 			body.style.color = 'var(--vscode-descriptionForeground)';
 			body.style.fontStyle = 'italic';
@@ -9316,25 +11268,40 @@ export class VibeAIChatPane extends ViewPane {
 
 	private showError(message: string, conversation: VibeAIConversation, retryable = false): void {
 		// Errors belong to the streaming conversation's thread.
-		const row = DOM.append(conversation.container, $('.vibe-ai-chat-error'));
-		row.textContent = message;
 		// Phase 134: Cursor-parity Retry — transient provider errors (the
-		// backend's `retryable` classification) render a Retry button that
+		// backend's `retryable` classification) render a Retry pill that
 		// re-sends the failed turn as a fresh turn (retryFailedTurn below).
 		// The listener dies with the turn (turnDisposables) like every
 		// other per-turn row.
-		if (retryable) {
+		this.appendErrorRow(conversation.container, message, retryable ? () => this.retryFailedTurn(conversation) : undefined, conversation.turnDisposables);
+		this.scrollBottom(conversation);
+	}
+
+	/**
+	 * Phase 193: the error row, shared by the live stream error and the
+	 * restored failed turns (four render sites) — a soft red card: error
+	 * icon, the message, and (for retryable provider errors) a right-aligned
+	 * Retry pill. `listenerStore` owns the retry listener — turnDisposables
+	 * for the live path, turnRecordDisposables for restored turns.
+	 */
+	private appendErrorRow(parent: HTMLElement, message: string, onRetry: (() => void) | undefined, listenerStore: DisposableStore): HTMLElement {
+		const row = DOM.append(parent, $('.vibe-ai-chat-error'));
+		const icon = DOM.append(row, $('span.codicon.codicon-error.vibe-ai-chat-error-icon'));
+		icon.setAttribute('aria-hidden', 'true');
+		const text = DOM.append(row, $('span.vibe-ai-chat-error-text'));
+		text.textContent = message;
+		if (onRetry) {
 			const retryBtn = DOM.append(row, $('span.vibe-ai-chat-error-retry'));
 			retryBtn.setAttribute('role', 'button');
 			retryBtn.title = localize('vibeAIChat.retryTurnTitle', "Re-send this turn");
 			DOM.append(retryBtn, $('span.codicon.codicon-refresh'));
 			const retryLabel = DOM.append(retryBtn, $('span.vibe-ai-chat-error-retry-label'));
 			retryLabel.textContent = localize('vibeAIChat.retryTurn', "Retry");
-			conversation.turnDisposables.add(DOM.addDisposableListener(retryBtn, DOM.EventType.CLICK, () => {
-				this.retryFailedTurn(conversation);
+			listenerStore.add(DOM.addDisposableListener(retryBtn, DOM.EventType.CLICK, () => {
+				onRetry();
 			}));
 		}
-		this.scrollBottom(conversation);
+		return row;
 	}
 
 	/**
@@ -9369,8 +11336,13 @@ export class VibeAIChatPane extends ViewPane {
 	}
 
 	/**
-	 * Phase 134: Cursor-parity Retry — re-sends the latest failed turn as
-	 * a fresh turn. Reuses the prompt-edit resend machinery
+	 * Phase 134: Cursor-parity Retry. Phase 246: with the failed turn's
+	 * transcript id (the `turn_start` event, persisted on the record) the
+	 * retry RESUMES the turn from its last tool boundary — completed tool
+	 * rounds and their file changes are kept, only the failed step is
+	 * redone (resumeFailedTurn below). Without the id (dispatch-only
+	 * paths, pre-245 records, transcript lost) it falls back to the
+	 * legacy full re-send: reuses the prompt-edit resend machinery
 	 * (truncateFromUserTurn): the failed turn is truncated from view +
 	 * state (its partial file changes reverted, Phase 109 clean-slate
 	 * semantics), then the original user text re-rides as the turn's user
@@ -9379,7 +11351,7 @@ export class VibeAIChatPane extends ViewPane {
 	 * Only the LATEST failed turn is retryable — earlier ones have later
 	 * history riding on them.
 	 */
-	private retryFailedTurn(conversation: VibeAIConversation): void {
+	private retryFailedTurn(conversation: VibeAIConversation, skipResume = false): void {
 		if (conversation.stream) {
 			// A turn is running — retry only makes sense on a settled thread.
 			return;
@@ -9389,14 +11361,39 @@ export class VibeAIChatPane extends ViewPane {
 			// (mode/model/context/limit) — same guard as the edit resend.
 			return;
 		}
-		const record = conversation.turns[conversation.turns.length - 1];
-		if (!record?.error || !record.userRow) {
-			// No failed latest turn (or a pre-Phase-134 record without the
-			// user-row ref) — nothing to retry.
+		// Phase 195: the error record is the retry credential (any stream
+		// error kills a running agent turn). Phase 218: when the record
+		// pipeline is broken — a conversation restored from a turns-less
+		// store before the alignment self-heal ran, or any other
+		// record-less failure — fall back to the failed turn's row + prompt
+		// stashed at stream-error time; the button must never sit there
+		// silently no-oping. Phase 246: the record/stash also carries the
+		// turn transcript id (resume credential).
+		const lastRecord = conversation.turns[conversation.turns.length - 1];
+		let userText: string;
+		let userRow: HTMLElement;
+		let turnId: string | undefined;
+		if (lastRecord?.error !== undefined && lastRecord.userText && lastRecord.userRow) {
+			userText = lastRecord.userText;
+			userRow = lastRecord.userRow;
+			turnId = lastRecord.turnId;
+		} else {
+			const fallback = conversation.lastFailedTurn;
+			if (!fallback) {
+				// No failed latest turn (or a record without the user-row
+				// ref) and no stash — nothing to retry.
+				return;
+			}
+			userText = fallback.userText;
+			userRow = fallback.userRow;
+			turnId = fallback.turnId;
+		}
+		// Phase 246: resume from the failed step (Plan mode never produces
+		// a transcript — its approval flow restarts the whole turn).
+		if (turnId && !skipResume && this.mode !== 'plan') {
+			this.resumeFailedTurn(conversation, userText, userRow, turnId);
 			return;
 		}
-		const userText = record.userText;
-		const userRow = record.userRow;
 		void this.truncateFromUserTurn(conversation, userRow).then(turnIndex => {
 			if (turnIndex === -1 || conversation.stream) {
 				// Not a thread row (defensive), or a newer turn started
@@ -9410,6 +11407,195 @@ export class VibeAIChatPane extends ViewPane {
 			this.history.push({ role: 'user', content: userText });
 			this.dispatchTurn(conversation, userText, userRow);
 		});
+	}
+
+	/**
+	 * Phase 246: resume-from-failed-step retry. The failed turn's thread
+	 * stays exactly as rendered (no truncate, no revert — the server
+	 * transcript's context matches the disk state); the error card is
+	 * removed, a divider note marks the continuation, and the same user
+	 * row + turn identity re-stream the agent loop from the server-side
+	 * transcript (request carries resumeTurnId; the backend reloads the
+	 * transcript, appends a resume seed and continues — the model redoes
+	 * only the failed step). finishStreaming merges the result into the
+	 * failed turn's record.
+	 */
+	private resumeFailedTurn(conversation: VibeAIConversation, userText: string, userRow: HTMLElement, turnId: string): void {
+		const requestId = `vibe-${++this.requestCounter}`;
+		// The error card(s) of THIS turn go away — the retry supersedes
+		// them. Every error row after the user row belongs to this latest
+		// failed turn (retry is latest-turn-only).
+		let sibling = userRow.nextElementSibling;
+		while (sibling) {
+			const next = sibling.nextElementSibling;
+			if (sibling.classList.contains('vibe-ai-chat-error')) {
+				sibling.remove();
+			}
+			sibling = next;
+		}
+		// The divider note lands before the new assistant row (startAssistantTurn
+		// appends it at the container end).
+		const divider = DOM.append(conversation.container, $('.vibe-ai-resume-divider'));
+		const dividerIcon = DOM.append(divider, $('span.codicon.codicon-refresh'));
+		dividerIcon.setAttribute('aria-hidden', 'true');
+		const dividerLabel = DOM.append(divider, $('span.vibe-ai-resume-divider-label'));
+		dividerLabel.textContent = localize('vibeAIChat.resumeRetry', "Retrying from the failed step…");
+		this.scrollBottom(conversation);
+
+		// Same turn identity: the user row + prompt are reused (no new
+		// bubble, no history push — the server transcript carries the
+		// context). The resume flag routes finishStreaming into the
+		// record-merge path.
+		this.startAssistantTurn(conversation, requestId, userText, userRow);
+		if (conversation.stream) {
+			conversation.stream.resumeDivider = divider;
+			conversation.stream.isResume = true;
+			conversation.stream.turnId = turnId;
+		}
+		this.updateInputActions();
+		this.renderTabs();
+
+		// Model routing mirrors dispatchTurn (the ACTIVE conversation's
+		// pane mirrors — same guards as retryFailedTurn above).
+		const configured = this.model !== 'Auto' ? this.modelStore.get(this.model) : undefined;
+		const provider = configured ? this.modelStore.resolveProvider(configured) : undefined;
+		const autoPool = this.model === 'Auto' ? this.buildAutoPool() : undefined;
+		if (!this.hasUsableModel(configured, provider, autoPool)) {
+			this.showError(VIBE_AI_NO_MODEL_MESSAGE, conversation);
+			this.finishStreaming(conversation, requestId);
+			return;
+		}
+		const request: IVibeAIChatRequest = {
+			// The text history up to and INCLUDING the original user
+			// message (the trailing partial answer is dropped) — the
+			// transcript carries the real context; this payload only
+			// feeds the endpoint's user_input (hooks / logging).
+			messages: this.applySideMentions(this.resumeHistory(userText)),
+			stream: true,
+			sessionId: conversation.sessionId,
+			contextLimit: this.contextLimit,
+			...(conversation.kind === 'side'
+				? { sideOf: conversation.parentSessionId, parentContext: this.buildParentContext(conversation.parentSessionId) }
+				: {}),
+			...(conversation.goal ? { goal: conversation.goal } : {}),
+			...(this.mode === 'agent' && conversation.planPath ? { planFile: conversation.planPath } : {}),
+			permissionMode: this.permissionMode,
+			workspaceRoot: this.conversationWorkspaceRoot(conversation),
+			...(this.model === 'Auto'
+				? {
+					model: 'auto',
+					...(autoPool && autoPool.length > 0 ? { autoPool, autoMode: this.autoMode } : {}),
+				}
+				: {
+					model: configured?.modelId ?? this.model,
+					...(provider ? { provider } : {}),
+				}),
+			// Phase 246: the resume credential — the backend reloads this
+			// turn's transcript and continues from the last tool boundary.
+			resumeTurnId: turnId,
+		};
+		const streamPromise = this.mode === 'agent'
+			? this.vibeAIService.agentStream(requestId, request)
+			: this.vibeAIService.chatStream(requestId, request);
+		streamPromise.catch(err => {
+			this.logService.error('[VibeAI] resume stream rejected', err);
+		}).finally(() => {
+			this.finishStreaming(conversation, requestId);
+		});
+	}
+
+	/**
+	 * Phase 246: the text history slice ending at the failed turn's user
+	 * message (the trailing partial assistant answer is dropped — the
+	 * server transcript carries the real context; the payload only feeds
+	 * the endpoint's user_input for hooks / logging). Falls back to the
+	 * full history when the prompt is not found (defensive).
+	 */
+	private resumeHistory(userText: string): IVibeAIMessage[] {
+		for (let i = this.history.length - 1; i >= 0; i--) {
+			const message = this.history[i];
+			if (message.role === 'user' && message.content === userText) {
+				return this.history.slice(0, i + 1);
+			}
+		}
+		return [...this.history];
+	}
+
+	/**
+	 * Phase 246: the resume retry's transcript could not be loaded
+	 * (backend restarted into another workspace / pruned file / id
+	 * mismatch). The attempt rendered nothing but the divider — tear it
+	 * down silently (no record, no history push) and fall back to the
+	 * legacy truncate + full re-send. The old stream's done event (it
+	 * follows immediately) no-ops: the stream state is gone.
+	 */
+	private handleResumeUnavailable(conversation: VibeAIConversation, data: IVibeAIStreamData): void {
+		const state = conversation.stream;
+		if (!state || state.requestId !== data.requestId || !state.isResume) {
+			return;
+		}
+		state.resumeDivider?.remove();
+		state.currentAssistantRow?.remove();
+		conversation.stream = undefined;
+		this.updateInputActions();
+		this.renderTabs();
+		this.retryFailedTurn(conversation, true);
+	}
+
+	/**
+	 * Phase 246: a resume retry finishes into the SAME failed turn's
+	 * record — the new tool snapshots, answer text, thinking and timeline
+	 * merge in (timeline offsets shift by the merged text bases), the
+	 * error clears when the resume succeeded and re-sets when it failed
+	 * again (the record's turnId stays — the next Retry resumes the
+	 * newest transcript). Returns false when no matching record exists
+	 * (stash-only credential) — the caller falls back to the normal
+	 * capture path.
+	 */
+	private mergeResumedTurnRecord(conversation: VibeAIConversation, state: VibeAIStreamState, captured: VibeAITurnRecord): boolean {
+		const index = conversation.turns.length - 1;
+		const record = conversation.turns[index];
+		if (!record || record.userRow !== state.userRow) {
+			return false;
+		}
+		const answerSep = record.answer ? '\n\n' : '';
+		const answerBase = record.answer ? record.answer.length + answerSep.length : 0;
+		const thinkingMerged = [record.thinking, captured.thinking].filter((value): value is string => !!value && value.length > 0).join('\n\n');
+		const thinkBase = record.thinking
+			? (captured.thinking ? record.thinking.length + 2 : record.thinking.length)
+			: 0;
+		const shiftedTimeline = (captured.timeline ?? []).map(node => {
+			const base = node.kind === 'thinking' ? thinkBase : answerBase;
+			return {
+				...node,
+				start: node.start !== undefined ? base + node.start : undefined,
+				end: node.end !== undefined ? base + node.end : undefined,
+			};
+		});
+		conversation.turns[index] = {
+			...record,
+			tools: [...(record.tools ?? []), ...captured.tools],
+			answer: captured.answer ? `${record.answer}${answerSep}${captured.answer}` : record.answer,
+			thinking: thinkingMerged || undefined,
+			timeline: [...(record.timeline ?? []), ...shiftedTimeline],
+			turnChanges: [...record.turnChanges, ...captured.turnChanges],
+			routedModel: captured.routedModel ?? record.routedModel,
+			contextCompressed: record.contextCompressed || captured.contextCompressed || undefined,
+			outputTruncated: record.outputTruncated || captured.outputTruncated || undefined,
+			limitReached: record.limitReached || captured.limitReached || undefined,
+			steered: record.steered || captured.steered
+				? [...(record.steered ?? []), ...(captured.steered ?? [])]
+				: undefined,
+			steeredPending: record.steeredPending || captured.steeredPending
+				? [...(record.steeredPending ?? []), ...(captured.steeredPending ?? [])]
+				: undefined,
+			// The resumed attempt's outcome: success clears the error,
+			// another failure re-sets it (the turn stays retryable).
+			error: captured.error,
+			interrupted: captured.interrupted,
+			turnId: state.turnId ?? record.turnId,
+		};
+		return true;
 	}
 
 	private cancel(): void {
@@ -9441,17 +11627,15 @@ export class VibeAIChatPane extends ViewPane {
 			return;
 		}
 		this.vibeAIService.cancel(state.requestId);
-		// Plan mode awaiting approval: the awaiting guard in
-		// finishStreaming keeps a live turn open — fold the card to its
-		// cancelled state first (same as cancelPlan) so the interrupt
-		// finalizes instead.
+		// Plan mode (Phase 222): a live awaiting state only exists in the
+		// card-to-done window — fold the decision card to its cancelled
+		// state so the interrupt finalizes with the plan not executed.
 		if (state.planPhase === 'awaiting') {
 			state.planPhase = undefined;
-			if (state.planCardRoot) {
-				state.planCardRoot.classList.remove('vibe-ai-plan-awaiting');
-				state.planCardRoot.classList.add('vibe-ai-plan-cancelled');
-				state.planCardRoot.querySelector('.vibe-ai-plan-actions')?.remove();
-			}
+			// Phase 219: the doc editor's approval widget folds with the
+			// bar/card (same as cancelPlan).
+			this.disposePlanApprovalWidget(state);
+			this.foldPlanAwaitingToCancelled(state.planCardRoot);
 		}
 		this.finishStreaming(conversation, state.requestId, true);
 	}
@@ -9766,6 +11950,20 @@ export class VibeAIChatPane extends ViewPane {
 				conversation.pendingLatestScroll = false;
 			}
 		}, RESTORE_SCROLL_SETTLE_MS);
+		// Phase 208: the landing passes finish while the thread may still
+		// be growing (mermaid webviews mount deferred, images decode,
+		// code-block editors initialize) — every late growth shoves the
+		// landed viewport up with nothing left to re-land it. A bottom
+		// landing therefore arms the restore chase: the thread keeps
+		// re-pinning to the bottom until the user scrolls up, switches
+		// tabs, or the growth settles. A mid-thread (recorded offset)
+		// landing must not chase — an armed chase from an earlier
+		// bottom landing stops.
+		if (this.landingAtBottom(conversation)) {
+			this.startRestoreChase(conversation);
+		} else {
+			this.stopRestoreChase();
+		}
 	}
 
 	/**
@@ -9811,6 +12009,84 @@ export class VibeAIChatPane extends ViewPane {
 			return Math.abs(el.scrollTop - recorded.top) <= 2;
 		}
 		return this.isScrolledToBottom(el);
+	}
+
+	/**
+	 * Phase 208: whether a landing targets the very bottom — no recorded
+	 * position, or one pinned at the bottom (mirrors applyRecordedScroll's
+	 * branch). Only bottom landings arm the restore chase.
+	 */
+	private landingAtBottom(conversation: VibeAIConversation): boolean {
+		const recorded = conversation.recordedScroll;
+		return !recorded || recorded.atBottom;
+	}
+
+	/**
+	 * Phase 208: arms the restore chase for a bottom landing. A
+	 * ResizeObserver on the conversation's thread fires on every block
+	 * height change; while the conversation is still the active tab and
+	 * the user has not scrolled up, each growth re-pins the bottom and
+	 * rearms the idle window. The chase ends on the idle timeout (the
+	 * thread settled), the user scrolling up (followThreadBottom flips in
+	 * the scroll listener), a tab switch (the guard in the callback), or
+	 * pane dispose. A user reading mid-thread is never yanked: their
+	 * scroll-up is what disarms the chase.
+	 */
+	private startRestoreChase(conversation: VibeAIConversation): void {
+		if (!this.messagesContainer || typeof ResizeObserver === 'undefined') {
+			return;
+		}
+		this.stopRestoreChase();
+		const observer = new ResizeObserver(() => {
+			if (this._store.isDisposed) {
+				this.stopRestoreChase();
+				return;
+			}
+			if (conversation.id !== this.activeConversationId || !this.followThreadBottom) {
+				this.stopRestoreChase();
+				return;
+			}
+			this.scrollBottom(conversation, true);
+			this.rearmRestoreChase();
+		});
+		observer.observe(conversation.container);
+		const win = DOM.getWindow(this.messagesContainer);
+		this.restoreChase = {
+			conversationId: conversation.id,
+			observer,
+			idleTimer: win.setTimeout(() => this.stopRestoreChase(), RESTORE_CHASE_IDLE_MS),
+		};
+	}
+
+	/**
+	 * Phase 208: extends the chase's idle window — each observed growth
+	 * means the thread is still settling, so the chase outlives it until
+	 * RESTORE_CHASE_IDLE_MS passes without growth.
+	 */
+	private rearmRestoreChase(): void {
+		const chase = this.restoreChase;
+		if (!chase || !this.messagesContainer) {
+			return;
+		}
+		const win = DOM.getWindow(this.messagesContainer);
+		win.clearTimeout(chase.idleTimer);
+		chase.idleTimer = win.setTimeout(() => this.stopRestoreChase(), RESTORE_CHASE_IDLE_MS);
+	}
+
+	/**
+	 * Phase 208: disarms the restore chase (disconnects the observer,
+	 * clears the idle timer). Safe to call repeatedly / when unarmed.
+	 */
+	private stopRestoreChase(): void {
+		const chase = this.restoreChase;
+		if (!chase) {
+			return;
+		}
+		this.restoreChase = undefined;
+		chase.observer.disconnect();
+		if (this.messagesContainer) {
+			DOM.getWindow(this.messagesContainer).clearTimeout(chase.idleTimer);
+		}
 	}
 
 	/**

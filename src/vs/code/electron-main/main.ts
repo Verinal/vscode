@@ -274,7 +274,15 @@ class CodeMain {
 		services.set(IPolicyService, policyService);
 
 		// VibeCoding AI backend service (Phase 1)
-		services.set(IVibeAIService, disposables.add(new VibeAIService(productService, logService)));
+		const vibeAIService = disposables.add(new VibeAIService(productService, logService));
+		services.set(IVibeAIService, vibeAIService);
+		// Phase 217: tree-kill the spawned backend on quit. The process.once('exit')
+		// fallback below fires during Node teardown, where the async taskkill child
+		// races the parent's exit and the backend survives as an orphan; 'will-quit'
+		// fires while the event loop is still alive (the lifecycle service holds the
+		// quit until its onWillShutdown work completes), so the kill reliably lands.
+		// An externally started backend (backendChild === null) stays untouched.
+		app.once('will-quit', () => vibeAIService.dispose());
 
 		// Configuration
 		const configurationService = new ConfigurationService(userDataProfilesMainService.defaultProfile.settingsResource, fileService, policyService, logService);

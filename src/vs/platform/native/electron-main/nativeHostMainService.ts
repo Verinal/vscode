@@ -36,6 +36,7 @@ import { IThemeMainService } from '../../theme/electron-main/themeMainService.js
 import { defaultWindowState, ICodeWindow, LoadReason } from '../../window/electron-main/window.js';
 import { IColorScheme, IOpenedAuxiliaryWindow, IOpenedMainWindow, IOpenEmptyWindowOptions, IOpenWindowOptions, IPoint, IRectangle, IWindowOpenable } from '../../window/common/window.js';
 import { defaultBrowserWindowOptions, IWindowsMainService, OpenContext } from '../../windows/electron-main/windows.js';
+import { findWindowOnFile } from '../../windows/electron-main/windowsFinder.js';
 import { isWorkspaceIdentifier, toWorkspaceIdentifier } from '../../workspace/common/workspace.js';
 import { IWorkspacesManagementMainService } from '../../workspaces/electron-main/workspacesManagementMainService.js';
 import { VSBuffer } from '../../../base/common/buffer.js';
@@ -422,6 +423,41 @@ export class NativeHostMainService extends Disposable implements INativeHostMain
 			forceNewWindow: true,
 			noRecentEntry: true,
 			vibeAgentWindow: true,
+		});
+		if (windows.length > 0) {
+			windows[0].focus();
+		}
+	}
+
+	/**
+	 * VibeCoding fork: the agent window's "IDE ↗" jump (Cursor parity). A
+	 * project is not opened into a second window when an IDE window for it
+	 * already exists — that window is focused instead (the same reuse rule
+	 * the title-bar pill's Agent Window follows in the other direction).
+	 * Only when no window has the folder open does this force a new one:
+	 * `forceNewWindow` is load-bearing there, otherwise `open` would reuse
+	 * the calling agent window (neutral workspace) and morph the hub into
+	 * an IDE in place — Phase 181 r23's two-app rule.
+	 */
+	async openVibeIdeWindow(windowId: number | undefined, folderUri?: UriComponents): Promise<void> {
+		const folder = folderUri ? URI.revive(folderUri) : undefined;
+		if (folder) {
+			const existing = await findWindowOnFile(
+				this.windowsMainService.getWindows(),
+				folder,
+				async workspace => workspace.configPath.scheme === Schemas.file ? this.workspacesManagementMainService.resolveLocalWorkspace(workspace.configPath) : undefined
+			);
+			if (existing) {
+				existing.focus();
+				return;
+			}
+		}
+		const windows = await this.windowsMainService.open({
+			context: OpenContext.API,
+			contextWindowId: windowId,
+			cli: this.environmentMainService.args,
+			urisToOpen: folder ? [{ folderUri: folder }] : [],
+			forceNewWindow: true,
 		});
 		if (windows.length > 0) {
 			windows[0].focus();

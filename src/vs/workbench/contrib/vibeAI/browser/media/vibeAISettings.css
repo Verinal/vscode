@@ -337,6 +337,17 @@
 	margin-bottom: 10px;
 }
 
+/* Phase 186: add form's title row carries the "Open file" action on the right */
+.vibe-ai-settings-form-title.has-actions {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+}
+
+.vibe-ai-settings-form-title.has-actions > span {
+	flex: 1;
+}
+
 .vibe-ai-settings-field {
 	display: flex;
 	flex-direction: column;
@@ -481,4 +492,41 @@ textarea.vibe-ai-settings-input {
 .vibe-ai-settings-content::-webkit-scrollbar-thumb:active,
 .vibe-ai-settings-sidebar::-webkit-scrollbar-thumb:active {
 	background: var(--vscode-scrollbarSlider-activeBackground, rgba(191, 191, 191, 0.4));
+}
+
+/* --- Phase 184 r3: narrow-width rail — the sidebar collapses to an
+   icon-only rail (Cursor parity): the search box and labels hide and
+   entries become centered icon squares; the name survives on the item's
+   title tooltip. Toggled by the pane's ResizeObserver via
+   .vibe-ai-settings-rail on the editor root (editor-area width, so a
+   side-by-side layout collapses exactly when content would squeeze). */
+.vibe-ai-settings-editor.vibe-ai-settings-rail .vibe-ai-settings-sidebar {
+	width: 46px;
+	padding: 14px 8px;
+}
+
+.vibe-ai-settings-editor.vibe-ai-settings-rail .vibe-ai-settings-search {
+	display: none;
+}
+
+.vibe-ai-settings-editor.vibe-ai-settings-rail .vibe-ai-settings-nav-item {
+	justify-content: center;
+	padding: 6px 0;
+}
+
+.vibe-ai-settings-editor.vibe-ai-settings-rail .vibe-ai-settings-nav-label,
+.vibe-ai-settings-editor.vibe-ai-settings-rail .vibe-ai-settings-nav-arrow {
+	display: none;
+}
+
+.vibe-ai-settings-editor.vibe-ai-settings-rail .vibe-ai-settings-nav-divider {
+	margin: 8px 2px;
+}
+
+/* --- Phase 184 r4: the MCP add form's mcpServers JSON textarea (mirrors
+   the agent window's r23 `.vibe-ai-agents-cx-json`). */
+.vibe-ai-settings-json {
+	font-family: var(--monaco-monospace-font-family, Consolas, monospace);
+	min-height: 150px;
+	line-height: 1.5;
 }

@@ -50,7 +50,11 @@ const MAX_DIFF_BODY_HEIGHT = 80;
 const COLLAPSED_DIFF_LINES = 5;
 /** Expanded preview cap (the toggle): 24 diff rows, scrollable beyond. */
 const EXPANDED_DIFF_BODY_HEIGHT = 384;
-/** Collapsed output preview cap (run_terminal): 5 lines at the 16px line-height. */
+/**
+ * Phase 238: run_terminal command + output share ONE scrollable region —
+ * the toggle appears above this many combined lines; the region itself
+ * caps at the same 5 rows as the diff preview (CSS owns the height).
+ */
 const COLLAPSED_OUTPUT_LINES = 5;
 const COMPRESSED_UNCHANGED_RUN = 4;
 /**
@@ -301,7 +305,8 @@ export class VibeAIToolCard {
 		const header = DOM.append(this.element, $('summary.vibe-ai-tool-card-header'));
 		this.headerEl = header;
 
-		this.headerStatus = DOM.append(header, $('span.codicon.codicon-loading.vibe-ai-tool-card-status'));
+		// Phase 235：同 plan 卡——裸 codicon-loading 在 1.142 基底 CSS 無動畫，補 modifier-spin
+		this.headerStatus = DOM.append(header, $('span.codicon.codicon-loading.codicon-modifier-spin.vibe-ai-tool-card-status'));
 		this.headerStatus.setAttribute('aria-hidden', 'true');
 
 		const icon = DOM.append(header, $(`span.codicon.${TOOL_ICONS[name] ?? 'codicon-symbol-file'}.vibe-ai-tool-card-icon`));
@@ -490,12 +495,22 @@ export class VibeAIToolCard {
 		// success and error statuses — a traceback is the interesting part.
 		this.renderOutput(output);
 		if (status === 'error') {
-			this.headerStatus.classList.remove('codicon-loading');
+			this.headerStatus.classList.remove('codicon-loading', 'codicon-modifier-spin');
 			this.headerStatus.classList.add('codicon-error');
 			this.headerStatus.style.color = 'var(--vscode-charts-red)';
 			return;
 		}
-		this.headerStatus.classList.remove('codicon-loading');
+		if (status === 'cancelled') {
+			// Phase 244: the loop guard cancelled the pending call before it ran
+			// (loop-detection early stop emits cancelled tool_result for the whole
+			// batch) — neutral slash, not the green check a plain fall-through
+			// would paint (a call that never ran is not a success).
+			this.headerStatus.classList.remove('codicon-loading', 'codicon-modifier-spin');
+			this.headerStatus.classList.add('codicon-circle-slash');
+			this.headerStatus.style.color = 'var(--vscode-descriptionForeground)';
+			return;
+		}
+		this.headerStatus.classList.remove('codicon-loading', 'codicon-modifier-spin');
 		this.headerStatus.classList.add('codicon-check');
 		this.headerStatus.style.color = 'var(--vscode-charts-green)';
 		if (change) {
@@ -524,6 +539,10 @@ export class VibeAIToolCard {
 	 * toggle as the diff preview (expanded: 24 scrollable lines).
 	 * Phase 136: the command itself is the first line of the output area
 	 * (shown in full, no ellipsis); the "Output" label is gone.
+	 * Phase 238: command + output share ONE scrollable region capped at
+	 * the same 5 rows as the diff preview — beyond 5 rows the card keeps
+	 * its height and you scroll (the Phase 214 per-command clamp is
+	 * subsumed: a long command scrolls inside the region too).
 	 */
 	private renderOutput(output: string | undefined): void {
 		// A repeated setResult replaces the previous render.
@@ -534,17 +553,22 @@ export class VibeAIToolCard {
 			this.outputSection.style.display = 'none';
 			return;
 		}
+		// The shared scrollable body (CSS caps it at 5 rows) — the command
+		// opens the block, the output follows.
+		const body = DOM.append(this.outputSection, $('div.vibe-ai-tool-card-output-body'));
+		let lines = 0;
 		if (command.length > 0) {
-			const cmd = DOM.append(this.outputSection, $('div.vibe-ai-tool-card-cmd'));
+			const cmd = DOM.append(body, $('div.vibe-ai-tool-card-cmd'));
 			cmd.textContent = command;
+			lines += command.split('\n').length;
 		}
 		if (text.length > 0) {
-			const pre = DOM.append(this.outputSection, $('pre.vibe-ai-tool-card-output-pre'));
+			const pre = DOM.append(body, $('pre.vibe-ai-tool-card-output-pre'));
 			pre.textContent = text;
-			const lines = text.split('\n').length;
-			if (lines > COLLAPSED_OUTPUT_LINES) {
-				this.appendOutputToggle(this.outputSection, pre, lines);
-			}
+			lines += text.split('\n').length;
+		}
+		if (lines > COLLAPSED_OUTPUT_LINES) {
+			this.appendOutputToggle(this.outputSection, body, lines);
 		}
 		this.outputSection.style.display = 'block';
 	}
@@ -561,8 +585,14 @@ export class VibeAIToolCard {
 		let expanded = false;
 		this.disposables.add(DOM.addDisposableListener(toggle, DOM.EventType.CLICK, () => {
 			expanded = !expanded;
-			// Same 5 → 24 row behavior as the diff preview (Phase 58).
+			// Same 5 → 24 row behavior as the diff preview (Phase 58); the
+			// body scrolls within either cap (Phase 238: the count spans the
+			// shared region's command + output lines).
 			body.style.maxHeight = expanded ? `${EXPANDED_DIFF_BODY_HEIGHT}px` : `${MAX_DIFF_BODY_HEIGHT}px`;
+			if (!expanded) {
+				// Collapsing returns to the top — the command opens the region.
+				body.scrollTop = 0;
+			}
 			toggle.textContent = expanded
 				? localize('vibeAIChat.tool.collapse', "Collapse")
 				: localize('vibeAIChat.tool.expandOutput', "Show all {0} lines", lines);

@@ -60,21 +60,54 @@
 	display: flex;
 	align-items: center;
 	gap: 4px;
-	/* Many conversations stay open at once — the strip scrolls (its
-	   scrollbar stays hidden like everywhere else in the chat view). */
+	/* Many conversations stay open at once — the strip scrolls; tabs keep
+	   their width instead of squeezing (Phase 191). A thin IDE-style
+	   horizontal scrollbar appears only while the tabs overflow. */
 	overflow-x: auto;
 	overflow-y: hidden;
 	min-width: 0;
+}
+
+/* Phase 191: the strip's own scrollbar. The Phase 103 rule hides every
+   scrollbar in the chat view, so this re-enables it at higher specificity
+   with the Phase 183 editor-style thin slider (6px rounded, theme colors).
+   scrollbar-width: auto restores ::-webkit-scrollbar styling on
+   Chromium ≥121 (the standard property overrides it otherwise). */
+.vibe-ai-chat-view .vibe-ai-tabbar-tabs {
+	scrollbar-width: auto !important;
+}
+
+.vibe-ai-chat-view .vibe-ai-tabbar-tabs::-webkit-scrollbar {
+	display: block !important;
+	height: 6px;
+}
+
+.vibe-ai-chat-view .vibe-ai-tabbar-tabs::-webkit-scrollbar-track {
+	background: transparent;
+}
+
+.vibe-ai-chat-view .vibe-ai-tabbar-tabs::-webkit-scrollbar-thumb {
+	background: var(--vscode-scrollbarSlider-background, rgba(121, 121, 121, 0.4));
+	border-radius: 3px;
+}
+
+.vibe-ai-chat-view .vibe-ai-tabbar-tabs::-webkit-scrollbar-thumb:hover {
+	background: var(--vscode-scrollbarSlider-hoverBackground, rgba(100, 100, 100, 0.7));
+}
+
+.vibe-ai-chat-view .vibe-ai-tabbar-tabs::-webkit-scrollbar-thumb:active {
+	background: var(--vscode-scrollbarSlider-activeBackground, rgba(191, 191, 191, 0.4));
 }
 
 .vibe-ai-tab {
 	display: flex;
 	align-items: center;
 	gap: 4px;
-	flex: 0 1 auto;
+	/* Tabs keep their width (icon + ✕ + label, ellipsis past 240px) —
+	   overflow slides the strip left/right instead of squeezing every tab
+	   into a sliver (Phase 191). */
+	flex: 0 0 auto;
 	max-width: 240px;
-	/* Tabs shrink (icon + ✕ stay visible) as conversations pile up. */
-	min-width: 34px;
 	padding: 3px 4px 3px 10px;
 	border-radius: 6px;
 	font-size: 12px;
@@ -271,9 +304,11 @@
 }
 
 /* Phase 47: Cursor parity — sent prompt boxes are clickable and
-   re-editable at any time; the hover border hints the affordance. */
+   re-editable at any time; the hover border hints the affordance.
+   Phase 233: neutral grey instead of the focusBorder blue — the blue
+   box read as a selection ring the user asked to remove. */
 .vibe-ai-user-bubble:hover {
-	border-color: var(--vscode-focusBorder, var(--vscode-input-border, transparent));
+	border-color: var(--vscode-widget-border, var(--vscode-input-border, transparent));
 }
 
 /* Phase 48: while a prompt box is editing, the bubble box itself steps
@@ -552,6 +587,132 @@
 	opacity: 0.75;
 }
 
+/* Phase 231: plan execution's per-step activity group — one <details> per
+   plan step inside the Worked shell. The summary is the step's roll-up row
+   (spinner/check/error icon + "Step N — title" + "Worked for Xs · counts"
+   meta); the body holds the step's narration, Thought blocks and tool
+   cards. A clean plan_step_done folds the whole step to its summary row; a
+   failed step's group stays open (收合不藏答案). Same shell pattern as the
+   Phase 149 count group above. */
+.vibe-ai-plan-step-group {
+	margin: 0 0 6px 0;
+	border: 1px solid var(--vscode-input-border, var(--vscode-panelSectionHeader-border, transparent));
+	border-radius: 8px;
+	background: var(--vscode-editor-background);
+	overflow: hidden;
+	font-size: 12px;
+}
+
+.vibe-ai-plan-step-group > summary {
+	list-style: none;
+	cursor: pointer;
+	user-select: none;
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	padding: 5px 8px;
+	color: var(--vscode-descriptionForeground);
+}
+
+.vibe-ai-plan-step-group > summary::-webkit-details-marker {
+	display: none;
+}
+
+.vibe-ai-plan-step-group > summary:hover {
+	color: var(--vscode-foreground);
+}
+
+.vibe-ai-plan-step-group-chevron {
+	flex-shrink: 0;
+	font-size: 12px;
+	opacity: 0.7;
+	transition: transform 0.1s ease;
+}
+
+.vibe-ai-plan-step-group[open] > summary .vibe-ai-plan-step-group-chevron {
+	transform: rotate(90deg);
+}
+
+.vibe-ai-plan-step-group-icon {
+	flex-shrink: 0;
+	font-size: 13px;
+	opacity: 0.7;
+}
+
+/* Running: the spinner keeps full opacity (plan-card row parity). */
+.vibe-ai-plan-step-group.running > summary .vibe-ai-plan-step-group-icon {
+	opacity: 1;
+	color: var(--vscode-charts-blue, var(--vscode-focusBorder, #0078d4));
+}
+
+/* Settled: green check; failed: red error (plan-card row parity). */
+.vibe-ai-plan-step-group > summary .vibe-ai-plan-step-group-icon.codicon-check {
+	color: var(--vscode-charts-green, #89d185);
+	opacity: 1;
+}
+
+.vibe-ai-plan-step-group.failed > summary .vibe-ai-plan-step-group-icon {
+	color: var(--vscode-charts-red);
+	opacity: 1;
+}
+
+.vibe-ai-plan-step-group-label {
+	flex: 1 1 auto;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.vibe-ai-plan-step-group-meta {
+	flex-shrink: 0;
+	opacity: 0.75;
+}
+
+.vibe-ai-plan-step-group-steps {
+	margin: 0 0 4px 12px;
+}
+
+/* Narration inside a step group renders dimmed like the Worked shell's
+   direct narration bodies (the shell rule is a direct-child selector the
+   group nesting bypasses). */
+.vibe-ai-plan-step-group-steps > .vibe-ai-chat-markdown {
+	font-size: 12px;
+	color: var(--vscode-descriptionForeground);
+}
+
+.vibe-ai-plan-step-group-steps > .vibe-ai-chat-markdown pre {
+	margin: 4px 0;
+}
+
+/* Phase 241 (living plan): the update_plan revision row — a slim plan-
+   level announcement between the step groups (sync icon + "Plan revised:
+   reason (N steps)"). Sits at the shell top level so the running step's
+   fold never hides it; dashed border marks it as a meta row, not a step. */
+.vibe-ai-plan-revision {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	margin: 0 0 6px 0;
+	padding: 4px 8px;
+	border: 1px dashed var(--vscode-input-border, var(--vscode-panelSectionHeader-border, transparent));
+	border-radius: 8px;
+	font-size: 12px;
+	color: var(--vscode-descriptionForeground);
+}
+
+.vibe-ai-plan-revision-icon {
+	flex-shrink: 0;
+	font-size: 13px;
+	opacity: 0.8;
+}
+
+.vibe-ai-plan-revision-label {
+	flex: 1 1 auto;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
 /* Phase 81: no compact single-step mode — while the agent works, every
    step (narration bodies, file-read cards, thinking sub-blocks) is
    visible and STAYS visible (the old "only the latest step" hiding is
@@ -673,6 +834,19 @@
 	background: rgba(128, 128, 128, 0.28);
 	border-radius: 3px;
 	padding: 1.5px 4px;
+}
+
+/* URL-shaped inline code chips are clickable (click → built-in Simple
+   Browser, Ctrl+Click → system default browser); the underline gives the
+   link affordance while the chip keeps its code styling. */
+.vibe-ai-chat-markdown code.inline-code-link {
+	cursor: pointer;
+	text-decoration: underline;
+	text-underline-position: under;
+}
+
+.vibe-ai-chat-markdown code.inline-code-link:hover {
+	background: rgba(128, 128, 128, 0.42);
 }
 
 /* fenced code block — the renderer emits a placeholder div[data-code]
@@ -1034,6 +1208,14 @@
 	pointer-events: none;
 }
 
+/* Phase 247: dimmed but CLICKABLE — a zero-count checkpoint-restore
+   button still reconciles against the turn transcript on click (it may
+   surface changes the SSE never delivered) and explains itself with an
+   info notification otherwise. Unlike .disabled, pointer events stay on. */
+.vibe-ai-icon-btn.dim {
+	opacity: 0.35;
+}
+
 /* --- files changed summary ("N Files" + Review) --- */
 .vibe-ai-files-summary {
 	border: 1px solid var(--vscode-input-border, transparent);
@@ -1180,7 +1362,7 @@
 
 .vibe-ai-files-list-row-action:hover:not(.disabled) {
 	background: var(--vscode-list-hoverBackground);
-	border-color: var(--vscode-focusBorder, var(--vscode-input-border, transparent));
+	border-color: var(--vscode-widget-border, var(--vscode-input-border, transparent));
 }
 
 .vibe-ai-files-list-row-action.disabled {
@@ -1209,37 +1391,59 @@
 	flex-shrink: 0;
 }
 
-/* --- error row --- */
+/* --- error row (Phase 193: Cursor-style soft red card) — icon + message
+   + optional right-aligned Retry pill; shared by the live stream error
+   and the restored failed turns. The tint/border blend charts-red with
+   transparency (color-mix) instead of the old solid red frame. */
 .vibe-ai-chat-error {
-	padding: 6px 10px;
+	display: flex;
+	align-items: flex-start;
+	gap: 8px;
+	padding: 8px 12px;
 	margin-bottom: 10px;
-	border-radius: 6px;
-	border: 1px solid var(--vscode-charts-red);
-	color: var(--vscode-charts-red);
+	border-radius: 8px;
+	border: 1px solid color-mix(in srgb, var(--vscode-charts-red) 30%, transparent);
+	background: color-mix(in srgb, var(--vscode-charts-red) 7%, transparent);
+	color: var(--vscode-errorForeground, var(--vscode-charts-red));
 	font-size: 12px;
+	line-height: 1.55;
+}
+
+.vibe-ai-chat-error-icon {
+	flex-shrink: 0;
+	/* optically align the 16px codicon with the first text line */
+	margin-top: 1.5px;
+}
+
+.vibe-ai-chat-error-text {
+	flex: 1 1 auto;
+	min-width: 0;
 	white-space: pre-wrap;
 	word-break: break-word;
 }
 
-/* ==================== Phase 134: LLM retry (Cursor parity) ==================== */
-
-/* Transient error rows carry a Retry button that re-sends the turn. */
+/* Retry pill (Cursor parity): re-sends the failed turn — live for the
+   latest provider error, and on restore when the failed turn is still
+   the thread's last one. */
 .vibe-ai-chat-error-retry {
 	display: inline-flex;
 	align-items: center;
-	gap: 4px;
-	margin-top: 6px;
-	padding: 2px 8px;
-	border-radius: 4px;
-	border: 1px solid var(--vscode-charts-red);
-	color: var(--vscode-charts-red);
+	gap: 5px;
+	flex-shrink: 0;
+	margin-left: auto;
+	padding: 2px 9px;
+	border-radius: 5px;
+	border: 1px solid color-mix(in srgb, var(--vscode-charts-red) 45%, transparent);
+	color: var(--vscode-errorForeground, var(--vscode-charts-red));
 	cursor: pointer;
+	font-size: 11px;
 	font-weight: 600;
-	font-size: 12px;
+	white-space: nowrap;
+	user-select: none;
 }
 
 .vibe-ai-chat-error-retry:hover {
-	background: var(--vscode-toolbar-hoverBackground);
+	background: color-mix(in srgb, var(--vscode-charts-red) 15%, transparent);
 }
 
 /* The backend's auto-retry wait renders a transient chip in the thread. */
@@ -1271,6 +1475,32 @@
 	to {
 		transform: rotate(360deg);
 	}
+}
+
+/* Phase 246: the resume-retry divider — a slim separator note between a
+   failed turn's kept content and the resumed attempt appending below it
+   (Cursor-parity turn resume: completed rounds stay, the failed step is
+   redone). Spins like the Retrying chip while the resume streams. */
+.vibe-ai-resume-divider {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	margin-bottom: 10px;
+	border-top: 1px dashed color-mix(in srgb, var(--vscode-descriptionForeground) 35%, transparent);
+	padding: 8px 10px 3px;
+	color: var(--vscode-descriptionForeground);
+	font-size: 11px;
+	font-style: italic;
+	user-select: none;
+}
+
+.vibe-ai-resume-divider .codicon {
+	animation: vibe-ai-retry-spin 1.2s linear infinite;
+}
+
+.vibe-ai-resume-divider-label {
+	white-space: pre-wrap;
+	word-break: break-word;
 }
 
 /* ==================== Phase 120: goal banner (Cursor parity) ==================== */
@@ -1637,25 +1867,58 @@
 	background: color-mix(in srgb, var(--vscode-badge-background, #808080) 75%, var(--vscode-badge-foreground, #fff));
 }
 
-/* Phase 61: images sent with a user message — thumbnail strip above the
-   bubble (the bubble stays text-only for the prompt-edit delegation). */
-.vibe-ai-user-images {
+/* Phase 61: attachments sent with a user message — thumbnail + chip strip
+   above the bubble (the bubble stays text-only for the prompt-edit
+   delegation). Phase 184: file/folder chips join the same strip (unified
+   above the message) and the thumbnails are shrunk so the message carries
+   them compactly (Cursor parity). */
+.vibe-ai-user-attachments {
 	display: flex;
 	flex-wrap: wrap;
 	justify-content: flex-end;
+	align-items: flex-end;
 	gap: 4px;
 	margin-bottom: 4px;
 }
 
 .vibe-ai-user-image {
 	display: block;
-	max-width: 240px;
-	max-height: 160px;
+	max-width: 128px;
+	max-height: 96px;
 	border-radius: 6px;
 	border: 1px solid var(--vscode-input-border, transparent);
 	object-fit: contain;
 	user-select: text;
 	-webkit-user-select: text;
+}
+
+/* Phase 184: a sent message's file/folder chip — the input chip's pill,
+   muted, click opens the message's edit box (delegated on the strip). */
+.vibe-ai-user-att-chip {
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+	max-width: 220px;
+	padding: 2px 8px;
+	border-radius: 8px;
+	border: 1px solid var(--vscode-input-border, transparent);
+	background: var(--vscode-input-background, rgba(128, 128, 128, 0.17));
+	font-size: 11px;
+	line-height: 16px;
+	cursor: pointer;
+	user-select: none;
+	-webkit-user-select: none;
+}
+
+.vibe-ai-user-att-chip .codicon {
+	font-size: 12px;
+	flex: none;
+}
+
+.vibe-ai-user-att-name {
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
 }
 
 .vibe-ai-input-toolbar {
@@ -1941,16 +2204,27 @@
 }
 
 /* run_terminal output area (Phase 58): the command line (Phase 136) opens
-   the block and the output preview below keeps the 5-line collapsed cap;
-   the expand toggle grows it to 24 scrollable lines. */
+   the block and the output preview follows; Phase 238 caps the shared
+   region at the same 5 rows as the diff body — beyond 5 rows you scroll,
+   the expand toggle grows it to 24 scrollable rows. */
 .vibe-ai-tool-card-output {
 	border-top: 1px solid var(--vscode-input-border, var(--vscode-panelSectionHeader-border, transparent));
 }
 
+/* Phase 238: command + output share ONE scrollable region — the collapsed
+   cap matches the diff body (5 rows at the 16px line-height); overflow
+   scrolls instead of growing the card. */
+.vibe-ai-tool-card-output-body {
+	max-height: 80px;
+	overflow: auto;
+	background: var(--vscode-textCodeBlock-background, var(--vscode-editor-background));
+}
+
 /* Phase 136: the run command itself — the first line of the output area,
-   shown in full (wraps, no ellipsis); the "Output" label is gone. */
+   shown in full (wraps, no ellipsis); the "Output" label is gone. No
+   vertical padding: rows must stay exact 16px units inside the cap. */
 .vibe-ai-tool-card-cmd {
-	padding: 4px 8px;
+	padding: 0 8px;
 	font-family: var(--monaco-monospace-font);
 	font-size: 11px;
 	line-height: 16px;
@@ -1962,11 +2236,7 @@
 
 .vibe-ai-tool-card-output-pre {
 	margin: 0;
-	/* No vertical padding: 5 lines at the 16px line-height fill the 80px
-	   collapsed cap exactly, same math as the diff body. */
 	padding: 0 8px;
-	max-height: 80px;
-	overflow: auto;
 	font-family: var(--monaco-monospace-font);
 	font-size: 11px;
 	line-height: 16px;
@@ -2188,7 +2458,7 @@
 
 .vibe-ai-keep-bar-btn:hover:not(.disabled) {
 	background: var(--vscode-list-hoverBackground);
-	border-color: var(--vscode-focusBorder, var(--vscode-input-border, transparent));
+	border-color: var(--vscode-widget-border, var(--vscode-input-border, transparent));
 }
 
 .vibe-ai-keep-bar-btn.disabled {
@@ -2355,7 +2625,7 @@
 }
 
 .vibe-ai-context-limit-input:focus {
-	border-color: var(--vscode-focusBorder, var(--vscode-charts-blue, #0078d4));
+	border-color: var(--vscode-widget-border, var(--vscode-input-border, transparent));
 }
 
 .vibe-ai-context-bar {
@@ -2425,15 +2695,57 @@
 }
 
 /* Phase 51: the agent round hit its output token budget (finish_reason=
-   length) — a truncation note below the turn (Cursor-style transparency;
-   warning tone — the reply was cut, not an error). */
+   length) — a truncation note below the turn. Phase 202: same card as the
+   Phase 193 error card (rounded border, warning icon, action pill) but in
+   the warning yellow — the reply was cut, not an error. Phase 200's
+   backend auto-continuation already ran, so this note means the
+   continuation budget is exhausted and the Continue pill offers the way
+   out. */
 .vibe-ai-output-truncated-note {
-	margin: 6px 12px 4px;
-	padding: 3px 8px;
-	border-left: 2px solid var(--vscode-charts-orange, #d18616);
+	display: flex;
+	align-items: flex-start;
+	gap: 8px;
+	padding: 8px 12px;
+	margin: 6px 0 10px;
+	border-radius: 8px;
+	border: 1px solid color-mix(in srgb, var(--vscode-charts-yellow) 30%, transparent);
+	background: color-mix(in srgb, var(--vscode-charts-yellow) 7%, transparent);
+	color: var(--vscode-editorWarning-foreground, var(--vscode-charts-yellow));
+	font-size: 12px;
+	line-height: 1.55;
+}
+
+.vibe-ai-truncated-icon {
+	flex-shrink: 0;
+	/* optically align the 16px codicon with the first text line */
+	margin-top: 1.5px;
+}
+
+.vibe-ai-output-truncated-text {
+	flex: 1 1 auto;
+	min-width: 0;
+	word-break: break-word;
+}
+
+.vibe-ai-truncated-continue {
+	display: inline-flex;
+	align-items: center;
+	gap: 5px;
+	flex-shrink: 0;
+	margin-left: auto;
+	padding: 2px 9px;
+	border-radius: 5px;
+	border: 1px solid color-mix(in srgb, var(--vscode-charts-yellow) 45%, transparent);
+	color: var(--vscode-editorWarning-foreground, var(--vscode-charts-yellow));
+	cursor: pointer;
 	font-size: 11px;
-	font-style: italic;
-	color: var(--vscode-descriptionForeground);
+	font-weight: 600;
+	white-space: nowrap;
+	user-select: none;
+}
+
+.vibe-ai-truncated-continue:hover {
+	background: color-mix(in srgb, var(--vscode-charts-yellow) 15%, transparent);
 }
 
 /* Phase 103: the limit-reached note + Continue chip (limit_reached) — the
@@ -2914,6 +3226,20 @@
 	background: var(--vscode-toolbar-hoverBackground, rgba(128, 128, 128, 0.2));
 }
 
+/* Phase 213: the plan doc link — opens the project-root PLAN.md (the
+   execute phase writes it and checks steps off in place) in the editor. */
+.vibe-ai-plan-doc-link {
+	display: inline-block;
+	margin: 2px 10px 8px 10px;
+	font-size: 12px;
+	color: var(--vscode-textLink-foreground);
+	cursor: pointer;
+}
+
+.vibe-ai-plan-doc-link:hover {
+	text-decoration: underline;
+}
+
 /* Plan generation failure (the backend's plan event with no plan). */
 .vibe-ai-plan-failed-note {
 	padding: 6px 10px;
@@ -2922,6 +3248,231 @@
 	border: 1px solid var(--vscode-charts-orange, var(--vscode-editorWarning-foreground, #cca700));
 	color: var(--vscode-editorWarning-foreground, var(--vscode-charts-orange, #cca700));
 	font-size: 12px;
+}
+
+/* Phase 221: the Cursor-parity "Created Plan" decision card — a compact
+   vertical card after the closing answer (label / title / steps preview /
+   footer with View Plan + Build / Cancel; the plan doc itself streams into
+   the editor, .vibe/plans since 221). */
+.vibe-ai-plan-bar {
+	display: flex;
+	flex-direction: column;
+	align-items: stretch;
+	gap: 4px;
+	border: 1px solid var(--vscode-editorWidget-border, var(--vscode-widget-border, var(--vscode-panel-border, transparent)));
+	border-radius: 8px;
+	background: var(--vscode-editorWidget-background, var(--vscode-editor-background));
+	color: var(--vscode-editorWidget-foreground, var(--vscode-editor-foreground));
+	margin: 4px 0 8px 0;
+	padding: 8px 12px;
+	font-size: 12px;
+	min-width: 0;
+	max-width: 560px;
+}
+
+.vibe-ai-plan-bar-label {
+	color: var(--vscode-descriptionForeground);
+	font-size: 11px;
+	letter-spacing: 0.02em;
+}
+
+.vibe-ai-plan-bar-title {
+	font-size: 13px;
+	font-weight: 600;
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.vibe-ai-plan-bar-desc {
+	color: var(--vscode-descriptionForeground);
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.vibe-ai-plan-bar-footer {
+	display: flex;
+	align-items: center;
+	justify-content: flex-end;
+	gap: 10px;
+	margin-top: 2px;
+}
+
+.vibe-ai-plan-bar-link {
+	margin: 0;
+	flex-shrink: 0;
+}
+
+.vibe-ai-plan-bar .vibe-ai-plan-actions {
+	padding: 0;
+	flex-shrink: 0;
+}
+
+/* Cancelled card: dimmed with a short note (the doc stays on disk). */
+.vibe-ai-plan-bar.vibe-ai-plan-cancelled {
+	opacity: 0.6;
+}
+
+.vibe-ai-plan-bar-note {
+	color: var(--vscode-descriptionForeground);
+	opacity: 0.8;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+/* Phase 219: the plan approval overlay widget — Build / Cancel pinned to
+   the top center of the PLAN.md editor (the approval happens ON the
+   document, not in the chat; editor-widget theming, floats over content). */
+.vibe-ai-plan-approval-widget {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	padding: 6px 10px;
+	border: 1px solid var(--vscode-editorWidget-border, var(--vscode-widget-border, var(--vscode-panel-border, transparent)));
+	border-radius: 8px;
+	background: var(--vscode-editorWidget-background, var(--vscode-editor-background));
+	color: var(--vscode-editorWidget-foreground, var(--vscode-editor-foreground));
+	box-shadow: 0 2px 8px var(--vscode-widget-shadow, rgba(0, 0, 0, 0.25));
+	font-size: 12px;
+	max-width: calc(100% - 48px);
+}
+
+.vibe-ai-plan-approval-widget .vibe-ai-plan-icon {
+	font-size: 13px;
+	opacity: 0.85;
+	flex-shrink: 0;
+}
+
+.vibe-ai-plan-approval-widget .vibe-ai-plan-approval-title {
+	font-weight: 600;
+	opacity: 0.85;
+	flex-shrink: 0;
+}
+
+.vibe-ai-plan-approval-widget .vibe-ai-plan-approval-meta {
+	flex: 1 1 auto;
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	opacity: 0.9;
+}
+
+.vibe-ai-plan-approval-widget .vibe-ai-plan-actions {
+	padding: 0;
+	flex-shrink: 0;
+}
+
+/* ==================== Phase 224: plan doc To-dos block ==================== */
+
+/* Cursor parity: the plan document carries a floating block under its
+   last line — the "N To-dos [+ New]" checklist (rows mirror the plan
+   steps, plan_step events tick them live) above the "Referenced by
+   1 Agent" author row. A content widget, so it scrolls with the doc. */
+.vibe-ai-plan-todos {
+	padding: 10px 14px 12px;
+	border: 1px solid var(--vscode-editorWidget-border, var(--vscode-widget-border, var(--vscode-panel-border, transparent)));
+	border-radius: 8px;
+	background: var(--vscode-editorWidget-background, var(--vscode-editor-background));
+	color: var(--vscode-editorWidget-foreground, var(--vscode-editor-foreground));
+	box-shadow: 0 2px 8px var(--vscode-widget-shadow, rgba(0, 0, 0, 0.25));
+	font-size: 12px;
+	max-width: 420px;
+	user-select: none;
+}
+
+.vibe-ai-plan-todos .vibe-ai-plan-todos-header {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	font-weight: 600;
+	opacity: 0.85;
+	margin-bottom: 6px;
+}
+
+.vibe-ai-plan-todos .vibe-ai-plan-todos-add {
+	cursor: pointer;
+	font-weight: 400;
+	opacity: 0.75;
+	color: var(--vscode-focusBorder, var(--vscode-textLink-foreground, #3794ff));
+}
+
+.vibe-ai-plan-todos .vibe-ai-plan-todos-add:hover {
+	opacity: 1;
+	text-decoration: underline;
+}
+
+.vibe-ai-plan-todos .vibe-ai-plan-todos-item {
+	display: flex;
+	align-items: center;
+	gap: 7px;
+	padding: 2px 0;
+	min-width: 0;
+}
+
+.vibe-ai-plan-todos .vibe-ai-plan-todos-icon {
+	font-size: 13px;
+	flex-shrink: 0;
+	opacity: 0.8;
+}
+
+.vibe-ai-plan-todos .vibe-ai-plan-todos-item.running .vibe-ai-plan-todos-icon {
+	opacity: 1;
+	color: var(--vscode-charts-purple, #b180d7);
+}
+
+.vibe-ai-plan-todos .vibe-ai-plan-todos-item .vibe-ai-plan-todos-label {
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	opacity: 0.9;
+}
+
+.vibe-ai-plan-todos .vibe-ai-plan-todos-item.running .vibe-ai-plan-todos-label {
+	opacity: 1;
+}
+
+.vibe-ai-plan-todos .vibe-ai-plan-todos-item:not(.running):not(.failed) .codicon-check {
+	color: var(--vscode-charts-green, #89d185);
+}
+
+.vibe-ai-plan-todos .vibe-ai-plan-todos-item.failed .vibe-ai-plan-todos-icon {
+	color: var(--vscode-errorForeground, #f48771);
+	opacity: 1;
+}
+
+.vibe-ai-plan-todos .vibe-ai-plan-todos-item.failed .vibe-ai-plan-todos-label {
+	opacity: 0.65;
+}
+
+.vibe-ai-plan-todos .vibe-ai-plan-todos-ref {
+	margin-top: 8px;
+	padding-top: 8px;
+	border-top: 1px solid var(--vscode-editorWidget-border, var(--vscode-widget-border, rgba(128, 128, 128, 0.25)));
+}
+
+.vibe-ai-plan-todos .vibe-ai-plan-todos-ref-header {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	font-weight: 600;
+	opacity: 0.85;
+	margin-bottom: 4px;
+}
+
+.vibe-ai-plan-todos .vibe-ai-plan-todos-author {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	font-weight: 400;
+	opacity: 0.6;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
 }
 
 
@@ -3280,6 +3831,15 @@
 	background: var(--vscode-toolbar-hoverBackground, rgba(128, 128, 128, 0.2));
 }
 
+/* Phase 237: the picked chip highlights (one pick per question, click
+   again to deselect) — the input box stays free for notes beyond the
+   options. Solid button colors make the pick unmistakable. */
+.vibe-ai-questions-option.selected {
+	border-color: var(--vscode-button-background, #0078d4);
+	background: var(--vscode-button-background, #0078d4);
+	color: var(--vscode-button-foreground, #ffffff);
+}
+
 .vibe-ai-questions-answer {
 	display: flex;
 	align-items: center;
@@ -3297,8 +3857,10 @@
 	font-size: 12px;
 }
 
+/* Phase 233: the input's own 1px border is the focus indicator — no
+   blue outline ring on top. */
 .vibe-ai-questions-input:focus {
-	outline: 1px solid var(--vscode-focusBorder, #0078d4);
+	outline: none;
 }
 
 .vibe-ai-questions-send {
@@ -3319,6 +3881,16 @@
 	padding: 0 10px 8px 10px;
 	color: var(--vscode-descriptionForeground);
 	opacity: 0.85;
+}
+
+/* Phase 237: what actually went out (picks + notes), under the note —
+   the picked chip keeps its highlight, this shows the composed text. */
+.vibe-ai-questions-sent {
+	padding: 0 10px 8px 10px;
+	font-size: 11px;
+	color: var(--vscode-foreground);
+	opacity: 0.9;
+	overflow-wrap: anywhere;
 }
 
 .vibe-ai-questions-note.error {

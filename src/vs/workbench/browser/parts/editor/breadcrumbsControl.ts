@@ -444,6 +444,19 @@ export class BreadcrumbsControl {
 		const uri = originalUri ?? canonicalUri;
 		const wasHidden = this.isHidden();
 
+		// Vulcan fork (Phase 230): the plan doc pane carries its own in-page
+		// "Plans › ..." header (Cursor parity) — the workbench breadcrumb bar
+		// above it duplicated the file path and pushed the header down.
+		if (this._editorGroup.activeEditorPane?.getId() === 'workbench.editors.vibeAIPlanDoc.pane') {
+			this._ckBreadcrumbsPossible.set(false);
+			this._ckBreadcrumbsHasSymbols.set(false);
+			if (!wasHidden) {
+				this.hide();
+				return true;
+			}
+			return false;
+		}
+
 		if (!uri || !this._canShowBreadcrumbsFor(uri)) {
 			// cleanup and return when there is no input or when
 			// we cannot handle this input

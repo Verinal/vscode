@@ -6,7 +6,7 @@
 import { Emitter, Event } from '../../../base/common/event.js';
 import { Disposable, DisposableStore } from '../../../base/common/lifecycle.js';
 import { IChannel, IServerChannel } from '../../../base/parts/ipc/common/ipc.js';
-import { IVibeAIBackgroundAgent, IVibeAICustomizeCreateData, IVibeAICustomizeItem, IVibeAICustomizeResult, IVibeAIChatRequest, IVibeAICompletionRequest, IVibeAIContextUsage, IVibeAIContextUsageRequest, IVibeAIDiagnostic, IVibeAIDocumentExtract, IVibeAIExecutePlanRequest, IVibeAIInlineEditRequest, IVibeAIModelProvider, IVibeAIParallelRequest, IVibeAIParallelRun, IVibeAIService, IVibeAISkill, IVibeAIStreamData, IVibeAISubagent, VibeAICustomizeKind, VibeAICustomizeScope } from './vibeAI.js';
+import { IVibeAIAutomation, IVibeAIAutomationCreateData, IVibeAIAutomationPatch, IVibeAIBackgroundAgent, IVibeAICustomizeCreateData, IVibeAICustomizeItem, IVibeAICustomizeResult, IVibeAIChatRequest, IVibeAIChatTitleRequest, IVibeAICompletionRequest, IVibeAIContextUsage, IVibeAIContextUsageRequest, IVibeAIDiagnostic, IVibeAIDocumentExtract, IVibeAIExecutePlanRequest, IVibeAIInlineEditRequest, IVibeAIModelProvider, IVibeAIParallelRequest, IVibeAIParallelRun, IVibeAIService, IVibeAISkill, IVibeAIStreamData, IVibeAISubagent, IVibeAITurnChanges, VibeAICustomizeKind, VibeAICustomizeScope } from './vibeAI.js';
 
 /**
  * Main process side of the VibeAI service IPC. Registered on the
@@ -30,6 +30,7 @@ export class VibeAIChannel implements IServerChannel {
 	call(_: unknown, command: string, arg?: any): Promise<any> {
 		switch (command) {
 			case 'healthCheck': return this.service.healthCheck();
+			case 'restartBackend': return this.service.restartBackend();
 			case 'chatStream': {
 				const { requestId, request } = arg as { requestId: string; request: IVibeAIChatRequest };
 				return this.service.chatStream(requestId, request);
@@ -62,6 +63,27 @@ export class VibeAIChannel implements IServerChannel {
 				const { workspaceRoot, runId, index } = arg as { workspaceRoot?: string; runId: string; index?: number };
 				return this.service.discardParallelRun(workspaceRoot, runId, index);
 			}
+			case 'listAutomations': {
+				// Phase 189: the Agents Hub's Automations page (trigger +
+				// prompt rules the backend runs unattended).
+				return this.service.listAutomations(typeof arg === 'string' ? arg : undefined);
+			}
+			case 'createAutomation': {
+				const { workspaceRoot, data } = arg as { workspaceRoot?: string; data: IVibeAIAutomationCreateData };
+				return this.service.createAutomation(workspaceRoot, data);
+			}
+			case 'updateAutomation': {
+				const { workspaceRoot, id, patch } = arg as { workspaceRoot?: string; id: string; patch: IVibeAIAutomationPatch };
+				return this.service.updateAutomation(workspaceRoot, id, patch);
+			}
+			case 'deleteAutomation': {
+				const { workspaceRoot, id } = arg as { workspaceRoot?: string; id: string };
+				return this.service.deleteAutomation(workspaceRoot, id);
+			}
+			case 'runAutomationNow': {
+				const { workspaceRoot, id } = arg as { workspaceRoot?: string; id: string };
+				return this.service.runAutomationNow(workspaceRoot, id);
+			}
 			case 'cancel': {
 				this.service.cancel(arg as string);
 				return Promise.resolve();
@@ -81,11 +103,23 @@ export class VibeAIChannel implements IServerChannel {
 				const { path, workspaceRoot } = arg as { path: string; workspaceRoot?: string };
 				return this.service.deleteFile(path, workspaceRoot);
 			}
+			case 'getTurnChanges': {
+				// Phase 247: transcript-backed change ledger for the
+				// rollback reconciliation (null = transcript gone).
+				const { sessionId, turnId, workspaceRoot } = arg as { sessionId: string; turnId: string; workspaceRoot?: string };
+				return this.service.getTurnChanges(sessionId, turnId, workspaceRoot);
+			}
 			case 'resolveApproval': {
 				// Phase 160: scope/projectRoot extend the approval with
 				// memory (once / turn / project, per the interface docs).
 				const { id, approved, scope, projectRoot } = arg as { id: string; approved: boolean; scope?: 'once' | 'turn' | 'project'; projectRoot?: string };
 				return this.service.resolveApproval(id, approved, scope, projectRoot);
+			}
+			case 'resolveAgentQuestion': {
+				// Phase 237: resolve the blocking question gate the agent
+				// turn parks on (the question card's Send).
+				const { id, answer } = arg as { id: string; answer: string };
+				return this.service.resolveAgentQuestion(id, answer);
 			}
 			case 'steer': {
 				// Phase 113: queue a mid-turn steer for the running Agent
@@ -106,6 +140,11 @@ export class VibeAIChannel implements IServerChannel {
 			}
 			case 'inlineEdit': {
 				return this.service.inlineEdit(arg as IVibeAIInlineEditRequest);
+			}
+			case 'chatTitle': {
+				// Phase 227: the conversation title summary (first question in,
+				// short LLM title out — the pane fire-and-forgets it).
+				return this.service.chatTitle(arg as IVibeAIChatTitleRequest);
 			}
 			case 'contextUsage': {
 				return this.service.contextUsage(arg as IVibeAIContextUsageRequest);
@@ -183,6 +222,10 @@ export class VibeAIClient extends Disposable implements IVibeAIService {
 		return this.channel.call<boolean>('healthCheck');
 	}
 
+	restartBackend(): Promise<boolean> {
+		return this.channel.call<boolean>('restartBackend');
+	}
+
 	chatStream(requestId: string, request: IVibeAIChatRequest): Promise<void> {
 		return this.channel.call('chatStream', { requestId, request });
 	}
@@ -217,6 +260,27 @@ export class VibeAIClient extends Disposable implements IVibeAIService {
 		return this.channel.call<{ ok: boolean; error?: string }>('discardParallelRun', { workspaceRoot, runId, index });
 	}
 
+	listAutomations(workspaceRoot?: string): Promise<IVibeAIAutomation[]> {
+		// Phase 189: Agents Hub Automations page (per-workspace rules).
+		return this.channel.call<IVibeAIAutomation[]>('listAutomations', workspaceRoot);
+	}
+
+	createAutomation(workspaceRoot?: string, data?: IVibeAIAutomationCreateData): Promise<IVibeAIAutomation> {
+		return this.channel.call<IVibeAIAutomation>('createAutomation', { workspaceRoot, data });
+	}
+
+	updateAutomation(workspaceRoot?: string, id?: string, patch?: IVibeAIAutomationPatch): Promise<IVibeAIAutomation> {
+		return this.channel.call<IVibeAIAutomation>('updateAutomation', { workspaceRoot, id, patch });
+	}
+
+	deleteAutomation(workspaceRoot?: string, id?: string): Promise<{ ok: boolean }> {
+		return this.channel.call<{ ok: boolean }>('deleteAutomation', { workspaceRoot, id });
+	}
+
+	runAutomationNow(workspaceRoot?: string, id?: string): Promise<{ runId: string }> {
+		return this.channel.call<{ runId: string }>('runAutomationNow', { workspaceRoot, id });
+	}
+
 	cancel(requestId: string): void {
 		this.channel.call('cancel', requestId);
 	}
@@ -237,9 +301,19 @@ export class VibeAIClient extends Disposable implements IVibeAIService {
 		return this.channel.call<boolean>('deleteFile', { path, workspaceRoot });
 	}
 
+	getTurnChanges(sessionId: string, turnId: string, workspaceRoot?: string): Promise<IVibeAITurnChanges | null> {
+		// Phase 247: rollback reconciliation source — see IVibeAIService.
+		return this.channel.call<IVibeAITurnChanges | null>('getTurnChanges', { sessionId, turnId, workspaceRoot });
+	}
+
 	resolveApproval(id: string, approved: boolean, scope?: 'once' | 'turn' | 'project', projectRoot?: string): Promise<boolean> {
 		// Phase 160: scope/projectRoot extend the approval with memory.
 		return this.channel.call<boolean>('resolveApproval', { id, approved, scope, projectRoot });
+	}
+
+	resolveAgentQuestion(id: string, answer: string): Promise<boolean> {
+		// Phase 237: resolve the blocking question gate — see IVibeAIService.
+		return this.channel.call<boolean>('resolveAgentQuestion', { id, answer });
 	}
 
 	steer(sessionId: string, content: string, mode?: 'steer' | 'queue'): Promise<boolean> {
@@ -260,6 +334,10 @@ export class VibeAIClient extends Disposable implements IVibeAIService {
 
 	inlineEdit(request: IVibeAIInlineEditRequest): Promise<string | null> {
 		return this.channel.call<string | null>('inlineEdit', request);
+	}
+
+	chatTitle(request: IVibeAIChatTitleRequest): Promise<string | null> {
+		return this.channel.call<string | null>('chatTitle', request);
 	}
 
 	contextUsage(request: IVibeAIContextUsageRequest): Promise<IVibeAIContextUsage> {

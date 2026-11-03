@@ -4375,7 +4375,13 @@ export const unicodeHighlightConfigKeys = {
 class UnicodeHighlight extends BaseEditorOption<EditorOption.unicodeHighlighting, IUnicodeHighlightOptions, InternalUnicodeHighlightOptions> {
 	constructor() {
 		const defaults: InternalUnicodeHighlightOptions = {
-			nonBasicASCII: inUntrustedWorkspace,
+			// Fork default (Phase 229): 'inUntrustedWorkspace' boxed every
+			// non-ASCII character gold — this fork silently opens workspaces
+			// in Restricted Mode (trust startupPrompt 'never'), so all
+			// Chinese text was permanently highlighted (user reports
+			// Phases 226/229). Invisible/ambiguous characters keep their
+			// security highlighting.
+			nonBasicASCII: false,
 			invisibleCharacters: true,
 			ambiguousCharacters: true,
 			includeComments: inUntrustedWorkspace,

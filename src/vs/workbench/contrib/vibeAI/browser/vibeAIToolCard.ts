@@ -284,6 +284,10 @@ export class VibeAIToolCard {
 	private restoring = false;
 	private streamText: string | undefined;
 	private restoreButton: HTMLButtonElement | undefined;
+	/** Phase 259: the embedded path's expand toggle — removed if the async
+	 * build fails and the preview falls back to the legacy rows, so the
+	 * legacy toggle doesn't join it (the duplicated "Show all" buttons). */
+	private embeddedExpandToggle: HTMLElement | undefined;
 
 	constructor(
 		name: string,
@@ -720,6 +724,11 @@ export class VibeAIToolCard {
 		if (this.disposables.isDisposed) {
 			return;
 		}
+		// Phase 259: the embedded toggle was appended before the async build
+		// failed — take it with the embedded path, or the legacy toggle below
+		// renders next to it (two "Show all" buttons on one card).
+		this.embeddedExpandToggle?.remove();
+		this.embeddedExpandToggle = undefined;
 		body.classList.remove('vibe-ai-embedded');
 		DOM.clearNode(body);
 		body.style.maxHeight = '';
@@ -729,6 +738,7 @@ export class VibeAIToolCard {
 	/** Phase 251: the expand toggle drives the embedded widget's row budget. */
 	private appendEmbeddedExpandToggle(handle: { setExpanded(expanded: boolean): void }, changed: number): void {
 		const toggle = DOM.append(this.diffSection, $('button.vibe-ai-tool-card-expand')) as HTMLButtonElement;
+		this.embeddedExpandToggle = toggle;
 		toggle.textContent = localize('vibeAIChat.tool.expand', "Show all {0} changed lines", changed);
 		let expanded = false;
 		this.disposables.add(DOM.addDisposableListener(toggle, DOM.EventType.CLICK, () => {

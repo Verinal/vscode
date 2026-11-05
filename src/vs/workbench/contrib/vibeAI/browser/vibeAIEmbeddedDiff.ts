@@ -99,6 +99,29 @@ function pseudoDiffUri(kind: 'original' | 'modified'): URI {
 }
 
 /**
+ * Phase 259: serves `vscode-chat-code-block` URIs to the workbench
+ * TextModelResolverService. The built-in chat registers the identical
+ * provider from ChatListRenderer's constructor — a scheme that only
+ * resolves once the built-in Chat view has been opened, which the vibeAI
+ * pane never does. Without a provider, createModelReference in
+ * VibeAIEmbeddedDiff.build rejects with "Unable to resolve resource" and
+ * every diff preview silently fell back to the legacy dimmed HTML rows
+ * (leaving the already-appended embedded expand toggle behind: the
+ * duplicated "Show all" buttons). The pane instantiates this once.
+ */
+export class VibeAIDiffModelContentProvider extends Disposable {
+	constructor(
+		@ITextModelService textModelService: ITextModelService,
+		@IModelService private readonly modelService: IModelService,
+	) {
+		super();
+		this._register(textModelService.registerTextModelContentProvider(Schemas.vscodeChatCodeBlock, {
+			provideTextContent: (resource: URI) => Promise.resolve(this.modelService.getModel(resource)),
+		}));
+	}
+}
+
+/**
  * The card's factory hook (the pane binds it to `instantiationService`).
  * Returning a non-renderable handle tells the caller to fall back to the
  * legacy HTML rows; `onBuildFailure` covers an async build error after the

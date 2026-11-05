@@ -49,7 +49,7 @@ import { IVibeAIModelConfig, VIBE_AI_NO_MODEL_MESSAGE, VibeAIModelStore } from '
 import { buildModelMenuActions } from './vibeAIModelMenu.js';
 import { computeDiffLines, computeDiffStats } from './vibeAIDiff.js';
 import { VibeAIToolCard } from './vibeAIToolCard.js';
-import { VibeAIEmbeddedDiff } from './vibeAIEmbeddedDiff.js';
+import { VibeAIEmbeddedDiff, VibeAIDiffModelContentProvider } from './vibeAIEmbeddedDiff.js';
 import { regroupWorkedSteps, summarizeWorkedActivity, workedCountsSegments } from './vibeAIWorkedGroups.js';
 import { VibeAIEditorHighlighter } from './vibeAIEditorHighlight.js';
 import { IPendingMermaidPart, isMermaidCodeBlock, VibeAIMermaidRenderer } from './vibeAIMermaid.js';
@@ -1293,6 +1293,14 @@ export class VibeAIChatPane extends ViewPane {
 		);
 
 		this._register(this.vibeAIService.onStreamData(data => this.handleStreamData(data)));
+		// Phase 259: the resolver content provider for the embedded diff's
+		// pseudo models (scheme vscode-chat-code-block). Registered once per
+		// pane — the built-in chat's identical provider only exists after
+		// its ChatListRenderer constructs, which this pane never triggers;
+		// without it createModelReference rejected and every diff preview
+		// silently fell back to the legacy dimmed rows (plus the orphaned
+		// embedded toggle: the duplicated "Show all" buttons).
+		this._register(instantiationService.createInstance(VibeAIDiffModelContentProvider));
 		this._register(this.chipsDisposables);
 		this._register(this.tabDisposables);
 		this._register(this.historyMenuDisposables);

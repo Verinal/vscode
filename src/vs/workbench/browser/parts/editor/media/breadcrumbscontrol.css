@@ -18,6 +18,37 @@
 	min-width: 0;
 }
 
+/* Vulcan fork (Phase 256): right-aligned actions slot in the breadcrumb bar —
+	 Cursor renders the Markdown "Preview | Markdown" mode switch in this row. */
+.monaco-workbench .breadcrumbs-control > .breadcrumbs-actions {
+	flex: 0 0 auto;
+	display: flex;
+	align-items: center;
+	padding: 0 4px 0 6px;
+	background: var(--vscode-breadcrumb-background);
+}
+
+.monaco-workbench .breadcrumbs-control > .breadcrumbs-actions.has-no-actions {
+	display: none;
+}
+
+.monaco-workbench .breadcrumbs-control > .breadcrumbs-actions .monaco-action-bar .action-item .action-label {
+	font-size: 11px;
+	padding: 1px 9px;
+	border-radius: 999px;
+	color: var(--vscode-breadcrumb-foreground);
+	outline-offset: -1px;
+}
+
+.monaco-workbench .breadcrumbs-control > .breadcrumbs-actions .monaco-action-bar .action-item:hover:not(.checked) .action-label {
+	color: var(--vscode-breadcrumb-focusForeground);
+}
+
+.monaco-workbench .breadcrumbs-control > .breadcrumbs-actions .monaco-action-bar .action-item.checked .action-label {
+	background: var(--vscode-button-background);
+	color: var(--vscode-button-foreground);
+}
+
 .monaco-workbench .breadcrumbs-control.with-editor-type > .breadcrumbs-editor-type {
 	flex: 0 0 auto;
 	display: flex;

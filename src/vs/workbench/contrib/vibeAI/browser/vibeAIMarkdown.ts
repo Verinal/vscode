@@ -29,12 +29,28 @@
  * Diffs/merges are untouched: this registration deliberately provides no
  * diff/merge factories and the resolver skips factory-less registrations
  * for those input kinds.
+ *
+ * Phase 252: preview mode opens the built-in hybrid (WYSIWYG) Markdown
+ * editor (`vscode.markdown.editor`) instead of the read-only static preview
+ * — Cursor's Preview is directly editable. The Editor Mode switch moved
+ * from an EditorTitle submenu into always-visible "Preview | Markdown"
+ * buttons next to the file row, and `breadcrumbs.filePath` now defaults to
+ * 'last' so the breadcrumb row shows the bare file name like Cursor's
+ * "ⓘ file.md" row.
+ *
+ * Phase 256: the switch's home is the breadcrumb bar's right-aligned
+ * actions slot (`MenuId.BreadcrumbsTitle`, hosted by BreadcrumbsControl) —
+ * Cursor renders the toggle in the "ⓘ file.md" row itself, while the
+ * previous homes (title-bar pair, Phase 254's in-content pill inside the
+ * webview) either sat a row too high or duplicated the toggle under the
+ * lock/pencil control. The plan pane header "..." keeps enumerating the
+ * same actions from the submenu id.
  */
 
 import { Disposable } from '../../../../base/common/lifecycle.js';
 import { localize, localize2 } from '../../../../nls.js';
 import { isCodeEditor } from '../../../../editor/browser/editorBrowser.js';
-import { Action2, MenuId, MenuRegistry, registerAction2 } from '../../../../platform/actions/common/actions.js';
+import { Action2, MenuId, registerAction2 } from '../../../../platform/actions/common/actions.js';
 import { ICommandService } from '../../../../platform/commands/common/commands.js';
 import { IConfigurationService } from '../../../../platform/configuration/common/configuration.js';
 import { ContextKeyExpr, IContextKey, IContextKeyService, RawContextKey } from '../../../../platform/contextkey/common/contextkey.js';
@@ -57,6 +73,22 @@ import { VibeAIModelStore } from './vibeAIModelStore.js';
 
 /** View type of the built-in rendered Markdown preview tab (StaticMarkdownPreview). */
 const MARKDOWN_PREVIEW_VIEW_TYPE = 'vscode.markdown.preview.editor';
+
+/**
+ * Phase 252: view type of the built-in hybrid (WYSIWYG) Markdown editor.
+ * Cursor's "Preview" is an EDITABLE rendered view (user: 「人家的preview是直接
+ * 可以編輯的，我們根本沒做到」), so the resolver's preview mode now opens this
+ * instead of the read-only static preview — same upstream component the
+ * classic preview shares its styling with, TextDocument stays the single
+ * source of truth (native undo/redo, dirty state, hot-exit). The static
+ * preview stays reachable via "Open With…"; both webviews count as the
+ * 'preview' mode everywhere below (mode memory, context key, reopen).
+ */
+const MARKDOWN_RICH_EDITOR_VIEW_TYPE = 'vscode.markdown.editor';
+
+function isMarkdownPreviewViewType(viewType: string | undefined): boolean {
+	return viewType === MARKDOWN_PREVIEW_VIEW_TYPE || viewType === MARKDOWN_RICH_EDITOR_VIEW_TYPE;
+}
 
 /**
  * Exclusive resolver id. Must NOT be `DEFAULT_EDITOR_ASSOCIATION.id`
@@ -112,6 +144,26 @@ async function setModeAndReopen(accessor: ServicesAccessor, mode: MarkdownEditor
 	return accessor.get(ICommandService).executeCommand('reopenActiveEditorWith', overrideViewType);
 }
 
+/**
+ * Phase 256: when-clause of the "Preview | Markdown" toggle — the segmented
+ * pair renders in the breadcrumb bar's right-aligned actions slot
+ * (MenuId.BreadcrumbsTitle, hosted by BreadcrumbsControl), Cursor parity for
+ * the "ⓘ file.md" row. BOTH modes show the pair — the active mode is the
+ * highlighted one: preview mode needs the way back to raw, raw mode the way
+ * back to preview (the Phase 254 title-bar pair only served raw editors and
+ * the Phase 254 in-content pill is gone — it duplicated the toggle inside
+ * the webview). Excluded: the rendered plan pane (its header "..." carries
+ * the same actions, Phase 228) and notebooks.
+ */
+const MARKDOWN_MODE_TOGGLE_WHEN = ContextKeyExpr.and(
+	ContextKeyExpr.or(
+		ContextKeyExpr.equals(CONTEXT_VIBE_AI_MARKDOWN_MODE.key, 'preview'),
+		ContextKeyExpr.equals(CONTEXT_VIBE_AI_MARKDOWN_MODE.key, 'markdown'),
+	),
+	ContextKeyExpr.notEquals('activeEditor', VIBE_AI_PLAN_DOC_PANE_ID),
+	ContextKeyExpr.not('notebookEditorFocused'),
+);
+
 export class VibeAIMarkdownModePreviewAction extends Action2 {
 	static readonly ID = 'vibeAI.markdown.modePreview';
 
@@ -121,7 +173,15 @@ export class VibeAIMarkdownModePreviewAction extends Action2 {
 			title: localize2('vibeAIMarkdown.modePreview', "Preview"),
 			f1: true,
 			toggled: ContextKeyExpr.equals(CONTEXT_VIBE_AI_MARKDOWN_MODE.key, 'preview'),
-			menu: [{ id: VIBE_AI_EDITOR_MODE_MENU, order: 1 }],
+			// Phase 252: mode switch as ALWAYS-VISIBLE buttons — Cursor renders
+			// the switch as "Preview | Markdown" pills next to the file row, a
+			// submenu buried in the "..." overflow reads as "nothing there".
+			// Phase 256: the pair lives in the breadcrumb bar's actions slot
+			// (Cursor's "ⓘ file.md" row), in BOTH modes.
+			menu: [
+				{ id: VIBE_AI_EDITOR_MODE_MENU, order: 1 },
+				{ id: MenuId.BreadcrumbsTitle, group: 'navigation', order: 1, when: MARKDOWN_MODE_TOGGLE_WHEN },
+			],
 		});
 	}
 
@@ -131,11 +191,13 @@ export class VibeAIMarkdownModePreviewAction extends Action2 {
 		// into a table and, once reached, left no menu path back — user got
 		// stuck). Reopening with the resolver registration id routes through
 		// this contribution's plan-doc delegation to the plan pane.
+		// Phase 252: Preview is the editable WYSIWYG rich editor (Cursor parity) —
+		// the read-only static preview remains available via "Open With…".
 		const resource = accessor.get(IEditorService).activeEditorPane?.input?.resource;
 		if (resource && isPlanDocResource(resource)) {
 			return setModeAndReopen(accessor, 'preview', MARKDOWN_RESOLVER_ID);
 		}
-		return setModeAndReopen(accessor, 'preview', MARKDOWN_PREVIEW_VIEW_TYPE);
+		return setModeAndReopen(accessor, 'preview', MARKDOWN_RICH_EDITOR_VIEW_TYPE);
 	}
 }
 
@@ -148,7 +210,10 @@ export class VibeAIMarkdownModeMarkdownAction extends Action2 {
 			title: localize2('vibeAIMarkdown.modeMarkdown', "Markdown"),
 			f1: true,
 			toggled: ContextKeyExpr.equals(CONTEXT_VIBE_AI_MARKDOWN_MODE.key, 'markdown'),
-			menu: [{ id: VIBE_AI_EDITOR_MODE_MENU, order: 2 }],
+			menu: [
+				{ id: VIBE_AI_EDITOR_MODE_MENU, order: 2 },
+				{ id: MenuId.BreadcrumbsTitle, group: 'navigation', order: 2, when: MARKDOWN_MODE_TOGGLE_WHEN },
+			],
 		});
 	}
 
@@ -304,31 +369,13 @@ export class VibeAIPlanDocModelAction extends Action2 {
 registerAction2(VibeAIPlanDocBuildAction);
 registerAction2(VibeAIPlanDocModelAction);
 
-MenuRegistry.appendMenuItem(MenuId.EditorTitle, {
-	title: localize('vibeAIMarkdown.editorModeMenu', "Editor Mode"),
-	submenu: VIBE_AI_EDITOR_MODE_MENU,
-	when: ContextKeyExpr.and(
-		// Two independent signals, either one shows the menu: the own
-		// context key (the contribution sets it for every md-family editor,
-		// preview or raw) and the resource language (path-based fallback
-		// that also works if the contribution failed to start).
-		ContextKeyExpr.or(
-			ContextKeyExpr.has(CONTEXT_VIBE_AI_MARKDOWN_MODE.key),
-			ContextKeyExpr.regex('resourceLangId', /^(markdown|prompt|instructions|chatagent|skill)$/),
-		),
-		ContextKeyExpr.not('notebookEditorFocused'),
-		// Phase 228: the rendered plan pane carries its own header "..."
-		// (same menu) — a second Editor Mode button in the title bar would
-		// duplicate it (Cursor shows only the in-header "...").
-		ContextKeyExpr.notEquals('activeEditor', VIBE_AI_PLAN_DOC_PANE_ID),
-	),
-	// Primary (navigation): renders as a VISIBLE "Editor Mode" button in
-	// the editor title bar. The overflow ("...") menu only exists while
-	// secondary actions do, so a submenu buried there reads as "nothing
-	// there" (user report) — Cursor's "..." is an always-visible button.
-	group: 'navigation',
-	order: 1000,
-});
+// Phase 252→256: the EditorTitle "Editor Mode" submenu placement is GONE, and
+// so is the Phase 252 title-bar pair and the Phase 254 in-content pill — the
+// two mode actions above now register in the breadcrumb bar's actions slot
+// (MenuId.BreadcrumbsTitle, always-visible "Preview | Markdown" buttons in
+// both modes, Cursor parity with the "ⓘ file.md" row). The
+// VIBE_AI_EDITOR_MODE_MENU submenu id itself stays: the plan pane's header
+// "..." enumerates its actions from it (vibeAIPlanDocPane.ts getMenuActions).
 
 export class VibeAIMarkdownEditorModeContribution extends Disposable implements IWorkbenchContribution {
 	static readonly ID = 'workbench.contrib.vibeAIMarkdownEditorMode';
@@ -365,8 +412,10 @@ export class VibeAIMarkdownEditorModeContribution extends Disposable implements 
 		if (typeId === VIBE_AI_PLAN_DOC_EDITOR_ID) {
 			this.modeContextKey.set(resource ? getMarkdownEditorMode(this.storageService, this.uriIdentityService, resource) : 'preview');
 		} else if (resource && isMarkdownFamilyResource(resource)) {
-			this.modeContextKey.set(viewType === MARKDOWN_PREVIEW_VIEW_TYPE ? 'preview' : 'markdown');
-		} else if (viewType === MARKDOWN_PREVIEW_VIEW_TYPE) {
+			// Phase 252: both preview webviews (rich editor + static preview)
+			// count as the 'preview' mode.
+			this.modeContextKey.set(isMarkdownPreviewViewType(viewType) ? 'preview' : 'markdown');
+		} else if (isMarkdownPreviewViewType(viewType)) {
 			this.modeContextKey.set('preview');
 		} else {
 			this.modeContextKey.set(undefined);
@@ -418,9 +467,12 @@ export class VibeAIMarkdownEditorModeContribution extends Disposable implements 
 							return { editor: this.textEditorService.createTextEditor(editorInput) };
 						}
 						return {
+							// Phase 252: the editable WYSIWYG rich editor — Cursor's
+							// Preview is directly editable, the read-only static
+							// preview stays available via "Open With…".
 							editor: CustomEditorInput.create(this.instantiationService, {
 								resource,
-								viewType: MARKDOWN_PREVIEW_VIEW_TYPE,
+								viewType: MARKDOWN_RICH_EDITOR_VIEW_TYPE,
 								webviewTitle: undefined,
 								preferredName: undefined,
 								iconPath: undefined,

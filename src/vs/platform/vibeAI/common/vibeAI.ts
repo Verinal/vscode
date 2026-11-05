@@ -185,9 +185,10 @@ export interface IVibeAIChatRequest {
 	 * long-lived objective to work towards until it's fully complete) —
 	 * set via `/goal` in the chat pane and carried on EVERY turn of the
 	 * conversation that owns it. The backend injects it as the hidden
-	 * `<session goal>` system-prompt block; the model confirms
-	 * completion via the mark_goal_complete tool (the `goal_complete`
-	 * event flips the goal banner to its done state). Absent = zero
+	 * `<session goal>` system-prompt block; Phase 249: there is NO
+	 * completion tool — the framework's stop gate reviews the goal and
+	 * plan state at each natural turn end (the `goal_complete` event
+	 * flips the goal banner to its done state). Absent = zero
 	 * change (backward compatible).
 	 */
 	readonly goal?: string;
@@ -357,6 +358,30 @@ export interface IVibeAIContextUsageRequest {
 	 * function as the actual injection (estimate = sent).
 	 */
 	readonly planFile?: string;
+	/**
+	 * Phase 248: the running turn's live activity — the answer text and
+	 * tool calls/results already streamed this turn (the backend has put
+	 * them on the wire; the next LLM round pays them). Counted into the
+	 * `conversation` row so the ring tracks a running turn in real time
+	 * instead of jumping only when the turn settles.
+	 */
+	readonly liveTurn?: IVibeAILiveTurnActivity;
+}
+
+/**
+ * Phase 248: the in-flight turn's accumulated activity as the estimate
+ * sees it — `text` is the narration streamed so far, `tools` the tool
+ * cards' snapshots (call arguments + results/outputs) in arrival order.
+ */
+export interface IVibeAILiveTurnActivity {
+	readonly text?: string;
+	readonly tools?: ReadonlyArray<{
+		readonly name?: string;
+		readonly args?: unknown;
+		readonly result?: string;
+		readonly output?: string;
+		readonly streamText?: string;
+	}>;
 }
 
 /**
@@ -640,7 +665,7 @@ export interface IVibeAIDiagnostic {
 	readonly source?: string;
 }
 
-export type VibeAIStreamEventType = 'text' | 'thinking' | 'tool_start' | 'tool_result' | 'file_delta' | 'round_end' | 'context_compressed' | 'output_truncated' | 'limit_reached' | 'model_routed' | 'plan' | 'plan_doc_start' | 'plan_doc_delta' | 'plan_start' | 'plan_step_start' | 'plan_step_done' | 'plan_revision' | 'plan_done' | 'agent_questions' | 'agent_question_answered' | 'approval_request' | 'approval_resolved' | 'steered' | 'diagnostics' | 'done' | 'goal_complete' | 'turn_state' | 'turn_start' | 'resume_unavailable' | 'parallel_agent_start' | 'parallel_agent_done' | 'parallel_done' | 'error' | 'retry' | 'unknown';
+export type VibeAIStreamEventType = 'text' | 'thinking' | 'tool_start' | 'tool_result' | 'file_delta' | 'round_end' | 'context_compressed' | 'output_truncated' | 'limit_reached' | 'model_routed' | 'plan' | 'plan_doc_start' | 'plan_doc_delta' | 'plan_start' | 'plan_step_start' | 'plan_step_done' | 'plan_revision' | 'plan_done' | 'agent_questions' | 'agent_question_answered' | 'approval_request' | 'approval_resolved' | 'steered' | 'diagnostics' | 'done' | 'goal_complete' | 'auto_continue' | 'turn_state' | 'turn_start' | 'resume_unavailable' | 'parallel_agent_start' | 'parallel_agent_done' | 'parallel_done' | 'error' | 'retry' | 'unknown';
 
 export interface IVibeAIStreamData {
 	readonly requestId: string;
@@ -716,6 +741,11 @@ export interface IVibeAIStreamData {
 		 *  from an early loop-detection stop. */
 		readonly budget?: number;
 		readonly reason: 'rounds' | 'context' | string;
+		/** Phase 249: reason="auto_continue" — the framework stop gate's
+		 *  auto-continue budget/stall guard exhausted; the chip reports the
+		 *  used/total continuation count (the task may be unfinished). */
+		readonly count?: number;
+		readonly max?: number;
 	};
 	/** Phase 51: `output_truncated` — the backend round hit its per-round
 	 *  output token budget (finish_reason=length); on thinking models long
@@ -878,11 +908,29 @@ export interface IVibeAIStreamData {
 		readonly answer: string;
 	};
 	/**
-	 * Phase 120 (`goal_complete`): the model declared the session goal
-	 * complete via the mark_goal_complete tool — the pane flips the goal
-	 * banner to its done state (idempotent on repeated declarations).
+	 * Phase 249 (`goal_complete`): the framework's stop gate confirmed the
+	 * session goal achieved (plan fully ticked / judge verdict complete) at
+	 * a natural turn end — the pane flips the goal banner to its done state
+	 * (idempotent; framework-owned, the model has no completion tool).
 	 */
 	readonly goalComplete?: boolean;
+	/**
+	 * Phase 249 (`auto_continue`): the framework's stop gate detected
+	 * unfinished work at a natural turn end (no tool calls) and injected a
+	 * continuation seed — the turn keeps running (Cursor stop-hook
+	 * followup parity). The pane renders a slim note inside the Working
+	 * timeline; the loop stays open (bounded by the backend's max).
+	 */
+	readonly autoContinue?: {
+		/** How many auto-continues this turn has used (1-based). */
+		readonly count: number;
+		/** The backend's per-turn auto-continue budget. */
+		readonly max: number;
+		/** 'plan_pending' (unticked plan steps) | 'goal_incomplete' (judge). */
+		readonly reason: string;
+		/** Human-readable unfinished-work detail (step titles / judge reason). */
+		readonly detail?: string;
+	};
 	/**
 	 * Phase 89 (`round_end`): the backend's explicit final-result marker —
 	 * true = this round's text is THE answer (the model requested no

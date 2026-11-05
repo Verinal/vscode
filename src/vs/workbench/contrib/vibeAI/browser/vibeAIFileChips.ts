@@ -7,6 +7,8 @@ import { addDisposableListener, EventType } from '../../../../base/browser/dom.j
 import { localize } from '../../../../nls.js';
 import { URI } from '../../../../base/common/uri.js';
 import { IFileService } from '../../../../platform/files/common/files.js';
+import { ICommandService } from '../../../../platform/commands/common/commands.js';
+import { IOpenerService } from '../../../../platform/opener/common/opener.js';
 
 /**
  * r29: chat answers reference local files in inline code (e.g. `config.py`,
@@ -18,8 +20,8 @@ import { IFileService } from '../../../../platform/files/common/files.js';
 
 export interface IFileChipHost {
 	readonly fileService: IFileService;
-	/** Absolute project root the chip text is relative to; undefined = no project. */
-	readonly resolveRoot: () => string | undefined;
+	/** Absolute project roots the chip text is relative to; undefined entries are skipped. */
+	readonly resolveRoots: () => Array<string | undefined>;
 	/** Open the resolved absolute file (hub right pane / IDE center editor). */
 	readonly onOpen: (fsPath: string, display: string) => void;
 	/** The resolved file vanished since the chip rendered (deleted or rolled back). */
@@ -49,8 +51,8 @@ function looksLikePath(text: string): boolean {
 }
 
 function resolveFileChip(text: string, host: IFileChipHost): Promise<string | undefined> {
-	const root = host.resolveRoot();
-	const key = `${root ?? ''}|${text}`;
+	const roots = host.resolveRoots();
+	const key = `${roots.map(r => r ?? '').join('|')}|${text}`;
 	const cached = resolutionCache.get(key);
 	if (cached && Date.now() - cached.at < RESOLUTION_TTL_MS) {
 		return cached.promise;
@@ -61,8 +63,14 @@ function resolveFileChip(text: string, host: IFileChipHost): Promise<string | un
 	const candidates: string[] = [];
 	if (/^([a-zA-Z]:[\\/]|[\\/])/.test(text)) {
 		candidates.push(text);
-	} else if (root) {
-		candidates.push(joinRoot(root, text));
+	} else {
+		// Phase 255: every workspace root gets a try — a chip in a
+		// multi-root workspace must not depend on which folder is first.
+		for (const root of roots) {
+			if (root) {
+				candidates.push(joinRoot(root, text));
+			}
+		}
 	}
 	const promise = (async () => {
 		for (const candidate of candidates) {
@@ -78,6 +86,32 @@ function resolveFileChip(text: string, host: IFileChipHost): Promise<string | un
 	})();
 	resolutionCache.set(key, { at: Date.now(), promise });
 	return promise;
+}
+
+/**
+ * Phase 255: evidence references from test/tool runs — `sandbox/pw-results/
+ * ….png` screenshots, `video.webm` recordings, `trace.zip` archives — open
+ * differently from text sources. Images (and everything text-ish) go to the
+ * editor area where the built-in preview renders screenshots; recordings go
+ * to the OS (the note on the chip already says the browser plays the video);
+ * archives reveal in the Explorer (trace.zip is a drag-into-trace-viewer
+ * artifact, locating it is the useful move).
+ */
+export const FILE_CHIP_MEDIA_EXTENSIONS = new Set(['webm', 'mp4', 'mov', 'avi', 'mkv', 'm4v', 'mp3', 'wav', 'ogg', 'flac', 'm4a']);
+export const FILE_CHIP_ARCHIVE_EXTENSIONS = new Set(['zip', 'gz', '7z', 'tar']);
+
+export function openChipFileSmart(commandService: ICommandService, openerService: IOpenerService, fsPath: string): void {
+	const uri = URI.file(fsPath);
+	const ext = fsPath.slice(fsPath.lastIndexOf('.') + 1).toLowerCase();
+	if (FILE_CHIP_MEDIA_EXTENSIONS.has(ext)) {
+		void openerService.open(uri, { openExternal: true });
+	} else if (FILE_CHIP_ARCHIVE_EXTENSIONS.has(ext)) {
+		void commandService.executeCommand('revealInExplorer', uri);
+	} else {
+		// Images get the built-in preview; everything text-ish opens in the
+		// editor area exactly as before.
+		void commandService.executeCommand('vscode.open', uri);
+	}
 }
 
 export function enhanceFileChips(container: HTMLElement, host: IFileChipHost): void {

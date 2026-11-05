@@ -8,7 +8,7 @@
 /** @type {ServiceWorkerGlobalScope} */
 const sw = /** @type {any} */ (self);
 
-const VERSION = 6;
+const VERSION = 7;
 
 const maxActiveHostResourceResponseBodies = 32;
 
@@ -222,6 +222,17 @@ function trackReadableStreamLifetime(stream, onDidFinish) {
  */
 /** @type {RequestStore<ResourceResponse>} */
 const resourceRequestStore = new RequestStore();
+
+/**
+ * In-flight cache puts per resource URL. When the same resource is requested
+ * twice at nearly the same time and both requests miss the cache, running the
+ * two `cache.put` calls in parallel can interleave their writes into the same
+ * cache entry and corrupt it (the served bytes end up as a concatenation of
+ * duplicated chunks). Chaining the puts per URL keeps each entry write
+ * serialized and therefore clean.
+ * @type {Map<string, Promise<void>>}
+ */
+const pendingResourcePuts = new Map();
 
 const hostResourceResponseBodySemaphore = new AsyncSemaphore(maxActiveHostResourceResponseBodies);
 
@@ -522,10 +533,19 @@ async function processResourceRequest(
 				const releaseAfterResponseAndCache = createJoinedFinalizer(releaseHostResourceResponseBody, 2);
 				const response = new Response(trackReadableStreamLifetime(responseStream, releaseAfterResponseAndCache), { status: 200, headers });
 				const responseForCache = new Response(cacheStream, { status: 200, headers });
-				void caches.open(resourceCacheName)
+				const url = event.request.url;
+				const put = (pendingResourcePuts.get(url) ?? Promise.resolve())
+					.catch(() => undefined)
+					.then(() => caches.open(resourceCacheName))
 					.then(cache => cache.put(event.request, responseForCache))
 					.then(undefined, () => undefined)
-					.finally(releaseAfterResponseAndCache);
+					.finally(() => {
+						if (pendingResourcePuts.get(url) === put) {
+							pendingResourcePuts.delete(url);
+						}
+						releaseAfterResponseAndCache();
+					});
+				pendingResourcePuts.set(url, put);
 				return response;
 			}
 

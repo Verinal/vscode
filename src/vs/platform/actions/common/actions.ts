@@ -102,6 +102,9 @@ export class MenuId {
 	static readonly EditorTitleRun = new MenuId('EditorTitleRun');
 	static readonly EditorTitleContext = new MenuId('EditorTitleContext');
 	static readonly EditorTitleContextShare = new MenuId('EditorTitleContextShare');
+	// Vulcan fork (Phase 256): right-aligned actions slot inside the breadcrumb
+	// bar — Cursor renders the Markdown "Preview | Markdown" mode switch there.
+	static readonly BreadcrumbsTitle = new MenuId('BreadcrumbsTitle');
 	static readonly EmptyEditorGroup = new MenuId('EmptyEditorGroup');
 	static readonly EmptyEditorGroupContext = new MenuId('EmptyEditorGroupContext');
 	static readonly EditorGroupWatermarkToolbar = new MenuId('EditorGroupWatermarkToolbar');

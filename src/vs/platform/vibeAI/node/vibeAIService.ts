@@ -1248,6 +1248,11 @@ export class VibeAIService extends Disposable implements IVibeAIService {
 					// is assembled by the same function as the injection
 					// (estimate = sent).
 					plan_file: request.planFile,
+					// Phase 248: the running turn's live activity (answer text
+					// + streamed tool calls/results) — counted into the
+					// `conversation` row so the ring tracks the turn while it
+					// works (estimate ≡ sent).
+					live_turn: request.liveTurn,
 					// Phase 107: the editor's opened folder (rules / skills /
 					// MCP are estimated against it).
 					project_root: request.workspaceRoot

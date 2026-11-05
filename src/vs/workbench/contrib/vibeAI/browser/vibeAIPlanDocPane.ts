@@ -54,18 +54,23 @@ import { CodeEditorWidget } from '../../../../editor/browser/widget/codeEditor/c
 import { IResolvedTextEditorModel, ITextModelService } from '../../../../editor/common/services/resolverService.js';
 import { ITextModel } from '../../../../editor/common/model.js';
 import { IMenuService } from '../../../../platform/actions/common/actions.js';
+import { ICommandService } from '../../../../platform/commands/common/commands.js';
 import { IConfigurationService } from '../../../../platform/configuration/common/configuration.js';
 import { IContextKeyService } from '../../../../platform/contextkey/common/contextkey.js';
 import { IContextMenuService } from '../../../../platform/contextview/browser/contextView.js';
+import { IFileService } from '../../../../platform/files/common/files.js';
 import { IInstantiationService } from '../../../../platform/instantiation/common/instantiation.js';
 import { IMarkdownRendererService } from '../../../../platform/markdown/browser/markdownRenderer.js';
 import { INotificationService } from '../../../../platform/notification/common/notification.js';
+import { IOpenerService } from '../../../../platform/opener/common/opener.js';
 import { IQuickInputService } from '../../../../platform/quickinput/common/quickInput.js';
 import { IStorageService } from '../../../../platform/storage/common/storage.js';
 import { ITelemetryService } from '../../../../platform/telemetry/common/telemetry.js';
 import { IThemeService } from '../../../../platform/theme/common/themeService.js';
 import { IUriIdentityService } from '../../../../platform/uriIdentity/common/uriIdentity.js';
+import { IWorkspaceContextService } from '../../../../platform/workspace/common/workspace.js';
 import { IVibeAIPlan } from '../../../../platform/vibeAI/common/vibeAI.js';
+import { enhanceFileChips, openChipFileSmart } from './vibeAIFileChips.js';
 import { IEditorOptions } from '../../../../platform/editor/common/editor.js';
 import { IEditorOpenContext, IUntypedEditorInput } from '../../../common/editor.js';
 import { ITextFileService } from '../../../services/textfile/common/textfiles.js';
@@ -404,6 +409,10 @@ export class VibeAIPlanDocPane extends EditorPane {
 		@IConfigurationService private readonly configurationService: IConfigurationService,
 		@IQuickInputService private readonly quickInputService: IQuickInputService,
 		@IUriIdentityService private readonly uriIdentityService: IUriIdentityService,
+		@IFileService private readonly fileService: IFileService,
+		@IWorkspaceContextService private readonly workspaceContextService: IWorkspaceContextService,
+		@ICommandService private readonly commandService: ICommandService,
+		@IOpenerService private readonly openerService: IOpenerService,
 	) {
 		super(VibeAIPlanDocPane.ID, group, telemetryService, themeService, storageService);
 		// App-lifetime shared renderer (no dispose — same as the chat pane).
@@ -872,6 +881,17 @@ export class VibeAIPlanDocPane extends EditorPane {
 				},
 				this.mdEl,
 			);
+			// Phase 255: plan docs reference artifacts the same way chat
+			// answers do (evidence screenshots, trace archives, source files)
+			// — real local paths become clickable here too.
+			enhanceFileChips(this.mdEl, {
+				fileService: this.fileService,
+				resolveRoots: () => this.workspaceContextService.getWorkspace().folders.map(f => f.uri.fsPath),
+				onOpen: fsPath => openChipFileSmart(this.commandService, this.openerService, fsPath),
+				onMissing: (_fsPath, display) => {
+					this.notificationService.warn(localize('vibeAIPlanDoc.fileChipMissing', "{0} no longer exists on disk — it was deleted or removed by a rollback.", display));
+				},
+			});
 		} catch {
 			this.mdEl.textContent = body;
 		}

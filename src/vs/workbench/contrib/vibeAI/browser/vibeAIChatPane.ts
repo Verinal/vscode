@@ -49,10 +49,11 @@ import { IVibeAIModelConfig, VIBE_AI_NO_MODEL_MESSAGE, VibeAIModelStore } from '
 import { buildModelMenuActions } from './vibeAIModelMenu.js';
 import { computeDiffLines, computeDiffStats } from './vibeAIDiff.js';
 import { VibeAIToolCard } from './vibeAIToolCard.js';
+import { VibeAIEmbeddedDiff } from './vibeAIEmbeddedDiff.js';
 import { regroupWorkedSteps, summarizeWorkedActivity, workedCountsSegments } from './vibeAIWorkedGroups.js';
 import { VibeAIEditorHighlighter } from './vibeAIEditorHighlight.js';
 import { IPendingMermaidPart, isMermaidCodeBlock, VibeAIMermaidRenderer } from './vibeAIMermaid.js';
-import { enhanceFileChips } from './vibeAIFileChips.js';
+import { enhanceFileChips, openChipFileSmart } from './vibeAIFileChips.js';
 import { ViewPane } from '../../../browser/parts/views/viewPane.js';
 import { IViewletViewOptions } from '../../../browser/parts/views/viewsViewlet.js';
 import { IViewDescriptorService } from '../../../common/views.js';
@@ -178,6 +179,12 @@ const CONTEXT_LIMIT_MIN = 100_000;
 const CONTEXT_LIMIT_MAX = 1_000_000;
 /** Phase 41: context ring geometry — viewBox 20 with r 7.5 → 2πr ≈ 47.12. */
 const CONTEXT_RING_CIRCUMFERENCE = 2 * Math.PI * 7.5;
+/**
+ * Phase 248: live context tracking cadence — the minimum gap between
+ * estimate refreshes scheduled by a streaming turn's events (the burst
+ * collapses into one trailing refresh per window).
+ */
+const LIVE_CONTEXT_REFRESH_MS = 2000;
 /**
  * Phase 114: Shift+Enter queue cap (Cursor-parity queue) — messages
  * queued while a turn runs; beyond this the send is rejected (frontend
@@ -1177,6 +1184,12 @@ export class VibeAIChatPane extends ViewPane {
 	private contextPanelOpen = false;
 	private contextLimit = DEFAULT_CONTEXT_LIMIT;
 	private contextUsage: IVibeAIContextUsage | undefined;
+	// Phase 248: live context tracking — while a turn streams, its events
+	// schedule throttled ring refreshes; the flag collapses every event
+	// burst inside the window into ONE trailing refresh (the refresh reads
+	// the latest state when it actually runs, so skipped events lose
+	// nothing).
+	private liveContextRefreshQueued = false;
 
 	// --- @ context chips listeners (cleared on every chip re-render)
 	private readonly chipsDisposables = new DisposableStore();
@@ -3320,6 +3333,10 @@ export class VibeAIChatPane extends ViewPane {
 			// here instead of tearing down its successor.
 			this.finishStreaming(conversation, requestId);
 		});
+		// Phase 248: the dispatched user message (and its attachments) grew
+		// the context the running turn pays — refresh the ring NOW instead
+		// of holding the pre-send value until the turn settles.
+		void this.refreshContextUsage(conversation);
 	}
 
 	private handleStreamData(data: IVibeAIStreamData): void {
@@ -3335,6 +3352,14 @@ export class VibeAIChatPane extends ViewPane {
 		// Retrying chip (the wait is over — the re-run is producing again).
 		if (data.type !== 'retry') {
 			this.clearRetryChip(conversation);
+		}
+
+		// Phase 248: the ring tracks the running turn — these events grow
+		// what the next LLM round actually pays (narration deltas, tool
+		// results landing, rounds closing). Throttled: a burst collapses
+		// into one refresh per window.
+		if (data.type === 'text' || data.type === 'tool_result' || data.type === 'round_end') {
+			this.scheduleLiveContextRefresh(conversation);
 		}
 
 		switch (data.type) {
@@ -3428,9 +3453,19 @@ export class VibeAIChatPane extends ViewPane {
 				this.handleSteered(conversation, data);
 				break;
 			case 'goal_complete':
-				// Phase 120: mark_goal_complete confirmed the session goal
-				// — the goal banner flips to its done state (idempotent).
+				// Phase 249: the framework's stop gate confirmed the session
+				// goal achieved (plan fully ticked / judge verdict complete)
+				// — the goal banner flips to its done state. The model has
+				// no completion tool (Phase 249 無完成工具派); this event is
+				// framework-owned.
 				this.handleGoalComplete(conversation);
+				break;
+			case 'auto_continue':
+				// Phase 249: the framework's stop gate detected unfinished
+				// work at the model's natural stop (no tool calls) and
+				// injected a continuation seed — the turn keeps running
+				// (Cursor stop-hook followup parity, user-imperceptible).
+				this.handleAutoContinue(conversation, data);
 				break;
 			case 'turn_state':
 				// Phase 150: the backend's explicit turn lifecycle state
@@ -5084,6 +5119,14 @@ export class VibeAIChatPane extends ViewPane {
 			this.applyPlanResults(state.planCardRoot, state.pendingPlan, state.planResults);
 		}
 		this.updatePlanProgress(conversation, summary?.stepsDone.length, summary?.steps ?? 0);
+		// Phase 249: execute mode has no goal_complete emission (the agent
+		// loop's stop gate only runs the agent path) — a plan that finished
+		// with zero failed steps IS this turn's goal-completion signal:
+		// flip the goal banner here (handleGoalComplete guards the no-goal
+		// case; idempotent with the agent-path framework event).
+		if (summary && summary.stepsFailed.length === 0 && summary.stepsDone.length > 0) {
+			this.handleGoalComplete(conversation);
+		}
 		// Phase 231: defensive — the last step_done normally cleared the
 		// group; an anomaly path that lands here with one active settles it
 		// before the shell folds (no frozen spinner on re-expansion).
@@ -5261,6 +5304,10 @@ export class VibeAIChatPane extends ViewPane {
 			this.languageService,
 			change => this.restoreChange(change),
 			(path, line, endLine) => this.openFile(path, line, endLine),
+			// Phase 251: the card's diff preview renders in an embedded
+			// DiffEditorWidget (real editor colors, theme diff colors).
+			(container, original, updated, filePath, firstChangeLine, onBuildFailure) =>
+				this.instantiationService.createInstance(VibeAIEmbeddedDiff, container, original, updated, filePath, firstChangeLine, onBuildFailure),
 		);
 		state.toolCards.set(id, card);
 		// Phase 149: the call id rides the element so the Worked grouping
@@ -5588,6 +5635,9 @@ export class VibeAIChatPane extends ViewPane {
 		// steered marker keeps the turn↔user-turn alignment intact (steers
 		// are never dispatched user turns).
 		conversation.history.push({ role: 'user', content, steered: true });
+		// Phase 248: the injected steer grew the running turn's context —
+		// the ring follows (throttled with the other live events).
+		this.scheduleLiveContextRefresh(conversation);
 		// The echo confirms delivery — remove the tracking entry.
 		const index = state.inflightSteers.indexOf(content);
 		if (index >= 0) {
@@ -5607,6 +5657,42 @@ export class VibeAIChatPane extends ViewPane {
 		const bubble = DOM.append(row, $('.vibe-ai-steered-bubble'));
 		bubble.textContent = content;
 		// The user's own message — jump to the bottom (renderUserTurn parity).
+		this.scrollBottom(conversation, true);
+	}
+
+	/**
+	 * Phase 249: the framework's stop gate detected unfinished work at the
+	 * model's natural stop (no tool calls — 無完成工具派，Cursor stop-hook
+	 * followup parity) and injected a backend-internal continuation seed —
+	 * the turn keeps running. The note joins the Working timeline (or the
+	 * active plan step's group), reusing the steered-note look (a system
+	 * annotation, not a dispatched user turn): no history push, no steer
+	 * bookkeeping — the seed never belonged to the user.
+	 */
+	private handleAutoContinue(conversation: VibeAIConversation, data: IVibeAIStreamData): void {
+		const state = conversation.stream;
+		const detail = data.autoContinue;
+		if (!state || !state.currentAssistantRow || !detail) {
+			return;
+		}
+		// The same shell bootstrap as handleSteered — the note lands in the
+		// Working timeline; the loop reopens tool runs right after.
+		if (state.lastBlockKind !== 'tools') {
+			this.ensureWorkShell(conversation);
+			this.closeRunsBefore(conversation, 'tools');
+			this.openToolsRun(conversation);
+			state.lastBlockKind = 'tools';
+		}
+		state.workAnyTool = true;
+		const row = DOM.append(this.planActivityRoot(state) ?? state.currentAssistantRow, $('.vibe-ai-turn-steered'));
+		const meta = DOM.append(row, $('.vibe-ai-steered-meta'));
+		const icon = DOM.append(meta, $('span.codicon.codicon-refresh.vibe-ai-steered-icon'));
+		icon.setAttribute('aria-hidden', 'true');
+		const label = DOM.append(meta, $('span'));
+		label.textContent = localize('vibeAIChat.autoContinueLabel', "Auto-continue ({0}/{1})", detail.count, detail.max);
+		const bubble = DOM.append(row, $('.vibe-ai-steered-bubble'));
+		bubble.textContent = detail.detail
+			|| localize('vibeAIChat.autoContinueGeneric', "Unfinished work detected — continuing automatically");
 		this.scrollBottom(conversation, true);
 	}
 
@@ -5865,6 +5951,16 @@ export class VibeAIChatPane extends ViewPane {
 				"Agent looping detected — stopped early after {0} of {1} tool rounds to avoid wasting budget",
 				detail.rounds,
 				detail.budget ?? detail.rounds
+			);
+		} else if (detail?.reason === 'auto_continue') {
+			// Phase 249: the stop gate's auto-continue budget/stall guard
+			// ran out — the turn ends honestly with possible unfinished
+			// work; the Continue chip stays the manual rescue path.
+			label.textContent = localize(
+				'vibeAIChat.limitReachedAutoContinue',
+				"Auto-continue limit reached ({0}/{1}) — the task may be incomplete",
+				detail.count ?? 0,
+				detail.max ?? 0
 			);
 		} else if (detail?.budget) {
 			label.textContent = localize(
@@ -7063,8 +7159,11 @@ export class VibeAIChatPane extends ViewPane {
 	private enhancePaneFileChips(el: HTMLElement): void {
 		enhanceFileChips(el, {
 			fileService: this.fileService,
-			resolveRoot: () => this.workspaceContextService.getWorkspace().folders[0]?.uri.fsPath,
-			onOpen: fsPath => { void this.commandService.executeCommand('vscode.open', URI.file(fsPath)); },
+			// Phase 255: every workspace root tries — multi-root workspaces
+			// must not depend on which folder is first. Media/archive evidence
+			// routes to the OS / Explorer; the rest opens in the editor area.
+			resolveRoots: () => this.workspaceContextService.getWorkspace().folders.map(f => f.uri.fsPath),
+			onOpen: fsPath => openChipFileSmart(this.commandService, this.openerService, fsPath),
 			onMissing: (_fsPath, display) => {
 				this.notificationService.warn(localize('vibeAIChat.fileChipMissing', "{0} no longer exists on disk — it was deleted or removed by a rollback.", display));
 			},
@@ -9122,6 +9221,11 @@ export class VibeAIChatPane extends ViewPane {
 			active.mode = mode;
 		}
 		this.updateModeLabel();
+		// Phase 248: the mode changes what the next turn actually sends
+		// (Ask's read-only subset / Plan's whitelist vs the agent set) —
+		// the estimate follows the pick instead of waiting for the next
+		// natural refresh.
+		void this.refreshContextUsage();
 		// Phase 48: a mode pick from the edit box's dropdown keeps the
 		// edit open and returns focus to its textarea (typing continues).
 		// Phase 50: deferred so the menu's own focus restore (back to the
@@ -9238,6 +9342,12 @@ export class VibeAIChatPane extends ViewPane {
 			refresh: () => {
 				this.renderChips();
 				this.updateInputActions();
+				// Phase 248: pending attachments are part of what the next
+				// request carries (context.files) — the ring follows the
+				// chips as they land or are removed (edit-box sinks skip
+				// this: their per-message set only matters at re-dispatch,
+				// which refreshes then).
+				void this.refreshContextUsage();
 			},
 		};
 	}
@@ -9567,16 +9677,31 @@ export class VibeAIChatPane extends ViewPane {
 		const history = isActive ? this.history : conversation.history;
 		const attachedFiles = isActive ? this.attachedFiles : conversation.attachedFiles;
 		const contextLimit = isActive ? this.contextLimit : conversation.contextLimit;
+		// Phase 248: the composer mode is per conversation too — a background
+		// tab's refresh used to read the ACTIVE tab's mode here, estimating
+		// the wrong static context (Ask's read-only subset vs the agent set).
+		const mode = isActive ? this.mode : conversation.mode;
+		// Phase 248: a running turn's live activity rides the estimate —
+		// the narration and tool results already streamed are on the wire
+		// (the backend's next round pays them), so the ring tracks the
+		// turn while it works instead of jumping only at settle.
+		const stream = conversation.stream;
+		const liveTurn = stream
+			? {
+				text: stream.turn.text,
+				tools: [...stream.toolCards.values()].map(card => card.snapshot()),
+			}
+			: undefined;
 		try {
 			const usage = await this.vibeAIService.contextUsage({
 				messages: [...history],
 				...(attachedFiles.length > 0 ? { context: { files: attachedFiles } } : {}),
 				contextLimit,
 				// Ask mode estimates against the read-only tool subset.
-				readonly: this.mode !== 'agent',
+				readonly: mode !== 'agent',
 				// Phase 240: plan mode estimates against PLAN prompt + the
 				// plan whitelist (ask_questions included) — estimate = sent.
-				planMode: this.mode === 'plan',
+				planMode: mode === 'plan',
 				// Phase 116: Side Chat — the `parent` row counts the same
 				// capped reference the turns actually send (estimate ≡
 				// sent). Main tabs omit it.
@@ -9589,7 +9714,10 @@ export class VibeAIChatPane extends ViewPane {
 				// Phase 157: the `plan` row counts the same agreed plan file
 				// the agent turns actually send (estimate = sent). Ask mode
 				// and plan-less conversations omit it.
-				...(this.mode === 'agent' && conversation.planPath ? { planFile: conversation.planPath } : {}),
+				...(mode === 'agent' && conversation.planPath ? { planFile: conversation.planPath } : {}),
+				// Phase 248: the running turn's live tool activity (omitted
+				// when nothing is streaming or the turn has no activity yet).
+				...(liveTurn && (liveTurn.text || liveTurn.tools?.length) ? { liveTurn } : {}),
 				// Phase 147: estimate against the opened folder (rules /
 				// skills / MCP are workspace-scoped) — estimate ≡ sent.
 				// Phase 177: conversation-bound folder wins (Agent Window).
@@ -9607,6 +9735,29 @@ export class VibeAIChatPane extends ViewPane {
 		} catch (err) {
 			this.logService.debug('[VibeAI] context usage request failed', err);
 		}
+	}
+
+	/**
+	 * Phase 248: the ring tracks a RUNNING turn in real time — stream
+	 * events that grow what the next LLM round pays (narration deltas,
+	 * tool results, closed rounds) schedule ONE throttled refresh per
+	 * window instead of hitting the estimate endpoint per event. The
+	 * refresh targets the conversation that owns the stream (a background
+	 * tab's activity updates its stored usage; the ring re-renders on
+	 * activation, whose hook refreshes anyway).
+	 */
+	private scheduleLiveContextRefresh(conversation: VibeAIConversation): void {
+		if (this.liveContextRefreshQueued || this._store.isDisposed) {
+			return;
+		}
+		this.liveContextRefreshQueued = true;
+		setTimeout(() => {
+			this.liveContextRefreshQueued = false;
+			if (this._store.isDisposed) {
+				return;
+			}
+			void this.refreshContextUsage(conversation);
+		}, LIVE_CONTEXT_REFRESH_MS);
 	}
 
 	// ==================== Phase 78: `/` skill completion (Cursor parity) ====================
@@ -11240,6 +11391,11 @@ export class VibeAIChatPane extends ViewPane {
 			this.languageService,
 			change => this.restoreChange(change),
 			(path, line, endLine) => this.openFile(path, line, endLine),
+			// Phase 251: same embedded diff editor as the live path — restored
+			// history renders isomorphic (built lazily when the card becomes
+			// visible, so a folded Worked shell costs no widgets).
+			(container, original, updated, filePath, firstChangeLine, onBuildFailure) =>
+				this.instantiationService.createInstance(VibeAIEmbeddedDiff, container, original, updated, filePath, firstChangeLine, onBuildFailure),
 		);
 		conversation.turnRecordDisposables.add(card);
 		if (tool.streamText) {

@@ -15,6 +15,7 @@ import { tokenizeToString } from '../../../../editor/common/languages/textToHtml
 import { IVibeAICodeChange, IVibeAIReadRange } from '../../../../platform/vibeAI/common/vibeAI.js';
 import { IVibeAIPersistedToolCall } from './vibeAIChatSessionStore.js';
 import { IVibeAIDiffLine, computeDiffLines, computeDiffStats } from './vibeAIDiff.js';
+import { VibeAIEmbeddedDiffFactory } from './vibeAIEmbeddedDiff.js';
 import './media/vibeAIChat.css';
 
 const $ = DOM.$;
@@ -289,7 +290,11 @@ export class VibeAIToolCard {
 		args: unknown,
 		private readonly languageService: ILanguageService,
 		private readonly onRestore: (change: IVibeAICodeChange) => Promise<boolean>,
-		onOpenFile: ((path: string, line?: number, endLine?: number) => void) | undefined
+		onOpenFile: ((path: string, line?: number, endLine?: number) => void) | undefined,
+		// Phase 251: the diff preview renders in an embedded DiffEditorWidget
+		// when the pane provides the factory (real editor colors); absent or
+		// oversized diffs fall back to the legacy tokenized-HTML rows.
+		private readonly embeddedDiffFactory?: VibeAIEmbeddedDiffFactory,
 	) {
 		this.name = name;
 		this.args = args;
@@ -644,29 +649,95 @@ export class VibeAIToolCard {
 
 			// --- inline red/green preview (collapsed to 5 rows, Cursor-style;
 			//     the toggle grows it to 24 scrollable rows)
-			const body = DOM.append(this.diffSection, $('div.vibe-ai-tool-card-diff-body'));
-			const { changed, firstChangeRow, rows } = renderDiffBody(body, change.oldContent ?? '', change.newContent);
-			// Row count (diff rows + "⋯" separators), not just the changed
-			// count — a context-heavy small edit still clips at the cap.
-			if (body.childElementCount > COLLAPSED_DIFF_LINES) {
-				this.appendExpandToggle(body, changed, firstChangeRow?.span);
-			}
-			// Phase 87: theme-matched token colors fill in once the file's
-			// language grammar is loaded — rows render plain text until then,
-			// and the collapsed preview already starts at the changed region.
-			// Phase 94: the language is resolved per retry attempt — during
-			// the startup-restore window the registry has no language yet,
-			// so a one-shot resolution here would give up immediately.
-			void fillDiffTokenColors(
-				rows,
-				change.oldContent ?? '',
-				change.newContent,
-				this.languageService,
-				() => this.languageGuessFor(change.filePath)
-			);
+			this.renderDiffPreview(change, change.oldContent ?? '', change.newContent, stats);
 		}
 
 		this.diffSection.style.display = 'block';
+	}
+
+	/**
+	 * Phase 251: the preview renders in an embedded DiffEditorWidget (the
+	 * built-in chat's code-edit widget) when the pane provided the factory —
+	 * real editor colors at the editor's font, the theme's own diff colors,
+	 * and built-in folding of unchanged regions. Oversized diffs or a failed
+	 * async build fall back to the legacy tokenized-HTML rows.
+	 */
+	private renderDiffPreview(change: IVibeAICodeChange, original: string, updated: string, stats: { additions: number; deletions: number }): void {
+		const body = DOM.append(this.diffSection, $('div.vibe-ai-tool-card-diff-body'));
+		if (this.embeddedDiffFactory) {
+			try {
+				const handle = this.embeddedDiffFactory(
+					body,
+					original,
+					updated,
+					change.filePath,
+					this.firstChangeLine,
+					() => this.fallbackToLegacyDiff(body, change, original, updated),
+				);
+				if (handle.renderable) {
+					this.disposables.add(handle);
+					body.classList.add('vibe-ai-embedded');
+					// Row count, not just the changed count — a context-heavy
+					// small edit still clips at the collapsed cap.
+					if (handle.lineCount > COLLAPSED_DIFF_LINES) {
+						this.appendEmbeddedExpandToggle(handle, stats.additions + stats.deletions);
+					}
+					return;
+				}
+				handle.dispose();
+			} catch {
+				// fall through to the legacy rows
+			}
+		}
+		this.appendLegacyDiffRows(body, change, original, updated);
+	}
+
+	/** The pre-248 preview: hand-tokenized HTML rows with red/green washes. */
+	private appendLegacyDiffRows(body: HTMLElement, change: IVibeAICodeChange, original: string, updated: string): void {
+		const { changed, firstChangeRow, rows } = renderDiffBody(body, original, updated);
+		// Row count (diff rows + "⋯" separators), not just the changed
+		// count — a context-heavy small edit still clips at the cap.
+		if (body.childElementCount > COLLAPSED_DIFF_LINES) {
+			this.appendExpandToggle(body, changed, firstChangeRow?.span);
+		}
+		// Phase 87: theme-matched token colors fill in once the file's
+		// language grammar is loaded — rows render plain text until then,
+		// and the collapsed preview already starts at the changed region.
+		// Phase 94: the language is resolved per retry attempt — during
+		// the startup-restore window the registry has no language yet,
+		// so a one-shot resolution here would give up immediately.
+		void fillDiffTokenColors(
+			rows,
+			original,
+			updated,
+			this.languageService,
+			() => this.languageGuessFor(change.filePath)
+		);
+	}
+
+	/** A failed embedded build hands the (cleared) body back to the legacy rows. */
+	private fallbackToLegacyDiff(body: HTMLElement, change: IVibeAICodeChange, original: string, updated: string): void {
+		if (this.disposables.isDisposed) {
+			return;
+		}
+		body.classList.remove('vibe-ai-embedded');
+		DOM.clearNode(body);
+		body.style.maxHeight = '';
+		this.appendLegacyDiffRows(body, change, original, updated);
+	}
+
+	/** Phase 251: the expand toggle drives the embedded widget's row budget. */
+	private appendEmbeddedExpandToggle(handle: { setExpanded(expanded: boolean): void }, changed: number): void {
+		const toggle = DOM.append(this.diffSection, $('button.vibe-ai-tool-card-expand')) as HTMLButtonElement;
+		toggle.textContent = localize('vibeAIChat.tool.expand', "Show all {0} changed lines", changed);
+		let expanded = false;
+		this.disposables.add(DOM.addDisposableListener(toggle, DOM.EventType.CLICK, () => {
+			expanded = !expanded;
+			handle.setExpanded(expanded);
+			toggle.textContent = expanded
+				? localize('vibeAIChat.tool.collapse', "Collapse")
+				: localize('vibeAIChat.tool.expand', "Show all {0} changed lines", changed);
+		}));
 	}
 
 	/**

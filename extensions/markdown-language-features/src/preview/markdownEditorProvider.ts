@@ -29,6 +29,26 @@ import { MarkdownEditorLanguageFeatures } from './markdownEditorLanguageFeatures
 import { MarkdownEditorImagePaste } from './markdownEditorImagePaste';
 import { MarkdownEditorNavigation } from './markdownEditorNavigation';
 
+// vibeAI Phase 254: keep the rendered look while the pencil unlocks editing —
+// markdown syntax markers never paint (their layout is carried by the glue
+// spacers, verified offset-identical with markers hidden). Fences and
+// checkboxes keep the component's own space-reserving treatment.
+// vibeAI Phase 256: the in-content "Preview | Markdown" pill is GONE — the
+// toggle moved into the breadcrumb bar's right-aligned actions slot
+// (MenuId.BreadcrumbsTitle, workbench side), so the webview no longer
+// duplicates it next to the lock/pencil control.
+// vibeAI Phase 257: body text follows the theme's `editor.foreground`, which
+// reads gray (#BBBEBF/#CCC) against the dark preview background — Cursor's
+// preview body text is white. The workbench exports every theme token as a
+// `--vscode-*` custom property on the webview's <html>, so one scoped
+// override on `body.vscode-dark` (set by the core per theme type) brightens
+// the whole rendered document without touching light themes or real editors.
+const vibeInjectedCss = `
+.md-marker { display: none !important; }
+.md-marker-checkbox, .md-marker-openFence, .md-marker-closeFence { display: inline !important; }
+body.vscode-dark { --vscode-editor-foreground: #ffffff; }
+`;
+
 export interface MarkdownCodeBlockEditorApiV1 {
 	getProvider(providerId: string): MarkdownCodeBlockEditorProviderApi | undefined;
 }
@@ -1189,6 +1209,7 @@ export class MarkdownEditorProvider extends Disposable implements vscode.CustomT
 	<meta id="vscode-markdown-editor-initial-state" content="${initialState}" />
 	<base href="${baseUri}" />
 	<link rel="stylesheet" href="${styleUri}" />
+	<style>${vibeInjectedCss}</style>
 	<title>Markdown Editor</title>
 </head>
 <body>${body}
@@ -1199,7 +1220,9 @@ export class MarkdownEditorProvider extends Disposable implements vscode.CustomT
 
 	#getEditorConfiguration(resource: vscode.Uri): MarkdownEditorConfiguration {
 		return {
-			highlightActiveBlock: vscode.workspace.getConfiguration('markdown.editor', resource).get<boolean>('highlightActiveBlock', true),
+			// Default off (vibeAI Phase 254): the focused block must keep the
+			// rendered look — no source-style background on the active block.
+			highlightActiveBlock: vscode.workspace.getConfiguration('markdown.editor', resource).get<boolean>('highlightActiveBlock', false),
 			renderWhitespace: vscode.workspace.getConfiguration('markdown.editor', resource).get<boolean>('renderWhitespace', false),
 		};
 	}

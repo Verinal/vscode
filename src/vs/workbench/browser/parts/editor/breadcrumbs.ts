@@ -133,7 +133,10 @@ Registry.as<IConfigurationRegistry>(Extensions.Configuration).registerConfigurat
 		'breadcrumbs.filePath': {
 			description: localize('filepath', "Controls whether and how file paths are shown in the breadcrumbs view."),
 			type: 'string',
-			default: 'on',
+			// Cursor parity (fork, Phase 252): the breadcrumb row shows the bare
+			// file name ("ⓘ README.md" style) — the full folder path chain is
+			// noise in an agent-first fork. Symbols still append when present.
+			default: 'last',
 			enum: ['on', 'off', 'last'],
 			enumDescriptions: [
 				localize('filepath.on', "Show the file path in the breadcrumbs view."),

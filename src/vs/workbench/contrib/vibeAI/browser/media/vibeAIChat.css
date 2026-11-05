@@ -2341,6 +2341,24 @@
 	user-select: none;
 }
 
+/* ==================== Phase 251: embedded diff editor (tool cards) ==================== */
+
+/* The card's diff preview renders in a real DiffEditorWidget (the built-in
+   chat's code-edit widget): theme token colors at the editor's font size,
+   the theme's own diff colors for the red/green rows, and built-in folding
+   of unchanged regions. The host carries the height — the widget's content
+   height capped to the collapsed/expanded row budget — so the legacy row
+   cap/max-height does not apply while the embedded path is active. */
+.vibe-ai-tool-card-diff-body.vibe-ai-embedded {
+	max-height: none;
+	overflow: hidden;
+}
+
+.vibe-ai-embedded-diff-host {
+	width: 100%;
+	overflow: hidden;
+}
+
 /* ==================== Phase 57: inline mutating-tool cards ==================== */
 
 /* Writes (write_file / delete_file) and terminal commands render inline in

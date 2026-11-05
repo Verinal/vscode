@@ -43,7 +43,8 @@ import { VibeAIChatSessionStore, IVibeAIChatHandoff, IVibeAIChatSession, VIBE_AI
 import { VibeAIChatPane, VIBE_AI_SHELL_LANGUAGE_ALIASES, readImageAsDataUrl } from './vibeAIChatPane.js';
 import { VibeAISettingsEditorInput } from './vibeAISettingsEditor.js';
 import { VibeAIModelStore, VIBE_AI_NO_MODEL_MESSAGE } from './vibeAIModelStore.js';
-import { enhanceFileChips } from './vibeAIFileChips.js';
+import { enhanceFileChips, FILE_CHIP_MEDIA_EXTENSIONS, FILE_CHIP_ARCHIVE_EXTENSIONS, openChipFileSmart } from './vibeAIFileChips.js';
+import { IOpenerService } from '../../../../platform/opener/common/opener.js';
 import { ITerminalService, ITerminalInstance } from '../../terminal/browser/terminal.js';
 import './media/vibeAIAgentsHub.css';
 
@@ -573,6 +574,7 @@ export class VibeAIAgentsHubPane extends EditorPane {
 		@ILogService private readonly logService: ILogService,
 		@IInstantiationService private readonly instantiationService: IInstantiationService,
 		@ITerminalService private readonly terminalService: ITerminalService,
+		@IOpenerService private readonly openerService: IOpenerService,
 	) {
 		super(VibeAIAgentsHubPane.ID, group, telemetryService, themeService, storageService);
 		this.sessionStore = new VibeAIChatSessionStore(storageService, contextService);
@@ -3486,8 +3488,22 @@ export class VibeAIAgentsHubPane extends EditorPane {
 	private enhanceHubFileChips(el: HTMLElement): void {
 		enhanceFileChips(el, {
 			fileService: this.fileService,
-			resolveRoot: () => this.resolveProjectRoot() ?? this.contextService.getWorkspace().folders[0]?.uri.fsPath,
-			onOpen: (fsPath, display) => this.openHubFilePane(fsPath, display),
+			// Phase 255: session project first, then every workspace root —
+			// roaming sessions keep resolving after a workspace switch.
+			resolveRoots: () => [this.resolveProjectRoot(), ...this.contextService.getWorkspace().folders.map(f => f.uri.fsPath)],
+			onOpen: (fsPath, display) => {
+				// Phase 255: media/archive evidence never fits the file tab
+				// (binary note + two-step open) — recordings go to the OS,
+				// archives reveal in the Explorer. Images skip the binary-note
+				// tab too: the IDE's built-in preview shows them directly.
+				const ext = fsPath.slice(fsPath.lastIndexOf('.') + 1).toLowerCase();
+				if (FILE_CHIP_MEDIA_EXTENSIONS.has(ext) || FILE_CHIP_ARCHIVE_EXTENSIONS.has(ext)
+					|| /\.(png|jpe?g|gif|bmp|ico|webp|svg)$/i.test(display)) {
+					openChipFileSmart(this.commandService, this.openerService, fsPath);
+					return;
+				}
+				this.openHubFilePane(fsPath, display);
+			},
 			onMissing: (_fsPath, display) => {
 				this.notificationService.warn(localize('vibeAIAgentsHub.fileChipMissing', "{0} no longer exists on disk — it was deleted or removed by a rollback.", display));
 			},

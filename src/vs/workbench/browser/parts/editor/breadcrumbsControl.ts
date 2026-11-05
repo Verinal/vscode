@@ -28,6 +28,7 @@ import { OutlineElement } from '../../../../editor/contrib/documentSymbols/brows
 import { localize, localize2 } from '../../../../nls.js';
 import { Categories } from '../../../../platform/action/common/actionCommonCategories.js';
 import { Action2, MenuId, registerAction2 } from '../../../../platform/actions/common/actions.js';
+import { MenuWorkbenchToolBar } from '../../../../platform/actions/browser/toolbar.js';
 import { ICommandService } from '../../../../platform/commands/common/commands.js';
 import { IConfigurationService } from '../../../../platform/configuration/common/configuration.js';
 import { IClipboardService } from '../../../../platform/clipboard/common/clipboardService.js';
@@ -276,6 +277,14 @@ export class BreadcrumbsControl {
 	private _editorTypeNode: HTMLDivElement | undefined;
 	private _editorTypeLabel: HTMLSpanElement | undefined;
 	private _editorTypeHover: IManagedHover | undefined;
+	// Vulcan fork (Phase 256): right-aligned actions slot in the breadcrumb bar —
+	// Cursor renders the Markdown "Preview | Markdown" mode switch in this row.
+	// Menu-driven (MenuId.BreadcrumbsTitle) so any contribution can place actions
+	// here; the toolbar toggles the `has-no-actions` class when the when-clauses
+	// hide every item, which the CSS turns into display:none. Only the dedicated
+	// breadcrumb bar below the tabs hosts it (same gate as the editor type
+	// dropdown) — the inline single-tab variant has no room for it.
+	private _actionsNode: HTMLDivElement | undefined;
 	private _lastLayoutDimension: dom.Dimension | undefined;
 
 	private readonly _disposables = new DisposableStore();
@@ -340,6 +349,19 @@ export class BreadcrumbsControl {
 		this._widget.onDidChangeFocus(this._updateCkBreadcrumbsActive, this, this._disposables);
 
 		if (this._options.showEditorTypePicker) {
+			const actionsNode = document.createElement('div');
+			actionsNode.classList.add('breadcrumbs-actions');
+			dom.append(this.domNode, actionsNode);
+			this._disposables.add(this._instantiationService.createInstance(
+				MenuWorkbenchToolBar,
+				actionsNode,
+				MenuId.BreadcrumbsTitle,
+				{ menuOptions: { renderShortTitle: true } },
+			));
+			this._actionsNode = actionsNode;
+		}
+
+		if (this._options.showEditorTypePicker) {
 			this._disposables.add(this._cfShowEditorType.onDidChange(() => this._updateEditorTypeControl()));
 			this._disposables.add(_configurationService.onDidChangeConfiguration(event => {
 				if (event.affectsConfiguration(hiddenEditorTypesSettingId)) {
@@ -391,6 +413,12 @@ export class BreadcrumbsControl {
 		if (dim && this._editorTypeNode) {
 			const editorTypeWidth = this._editorTypeNode.offsetWidth;
 			dim = new dom.Dimension(Math.max(0, dim.width - editorTypeWidth), dim.height);
+		}
+		// Same for the actions slot (Phase 256) — offsetWidth is 0 while it is
+		// hidden via `has-no-actions`.
+		if (dim && this._actionsNode) {
+			const actionsWidth = this._actionsNode.offsetWidth;
+			dim = new dom.Dimension(Math.max(0, dim.width - actionsWidth), dim.height);
 		}
 		this._widget.layout(dim);
 	}

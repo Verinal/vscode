@@ -278,6 +278,11 @@ export class VibeAIEmbeddedDiff extends Disposable {
 			};
 			const options: IDiffEditorConstructionOptions = {
 				...getSimpleEditorOptions(this.configurationService),
+				// Phase 260: the run-command output preview renders 11px text on
+				// a 16px row — the diff preview's real-editor font default (14px)
+				// read a size up next to it. Pin both so the two card bodies match.
+				fontSize: 11,
+				lineHeight: 16,
 				wordWrap: 'off',
 				lineNumbers: 'on',
 				selectOnLineNumbers: true,

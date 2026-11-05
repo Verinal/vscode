@@ -181,6 +181,15 @@ class Editor extends Disposable {
 		this.model.sourceText.set(new StringValue(initialState.content), undefined);
 		this.model.readonlyMode.set(initialState.readonly, undefined);
 		this.model.renderWhitespace.set(initialState.renderWhitespace, undefined);
+		// Vulcan fork (Phase 258): always-rendered editing, Cursor parity. The
+		// component default ('selection') flips the caret's block into its source
+		// form — the theme drops the table's HTML borders and paints the raw
+		// `|` pipes as the outline, reveals the `| --- |` delimiter row and ↵ gap
+		// glyphs — which reads as "the preview turned back into markdown" on
+		// every click. 'none' keeps every block in its rendered form while the
+		// caret edits it (marker spans stay unpainted via the injected CSS, as
+		// since Phase 254, so layout offsets already collapse through them).
+		this.model.renderMarkupText.set('none', undefined);
 
 		this._register(this.#connection.register(markdownEditorRenderer, {
 			readClipboardMedia: (request, _context, { signal }) => {

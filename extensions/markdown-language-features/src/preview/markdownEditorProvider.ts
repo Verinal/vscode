@@ -281,6 +281,8 @@ export class MarkdownEditorProvider extends Disposable implements vscode.CustomT
 	 * Memento key under which the last chosen edit/read-only mode is remembered.
 	 * The value is a single global default shared by every Markdown editor, so
 	 * flipping the lock in one editor becomes the initial mode for the next.
+	 * Unset resolves to editable (Phase 258, Cursor parity): clicking the
+	 * rendered document places the caret and edits in place right away.
 	 */
 	static readonly #readonlyStateKey = 'markdown.editor.readonly';
 
@@ -406,7 +408,7 @@ export class MarkdownEditorProvider extends Disposable implements vscode.CustomT
 		let expectedWebviewContent: { readonly content: string; readonly epoch: number } | undefined;
 		let webviewText = document.getText();
 		let webviewReady = false;
-		let readonly = this.#globalState.get(MarkdownEditorProvider.#readonlyStateKey, true);
+		let readonly = this.#globalState.get(MarkdownEditorProvider.#readonlyStateKey, false);
 		let codeBlockEditorProviders: readonly CodeBlockEditorProviderDefinition[] | undefined;
 		let contributionUpdate = 0;
 		const resolveCancellation = new vscode.CancellationTokenSource();
@@ -1184,7 +1186,7 @@ export class MarkdownEditorProvider extends Disposable implements vscode.CustomT
 			content: document.getText(),
 			documentVersion: document.version,
 			editEpoch,
-			readonly: this.#globalState.get(MarkdownEditorProvider.#readonlyStateKey, true),
+			readonly: this.#globalState.get(MarkdownEditorProvider.#readonlyStateKey, false),
 			richLinksEnabled: vscode.workspace.getConfiguration('markdown').get<boolean>('experimental.richLinks.enabled', true),
 			linkPresentationRules: vscode.window.linkPresentationRules.map(rule => ({
 				id: rule.id,
